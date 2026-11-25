@@ -2139,20 +2139,21 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       />
 
       {/* 顶部晶莹毛玻璃胶囊栏 */}
-      <header className="top-glass-nav">
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+      <header className="top-glass-nav chat-top-nav">
+        <div className="nav-left-group">
           <button
             type="button"
-            className="btn btn-ghost btn-icon mobile-only"
+            className="btn btn-glass btn-icon mobile-only nav-menu-btn"
             onClick={() => setSidebarOpen((v) => !v)}
+            title="打开房间面板与更多设置"
           >
-            <PanelLeft size={18} />
+            <PanelLeft size={16} />
+            {peerList.length > 0 && <span className="nav-peer-badge">{peerList.length + 1}</span>}
           </button>
 
           <button
             type="button"
-            className="btn btn-glass btn-sm mono"
-            style={{ fontWeight: 800, fontSize: 14, height: 34 }}
+            className="btn btn-glass btn-sm mono nav-room-btn"
             onClick={async () => {
               if (await copyTextToClipboard(roomCode)) {
                 onToast(`已复制房间口令 ${roomCode}`);
@@ -2161,12 +2162,13 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             title="点击复制房间口令"
           >
             {roomInfo?.mode === 'fixed' ? (
-              <Pin size={14} style={{ color: 'var(--accent)' }} />
+              <Pin size={13} style={{ color: 'var(--accent)' }} />
             ) : (
-              <Flame size={14} style={{ color: 'var(--accent)' }} />
+              <Flame size={13} style={{ color: 'var(--accent)' }} />
             )}
             <span>{roomCode}</span>
-            <Copy size={12} style={{ color: 'var(--text-muted)' }} />
+            <span className={`status-dot ${linkStatusPill.dot} mobile-only`} />
+            <Copy size={12} className="hide-mobile" style={{ color: 'var(--text-muted)' }} />
           </button>
 
           <span className={`pill ${linkStatusPill.cls} hide-mobile`}>
@@ -2175,7 +2177,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           </span>
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <div className="nav-right-group">
           <div className="hide-mobile">
             <PalettePicker theme={theme} onSelect={onSelectTheme} />
           </div>
@@ -2216,7 +2218,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
 
           <button
             type="button"
-            className={`btn btn-sm ${localScreenStream ? 'mic-live-btn' : 'btn-glass'}`}
+            className={`btn btn-sm hide-mobile ${localScreenStream ? 'mic-live-btn' : 'btn-glass'}`}
             onClick={() => void handleToggleScreenShare()}
             title={localScreenStream ? '点击停止实时屏幕共享' : '一键开启实时屏幕共享投屏'}
           >
@@ -2226,7 +2228,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
 
           <button
             type="button"
-            className={`btn btn-sm ${showSearchBar ? 'btn-jelly' : 'btn-glass'}`}
+            className={`btn btn-sm hide-mobile ${showSearchBar ? 'btn-jelly' : 'btn-glass'}`}
             onClick={() => setShowSearchBar((v) => !v)}
             title="搜索或按图片/文件筛选记录 (Ctrl+F)"
           >
@@ -2234,11 +2236,11 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             <span className="hide-mobile">查找</span>
           </button>
 
-          {/* 附件大小上限 & 传输设置 Popover */}
+          {/* 附件大小上限 & 传输设置 Popover（移动端入口收敛进侧边抽屉，弹窗自动居中展示） */}
           <div className="popover-anchor">
             <button
               type="button"
-              className={`btn btn-sm ${attachmentPopoverOpen ? 'btn-jelly' : 'btn-glass'}`}
+              className={`btn btn-sm hide-mobile ${attachmentPopoverOpen ? 'btn-jelly' : 'btn-glass'}`}
               onClick={() => {
                 setAttachmentPopoverOpen((v) => !v);
                 setCachePopoverOpen(false);
@@ -2379,7 +2381,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           <div className="popover-anchor">
             <button
               type="button"
-              className="btn btn-glass btn-sm"
+              className="btn btn-glass btn-sm hide-mobile"
               onClick={() => {
                 setCachePopoverOpen((v) => !v);
                 setAttachmentPopoverOpen(false);
@@ -2464,7 +2466,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
 
           <button
             type="button"
-            className="btn btn-danger-soft btn-sm"
+            className="btn btn-danger-soft btn-sm hide-mobile"
             onClick={() => setConfirmClearOpen(true)}
             title="一键立即清空服务器缓存聊天记录"
           >
@@ -2476,6 +2478,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             type="button"
             className="btn btn-glass btn-sm"
             onClick={() => setShowInvite(true)}
+            title="邀请二维码与链接"
           >
             <QrCode size={14} />
             <span className="hide-mobile">邀请</span>
@@ -2484,7 +2487,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           {roomInfo?.mode === 'ephemeral' && (
             <button
               type="button"
-              className="btn btn-danger btn-sm"
+              className="btn btn-danger btn-sm hide-mobile"
               onClick={() => setConfirmDestroyOpen(true)}
               title="结束对话并立即销毁此房间口令"
             >
@@ -2493,7 +2496,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             </button>
           )}
 
-          <button type="button" className="btn btn-glass btn-sm" onClick={handleLeave}>
+          <button type="button" className="btn btn-glass btn-sm" onClick={handleLeave} title="离开房间">
             <LogOut size={14} />
             <span className="hide-mobile">离开</span>
           </button>
@@ -2503,6 +2506,84 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       {/* 主体双栏毛玻璃 Bento */}
       <div className="chat-layout">
         <aside className={`chat-side-bento ${sidebarOpen ? 'open' : ''}`}>
+          {/* 移动端专属顶部房间快捷面板（把查找、保鲜期、秒清、销毁、主题色收纳整齐） */}
+          <div className="mobile-drawer-tools">
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
+              <span className={`pill ${linkStatusPill.cls}`} style={{ height: 24, fontSize: 11.5 }}>
+                <span className={`status-dot ${linkStatusPill.dot}`} />
+                {linkStatusPill.text}
+              </span>
+              <button
+                type="button"
+                className="btn btn-ghost btn-icon"
+                style={{ width: 28, height: 28 }}
+                onClick={() => setSidebarOpen(false)}
+              >
+                <X size={15} />
+              </button>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+              <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-sub)' }}>主题色</span>
+              <PalettePicker theme={theme} onSelect={onSelectTheme} />
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+              <button
+                type="button"
+                className="btn btn-glass btn-sm"
+                onClick={() => {
+                  setSidebarOpen(false);
+                  setShowSearchBar((v) => !v);
+                }}
+              >
+                <Search size={12} /> 查找记录
+              </button>
+              <button
+                type="button"
+                className="btn btn-glass btn-sm"
+                onClick={() => {
+                  setSidebarOpen(false);
+                  setAttachmentPopoverOpen(false);
+                  setCachePopoverOpen(true);
+                }}
+              >
+                <Clock size={12} /> {cacheShortLabel}
+              </button>
+              <button
+                type="button"
+                className="btn btn-danger-soft btn-sm"
+                onClick={() => {
+                  setSidebarOpen(false);
+                  setConfirmClearOpen(true);
+                }}
+              >
+                <Trash2 size={12} /> 秒清缓存
+              </button>
+              {roomInfo?.mode === 'ephemeral' ? (
+                <button
+                  type="button"
+                  className="btn btn-danger btn-sm"
+                  onClick={() => {
+                    setSidebarOpen(false);
+                    setConfirmDestroyOpen(true);
+                  }}
+                >
+                  <Flame size={12} /> 销毁房间
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="btn btn-glass btn-sm"
+                  onClick={() => {
+                    setSidebarOpen(false);
+                    handleExportChatLog();
+                  }}
+                >
+                  <FileDown size={12} /> 导出记录
+                </button>
+              )}
+            </div>
+          </div>
+
           {/* 秘密基地成长火花卡 */}
           <div className="base-stats-card">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -3082,10 +3163,10 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                 title="开启后发出的消息将覆盖流光刮刮卡涂层，点击才揭晓"
               >
                 <EyeOff size={13} />
-                {secretMode ? '✨ 防窥刮刮卡密信：已开启' : '🕵️ 防窥刮刮卡密信'}
+                {secretMode ? '✨ 防窥密信：已开启' : '🕵️ 防窥密信'}
               </button>
 
-              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              <div className="vibe-fx-inner">
                 <button type="button" className="fx-chip" onClick={() => handleTriggerFunEffect('confetti')}>
                   🎉 放礼花
                 </button>
@@ -3211,30 +3292,39 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                 }}
                 placeholder={
                   pendingPaste
-                    ? '配上一句说明，按 Enter 嗖一下发出图片...'
+                    ? '配上一句说明，按 Enter 发出图片...'
                     : secretMode
-                      ? '✨ 正在编写防窥刮刮卡密信（口令/惊喜），对方刮开才可见...'
-                      : '聊点什么、拖入文件或整个文件夹，或 Ctrl+V 直接粘贴截图...'
+                      ? '✨ 输入防窥密信，对方点击刮开才可见...'
+                      : '聊点什么，或发送文件、截图...'
                 }
               />
 
+              {showEmoji && (
+                <div className="emoji-palette">
+                  {QUICK_EMOJIS.map((em) => (
+                    <button
+                      key={em}
+                      type="button"
+                      className="emoji-cell"
+                      onClick={() => {
+                        setInputText((prev) => prev + em);
+                        setShowEmoji(false);
+                      }}
+                    >
+                      {em}
+                    </button>
+                  ))}
+                </div>
+              )}
+
               <div className="composer-bottom">
-                <div style={{ display: 'flex', alignItems: 'center', gap: 3, position: 'relative', flexWrap: 'wrap' }}>
+                <div className="composer-tools-scroll">
                   <button
                     type="button"
                     className="tool-pill"
                     onClick={() => fileInputRef.current?.click()}
                   >
                     <Paperclip size={14} /> 文件
-                  </button>
-                  <button
-                    type="button"
-                    className="tool-pill"
-                    onClick={() => folderInputRef.current?.click()}
-                    disabled={zippingFolder}
-                    title="选择整个文件夹自动打包成 ZIP 后走 P2P 直传"
-                  >
-                    <FolderArchive size={14} /> {zippingFolder ? '打包中...' : '文件夹'}
                   </button>
                   <button
                     type="button"
@@ -3246,17 +3336,10 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                   <button
                     type="button"
                     className="tool-pill"
-                    onClick={() => void handleStartScreenshot()}
-                  >
-                    <Camera size={14} /> 截图
-                  </button>
-                  <button
-                    type="button"
-                    className="tool-pill"
                     onClick={handleOpenWhiteboard}
                     title="打开多人实时同屏协作白板（同步光标、笔迹与共享便签）"
                   >
-                    <Palette size={14} /> 协作白板
+                    <Palette size={14} /> 白板
                   </button>
                   <button
                     type="button"
@@ -3278,33 +3361,32 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                     type="button"
                     className="tool-pill"
                     onClick={() => setShowEmoji((v) => !v)}
+                    title="插入表情"
                   >
                     <Smile size={15} />
                   </button>
-
-                  {showEmoji && (
-                    <div className="emoji-palette">
-                      {QUICK_EMOJIS.map((em) => (
-                        <button
-                          key={em}
-                          type="button"
-                          className="emoji-cell"
-                          onClick={() => {
-                            setInputText((prev) => prev + em);
-                            setShowEmoji(false);
-                          }}
-                        >
-                          {em}
-                        </button>
-                      ))}
-                    </div>
-                  )}
+                  <button
+                    type="button"
+                    className="tool-pill"
+                    onClick={() => folderInputRef.current?.click()}
+                    disabled={zippingFolder}
+                    title="选择整个文件夹自动打包成 ZIP 后走 P2P 直传"
+                  >
+                    <FolderArchive size={14} /> {zippingFolder ? '打包中...' : '文件夹'}
+                  </button>
+                  <button
+                    type="button"
+                    className="tool-pill hide-mobile"
+                    onClick={() => void handleStartScreenshot()}
+                  >
+                    <Camera size={14} /> 截图
+                  </button>
                 </div>
 
                 <button
                   type="button"
                   className="btn btn-jelly btn-sm"
-                  style={{ height: 34, padding: '0 16px', borderRadius: 12 }}
+                  style={{ height: 34, padding: '0 15px', borderRadius: 12, flexShrink: 0 }}
                   disabled={!inputText.trim() && !pendingPaste}
                   onClick={() => {
                     if (pendingPaste) void handleSendPendingPaste();

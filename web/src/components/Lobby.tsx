@@ -247,7 +247,7 @@ export const Lobby: React.FC<LobbyProps> = ({
           </div>
           <div>
             <div className="brand-title-text">BayChat</div>
-            <div style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 600 }}>
+            <div className="brand-subtitle">
               {domainDisplay} · 闪传对讲屋
             </div>
           </div>
@@ -398,7 +398,7 @@ export const Lobby: React.FC<LobbyProps> = ({
                 )}
 
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5, fontWeight: 700, color: 'var(--text-sub)' }}>
+                  <div className="lobby-field-head">
                     <span>服务器消息保鲜期（最长 7 天）</span>
                     <span style={{ color: 'var(--accent)', fontWeight: 600 }}>
                       {retentionDays === 0
@@ -406,7 +406,7 @@ export const Lobby: React.FC<LobbyProps> = ({
                         : `最后聊天起 ${retentionDays} 天后自动清空`}
                     </span>
                   </div>
-                  <div className="segmented full">
+                  <div className="segmented full seg-mobile-grid">
                     {RETENTION_STEPS.map((st) => {
                       const active = retentionDays === st.days;
                       const cls = active
@@ -429,7 +429,7 @@ export const Lobby: React.FC<LobbyProps> = ({
                 </div>
 
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5, fontWeight: 700, color: 'var(--text-sub)' }}>
+                  <div className="lobby-field-head">
                     <span>单附件传输大小上限（进房后随时可调）</span>
                     <span style={{ color: 'var(--accent)', fontWeight: 600 }}>
                       {maxFileSizeMB === 0
@@ -437,7 +437,7 @@ export const Lobby: React.FC<LobbyProps> = ({
                         : `单文件 ≤ ${maxFileSizeMB >= 1024 ? `${(maxFileSizeMB / 1024).toFixed(maxFileSizeMB % 1024 === 0 ? 0 : 1)} GB` : `${maxFileSizeMB} MB`}`}
                     </span>
                   </div>
-                  <div className="segmented full">
+                  <div className="segmented full seg-mobile-grid">
                     {FILE_LIMIT_PRESETS.filter((p) => {
                       const cap = serverConfig?.maxAttachmentMB || 0;
                       if (cap <= 0) return true;
@@ -455,7 +455,7 @@ export const Lobby: React.FC<LobbyProps> = ({
                   </div>
                 </div>
 
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                <div className="lobby-two-col">
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                     <span style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--text-sub)' }}>
                       房间容量

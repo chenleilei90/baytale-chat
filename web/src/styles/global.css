@@ -156,7 +156,9 @@ body,
   margin: 0;
   padding: 0;
   width: 100%;
+  max-width: 100vw;
   height: 100%;
+  height: 100dvh;
   overflow: hidden;
   font-family: 'Plus Jakarta Sans', 'Inter', -apple-system, BlinkMacSystemFont, 'PingFang SC',
     'Hiragino Sans GB', 'Microsoft YaHei UI', sans-serif;
@@ -313,6 +315,76 @@ select {
   background: var(--grad-primary);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
+}
+.brand-subtitle {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.lobby-field-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text-sub);
+}
+.lobby-two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.nav-left-group,
+.nav-right-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.nav-room-btn {
+  font-weight: 800;
+  font-size: 14px;
+  height: 34px;
+}
+.nav-menu-btn {
+  position: relative;
+}
+.nav-peer-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 99px;
+  background: var(--grad-primary);
+  color: #ffffff;
+  font-size: 10px;
+  font-weight: 800;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+}
+.mobile-drawer-tools {
+  display: none;
+}
+.vibe-fx-inner {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.composer-tools-scroll {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
 /* 多巴胺色球切换器 */
@@ -1050,7 +1122,8 @@ select {
   left: calc(100% + 8px);
   transform: translateX(-6px) scale(0.92);
 }
-.bubble-wrap:hover .quick-react-bar {
+.bubble-wrap:hover .quick-react-bar,
+.bubble-wrap.touch-active .quick-react-bar {
   opacity: 1;
   pointer-events: auto;
   transform: translateX(0) scale(1);
@@ -1338,6 +1411,7 @@ select {
 }
 
 .composer-pod {
+  position: relative;
   max-width: 860px;
   width: 100%;
   margin: 0 auto;
@@ -1426,8 +1500,8 @@ select {
 
 .emoji-palette {
   position: absolute;
-  bottom: 38px;
-  left: 0;
+  bottom: calc(100% + 8px);
+  left: 10px;
   background: var(--glass-bg-strong);
   backdrop-filter: blur(24px);
   border: 1.5px solid var(--glass-border);
@@ -1437,7 +1511,7 @@ select {
   display: grid;
   grid-template-columns: repeat(8, 1fr);
   gap: 4px;
-  z-index: 60;
+  z-index: 80;
 }
 .emoji-cell {
   width: 32px;
@@ -1916,49 +1990,346 @@ select {
   .hide-mobile {
     display: none !important;
   }
+
+  /* 顶部毛玻璃栏：严控在 100% 视口宽度内，零重叠零溢出 */
+  .top-glass-nav {
+    margin: 8px 10px 0;
+    height: 50px;
+    padding: 0 10px;
+    border-radius: 16px;
+    gap: 8px;
+    width: auto;
+    max-width: calc(100vw - 20px);
+  }
+  .brand-jelly-logo {
+    width: 32px;
+    height: 32px;
+    border-radius: 10px;
+  }
+  .brand-title-text {
+    font-size: 15px;
+  }
+  .brand-subtitle {
+    max-width: 132px;
+    font-size: 10px;
+  }
+  .palette-bar {
+    gap: 4px;
+    padding: 4px 6px;
+  }
+  .theme-orb {
+    width: 16px;
+    height: 16px;
+  }
+  .user-chip {
+    padding: 3px;
+    gap: 0;
+  }
+  .nav-room-btn {
+    height: 32px;
+    padding: 0 10px;
+    font-size: 13px;
+  }
+  .chat-top-nav .nav-right-group {
+    gap: 5px;
+    flex-shrink: 0;
+  }
+  .chat-top-nav .nav-right-group > .btn {
+    height: 32px;
+    min-width: 32px;
+    padding: 0 9px;
+    border-radius: 10px;
+  }
+
+  /* 大厅移动排版：零横向滚动条，紧凑易点按 */
+  .bento-scroll {
+    padding: 8px 10px calc(24px + env(safe-area-inset-bottom, 0px));
+    align-items: flex-start;
+  }
   .bento-stage {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+    margin: 0 auto;
+    max-width: 100%;
+  }
+  .glass-bento {
+    padding: 15px 14px;
+    border-radius: 20px;
+    width: 100%;
+    min-width: 0;
+    overflow: hidden;
+  }
+  .sonic-hero {
+    gap: 10px;
+    padding: 10px 12px;
+    border-radius: 16px;
+    margin-bottom: 12px;
+  }
+  .sonic-rings {
+    width: 48px;
+    height: 48px;
   }
   .candy-mode-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .candy-card {
+    padding: 12px 11px;
+    border-radius: 16px;
+    gap: 6px;
+  }
+  .candy-badge-icon {
+    width: 32px;
+    height: 32px;
+    border-radius: 10px;
+  }
+  .segmented.full.seg-mobile-grid {
+    display: grid;
+    grid-auto-flow: row;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 4px;
+  }
+  .segmented .seg-item {
+    height: 34px;
+    padding: 0 6px;
+    font-size: 12px;
+  }
+  .lobby-two-col {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+  }
+
+  /* 聊天室主容器与抽屉侧边栏 */
+  .chat-layout {
+    padding: 8px 10px calc(8px + env(safe-area-inset-bottom, 0px));
+    gap: 0;
+  }
+  .chat-center-bento {
+    border-radius: 20px;
+    width: 100%;
   }
   .chat-side-bento {
     position: fixed;
-    top: 76px;
-    left: 12px;
-    bottom: 12px;
-    z-index: 70;
+    top: 66px;
+    left: 10px;
+    bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+    width: min(306px, calc(100vw - 24px));
+    border-radius: 22px;
+    padding: 14px;
+    gap: 11px;
+    z-index: 75;
     transform: translateX(-115%);
     transition: transform 0.24s cubic-bezier(0.34, 1.56, 0.64, 1);
   }
-  .msg-item {
-    max-width: 90%;
-  }
-  .quick-react-bar {
-    top: -34px;
-    bottom: auto;
-    right: 0 !important;
-    left: auto !important;
-  }
-  .msg-item.other .quick-react-bar {
-    left: 0 !important;
-    right: auto !important;
-  }
   .chat-side-bento.open {
     transform: translateX(0);
+  }
+  .mobile-drawer-tools {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--line-border);
   }
   .mobile-backdrop.open {
     display: block;
     position: fixed;
     inset: 0;
     z-index: 65;
-    background: rgba(0, 0, 0, 0.35);
+    background: rgba(0, 0, 0, 0.38);
     backdrop-filter: blur(3px);
   }
-  .top-glass-nav {
-    margin: 10px 12px 0;
+
+  /* 悬浮调节弹窗在手机端改为居中适配屏宽，绝不越界裁切 */
+  .floating-popover {
+    position: fixed !important;
+    top: 66px !important;
+    left: 12px !important;
+    right: 12px !important;
+    width: auto !important;
+    max-width: 420px;
+    margin: 0 auto;
+    max-height: 76dvh;
+    overflow-y: auto;
+    z-index: 120;
   }
-  .chat-layout {
-    padding: 10px 12px 12px;
+
+  /* 消息流与雷达空态紧凑化 */
+  .chat-scroll-area {
+    padding: 12px 12px 8px;
+  }
+  .chat-stream {
+    gap: 12px;
+  }
+  .airdrop-radar-stage {
+    gap: 12px;
+    padding: 10px 8px;
+  }
+  .qr-crystal-frame {
+    padding: 10px;
+  }
+  .qr-crystal-frame img {
+    width: 126px;
+    height: 126px;
+  }
+  .msg-item {
+    max-width: 92%;
+    gap: 8px;
+  }
+  .bubble-text {
+    padding: 9px 13px;
+    font-size: 14px;
+  }
+  .media-polaroid {
+    max-width: min(280px, calc(100vw - 82px));
+  }
+  .file-bento-card {
+    width: 100%;
+    max-width: min(296px, calc(100vw - 82px));
+    padding: 12px;
+  }
+  .reply-quote-text {
+    max-width: 210px;
+  }
+  .quick-react-bar {
+    top: -34px;
+    bottom: auto;
+    right: 0 !important;
+    left: auto !important;
+    max-width: calc(100vw - 36px);
+    overflow-x: auto;
+  }
+  .msg-item.other .quick-react-bar {
+    left: 0 !important;
+    right: auto !important;
+  }
+
+  /* 底部输入坞：单行可横滑特效条 + 单行可横滑工具栏，释放大量聊天可视空间 */
+  .composer-zone {
+    padding: 6px 10px 8px;
+    gap: 6px;
+  }
+  .vibe-fx-strip {
+    flex-wrap: nowrap;
+    justify-content: flex-start;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    gap: 6px;
+    padding-bottom: 1px;
+  }
+  .vibe-fx-strip::-webkit-scrollbar {
+    display: none;
+  }
+  .vibe-fx-inner {
+    display: contents;
+  }
+  .fx-chip {
+    flex-shrink: 0;
+    height: 27px;
+    padding: 0 10px;
+    font-size: 11.5px;
+  }
+  .composer-pod {
+    padding: 8px 10px;
+    border-radius: 18px;
+    gap: 6px;
+  }
+  .composer-textarea {
+    min-height: 34px;
+    padding: 5px 4px;
+    font-size: 14px;
+    line-height: 1.45;
+  }
+  .composer-bottom {
+    padding-top: 5px;
+    gap: 6px;
+  }
+  .composer-tools-scroll {
+    flex: 1;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    gap: 2px;
+  }
+  .composer-tools-scroll::-webkit-scrollbar {
+    display: none;
+  }
+  .tool-pill {
+    flex-shrink: 0;
+    height: 30px;
+    padding: 0 8px;
+    font-size: 12px;
+    gap: 4px;
+  }
+  .emoji-palette {
+    left: 6px;
+    right: 6px;
+    grid-template-columns: repeat(8, 1fr);
+    justify-items: center;
+  }
+
+  /* 聊天顶部横幅与筛选栏紧凑适配 */
+  .flash-clipboard-bar,
+  .batch-accept-bar,
+  .wb-invite-banner,
+  .chat-filter-bar,
+  .screen-stage-card {
+    margin: 8px 10px 0;
+    padding: 8px 10px;
+    border-radius: 14px;
+    gap: 6px;
+  }
+  .wb-invite-banner {
+    flex-wrap: wrap;
+    font-size: 12px;
+  }
+  .filter-search-input {
+    min-width: 120px;
+    max-width: none;
+  }
+
+  /* 模态框与协作白板手机端友好适配 */
+  .modal-overlay {
+    padding: 10px;
+  }
+  .modal-sheet {
+    padding: 16px;
+    border-radius: 22px;
+    max-height: 90dvh;
+    gap: 12px;
+  }
+  .modal-sheet .segmented {
+    max-width: 100%;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .modal-sheet .segmented::-webkit-scrollbar {
+    display: none;
+  }
+  .wb-sticky-note {
+    width: 136px;
+    min-height: 84px;
+  }
+  .toast-stack {
+    top: 14px;
+    width: calc(100vw - 24px);
+    align-items: center;
+  }
+  .toast-pill {
+    max-width: 100%;
+    text-align: center;
+    font-size: 12.5px;
+    padding: 8px 14px;
+  }
+}
+
+@media (max-width: 395px) {
+  .brand-subtitle {
+    display: none;
+  }
+  .candy-mode-grid {
+    grid-template-columns: 1fr;
   }
 }

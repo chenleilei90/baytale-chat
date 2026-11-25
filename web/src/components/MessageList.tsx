@@ -53,6 +53,7 @@ export const MessageList: React.FC<MessageListProps> = ({
 }) => {
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [revealedIds, setRevealedIds] = useState<Record<string, boolean>>({});
+  const [activeActionId, setActiveActionId] = useState<string | null>(null);
   const revealTimersRef = useRef<Record<string, number>>({});
   const canDirectDisk = supportsDirectDiskSave();
 
@@ -140,15 +141,26 @@ export const MessageList: React.FC<MessageListProps> = ({
                 )}
               </div>
 
-              <div className="bubble-wrap">
-                {/* 悬停弹出贴纸回应 + 引用回复 + 撤回条 */}
-                <div className="quick-react-bar">
+              <div
+                className={`bubble-wrap ${activeActionId === item.id ? 'touch-active' : ''}`}
+                onClick={() => {
+                  // 触摸屏无悬停态：轻点气泡可切换显示表情回应/引用/撤回快捷栏
+                  if (window.matchMedia && window.matchMedia('(hover: none)').matches) {
+                    setActiveActionId((cur) => (cur === item.id ? null : item.id));
+                  }
+                }}
+              >
+                {/* 悬停或移动端点击弹出贴纸回应 + 引用回复 + 撤回条 */}
+                <div className="quick-react-bar" onClick={(e) => e.stopPropagation()}>
                   {REACTION_EMOJIS.map((em) => (
                     <button
                       key={em}
                       type="button"
                       className="react-pick-btn"
-                      onClick={() => onReactMessage(item.id, em)}
+                      onClick={() => {
+                        onReactMessage(item.id, em);
+                        setActiveActionId(null);
+                      }}
                       title={`回应 ${em}`}
                     >
                       {em}
@@ -158,7 +170,10 @@ export const MessageList: React.FC<MessageListProps> = ({
                   <button
                     type="button"
                     className="react-action-btn"
-                    onClick={() => onReplyMessage(item)}
+                    onClick={() => {
+                      onReplyMessage(item);
+                      setActiveActionId(null);
+                    }}
                     title="引用回复"
                   >
                     <Reply size={13} />
@@ -167,7 +182,10 @@ export const MessageList: React.FC<MessageListProps> = ({
                     <button
                       type="button"
                       className="react-action-btn danger"
-                      onClick={() => onRecallMessage(item.id)}
+                      onClick={() => {
+                        onRecallMessage(item.id);
+                        setActiveActionId(null);
+                      }}
                       title="撤回此消息（同步删除服务器缓存）"
                     >
                       <Undo2 size={13} />
