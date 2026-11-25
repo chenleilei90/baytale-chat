@@ -1,0 +1,18 @@
+# Caddy v2 默认自动为域名申请并续期 Let's Encrypt HTTPS 证书，且自动将 HTTP 80 跳转至 HTTPS 443
+
+{$DOMAIN:chat.example.com} {
+    encode zstd gzip
+
+    # 反向代理到 BayChat Go 服务（原生支持 WebSocket 升级）
+    reverse_proxy baychat:8080 {
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+
+    # 基础安全响应头
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options SAMEORIGIN
+        Referrer-Policy strict-origin-when-cross-origin
+    }
+}

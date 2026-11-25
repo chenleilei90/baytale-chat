@@ -1,0 +1,260 @@
+// BayChat 前端核心数据结构与协议类型定义
+
+export type RoomMode = 'fixed' | 'ephemeral';
+
+export type ThemeMode = 'peach' | 'mint' | 'berry' | 'lime' | 'neon';
+
+export type PropThrowType = 'tomato' | 'flower' | 'freeze' | 'bomb';
+
+export type FunEffectType = 'confetti' | 'hearts' | 'fire' | 'rocket' | 'poke' | PropThrowType;
+
+// 秘密基地成长统计（持久化于固定房间，赋予长期回访成就感）
+export interface RoomStats {
+  totalMessages: number;
+  totalFiles: number;
+  totalBytes: number;
+  totalPomodoros: number;
+  streakDays: number;
+  lastActiveDate?: string;
+}
+
+// 成员音视频连麦/投屏实时状态
+export interface PeerMediaState {
+  micOn: boolean;
+  micMuted: boolean;
+  screenOn: boolean;
+}
+
+// 房间同步番茄钟状态
+export type PomodoroMode = 'focus25' | 'deep45' | 'break5';
+
+export interface PomodoroState {
+  running: boolean;
+  mode: PomodoroMode;
+  remainingSec: number;
+  endAt: number; // 运行中时的目标毫秒时间戳
+  startedBy?: string;
+  updatedAt: number;
+}
+
+// 多人协作白板数据结构（使用 0~1 归一化坐标，跨任意分辨率精准同步）
+export type WhiteboardBrushMode = 'neon' | 'rainbow' | 'pen' | 'eraser';
+export type WhiteboardBgStyle = 'night' | 'cream';
+export type StickyNoteColor = 'yellow' | 'pink' | 'mint' | 'violet';
+
+export interface WhiteboardStroke {
+  id: string;
+  peerId: string;
+  mode: WhiteboardBrushMode;
+  color: string;
+  size: number;
+  points: [number, number][];
+}
+
+export interface WhiteboardNote {
+  id: string;
+  peerId: string;
+  authorName: string;
+  x: number; // 0..1
+  y: number; // 0..1
+  text: string;
+  color: StickyNoteColor;
+  updatedAt: number;
+}
+
+export type WhiteboardEvent =
+  | { type: 'opened'; actorName: string }
+  | { type: 'cursor'; nx: number; ny: number; name: string; color: string }
+  | { type: 'stroke-start'; stroke: WhiteboardStroke }
+  | { type: 'stroke-append'; strokeId: string; points: [number, number][] }
+  | { type: 'stroke-undo'; strokeId: string }
+  | { type: 'note-upsert'; note: WhiteboardNote }
+  | { type: 'note-delete'; noteId: string }
+  | { type: 'bg-change'; bgStyle: WhiteboardBgStyle }
+  | { type: 'clear'; actorName: string }
+  | { type: 'sync-req' }
+  | {
+      type: 'sync-res';
+      bgStyle: WhiteboardBgStyle;
+      strokes: WhiteboardStroke[];
+      notes: WhiteboardNote[];
+    };
+
+// 本地用户个人资料（免账号，保存在 localStorage）
+export interface UserProfile {
+  clientId: string;
+  name: string;
+  avatar: string; // 格式：preset:<id> 或 data:image/... base64
+}
+
+// 房间内在线成员资料
+export interface PeerProfile {
+  peerId: string;
+  name: string;
+  avatar: string;
+  joinedAt: number;
+}
+
+// 服务器聊天缓存状态与滑动过期信息
+export interface HistoryMeta {
+  retentionDays: number; // 0 表示不缓存/立即删除；1~7 表示自最后一次聊天起保留天数
+  messageCount: number;
+  lastMessageAt?: number;
+  expiresAt?: number;
+}
+
+// 房间元信息摘要
+export interface RoomSummary {
+  code: string;
+  mode: RoomMode;
+  hasPassword: boolean;
+  maxPeers: number;
+  peerCount: number;
+  retentionDays: number;
+  maxFileSizeMB: number; // 单文件附件大小上限（MB），0 表示不限制
+  stats?: RoomStats; // 基地成长火花与累计互动统计
+  createdAt: number;
+  lastActiveAt: number;
+  history: HistoryMeta;
+}
+
+// 服务端全局配置（含动态 TURN 凭证与附件限制默认值）
+export interface ServerConfig {
+  domain: string;
+  maxRoomPeers: number;
+  maxRetentionDays: number;
+  historyMaxMediaBytes: number;
+  maxAttachmentMB: number; // 服务端允许的最高硬上限（MB），0 表示不限制
+  defaultRoomMaxFileMB: number; // 新建房间默认单附件上限（MB），0 表示不限制
+  hasTurn: boolean;
+  iceServers: RTCIceServer[];
+}
+
+// 收藏的固定房间项（保存在本地，方便一键再次进入）
+export interface SavedFixedRoom {
+  code: string;
+  label?: string;
+  hasPassword: boolean;
+  password?: string; // 仅在用户主动勾选记住密码时保存在本机
+  lastVisitedAt: number;
+}
+
+// 端到端连接路径状态
+export type LinkTransportType = 'connecting' | 'p2p-lan' | 'p2p-wan' | 'relay-turn' | 'disconnected';
+
+export interface PeerLinkStatus {
+  peerId: string;
+  transport: LinkTransportType;
+  rttMs?: number;
+  dataReady: boolean;
+}
+
+// 引用回复摘要
+export interface ReplyQuote {
+  id: string;
+  senderName: string;
+  preview: string;
+}
+
+// 服务端缓存消息格式
+export interface CachedMessage {
+  id: string;
+  kind: 'text' | 'image' | 'audio' | 'file_notice';
+  senderId: string;
+  senderName: string;
+  senderAvatar?: string;
+  text?: string;
+  caption?: string;
+  mediaId?: string;
+  mediaMime?: string;
+  fileName?: string;
+  fileSize?: number;
+  isScreenshot?: boolean;
+  replyToId?: string;
+  replyToSender?: string;
+  replyToPreview?: string;
+  timestamp: number;
+}
+
+// 文件传输状态
+export type TransferStatus =
+  | 'offering'
+  | 'waiting_accept'
+  | 'transferring'
+  | 'completed'
+  | 'rejected'
+  | 'cancelled'
+  | 'error';
+
+export interface FileTransferInfo {
+  transferId: string;
+  streamId: number;
+  fileName: string;
+  fileSize: number;
+  mimeType: string;
+  isImage: boolean;
+  isAudio?: boolean;
+  isScreenshot?: boolean;
+  direction: 'send' | 'receive';
+  targetPeerId?: string; // 接收方为发送者 peerId；发送方为接收者 peerId
+  targetPeerName?: string; // 多人房间展示发往或来自哪位成员
+  status: TransferStatus;
+  transferredBytes: number;
+  speedBps: number;
+  etaSeconds: number;
+  sha256?: string;
+  verified?: boolean;
+  objectUrl?: string; // 内存 Blob 下载或图片预览链接
+  savedToDisk?: boolean; // 是否通过 File System Access API 流式直写硬盘
+  errorMessage?: string;
+}
+
+// 聊天界面渲染用统一消息项
+export interface ChatItem {
+  id: string;
+  kind: 'text' | 'image' | 'audio' | 'file' | 'system';
+  senderId: string;
+  senderName: string;
+  senderAvatar?: string;
+  isSelf: boolean;
+  timestamp: number;
+  text?: string;
+  caption?: string;
+  imageUrl?: string;
+  audioUrl?: string;
+  mediaId?: string;
+  isScreenshot?: boolean;
+  isDoodle?: boolean;
+  isSecret?: boolean;
+  replyTo?: ReplyQuote;
+  reactions?: Record<string, string[]>; // emoji -> peerIds
+  fromCache?: boolean; // 标识该消息恢复自服务器缓存
+  transfer?: FileTransferInfo;
+}
+
+// WebSocket 双向信令信封
+export interface SignalEnvelope {
+  type: string;
+  roomCode?: string;
+  peerId?: string;
+  targetPeerId?: string;
+  fromPeerId?: string;
+  password?: string;
+  profile?: PeerProfile;
+  peers?: PeerProfile[];
+  room?: RoomSummary;
+  payload?: unknown;
+  message?: CachedMessage;
+  messages?: CachedMessage[];
+  messageId?: string;
+  history?: HistoryMeta;
+  stats?: RoomStats;
+  activityKind?: 'message' | 'file' | 'pomodoro';
+  activityBytes?: number;
+  retentionDays?: number;
+  maxFileSizeMB?: number;
+  reason?: string;
+  errorCode?: string;
+  error?: string;
+  actorName?: string;
+}

@@ -1,0 +1,34 @@
+# coturn STUN/TURN 中转服务器配置模板
+# 由 docker-compose 启动命令注入 PUBLIC_IP、TURN_HOST、TURN_SECRET 等环境变量
+
+# 监听端口
+listening-port=${TURN_PORT}
+tls-listening-port=${TURN_TLS_PORT}
+
+# 中继 UDP 端口范围
+min-port=${TURN_MIN_PORT}
+max-port=${TURN_MAX_PORT}
+
+# 指纹与长期动态密钥认证（TURN REST API，防白嫖盗刷）
+fingerprint
+use-auth-secret
+static-auth-secret=${TURN_SECRET}
+realm=${TURN_HOST}
+
+# 服务器公网 IP（云服务器通常位于 NAT 后，此配置至关重要）
+external-ip=${PUBLIC_IP}
+
+# 禁止中继访问服务器内网地址（防止 SSRF 安全风险）
+no-multicast-peers
+denied-peer-ip=10.0.0.0-10.255.255.255
+denied-peer-ip=172.16.0.0-172.31.255.255
+denied-peer-ip=192.168.0.0-192.168.255.255
+denied-peer-ip=127.0.0.0-127.255.255.255
+denied-peer-ip=::1
+
+# 性能与配额限制
+total-quota=100
+bps-capacity=0
+stale-nonce=600
+no-cli
+simple-log

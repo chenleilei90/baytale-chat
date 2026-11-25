@@ -1,0 +1,29 @@
+# 环境变量与本地敏感配置（严禁提交到公开仓库）
+.env
+.env.local
+.env.*.local
+
+# 前端依赖与构建产物
+web/node_modules/
+web/dist/
+web/.vite/
+
+# Go 内嵌前端构建产物（保留占位 index.html 确保刚克隆即可通过 go test / go build）
+server/internal/static/dist/*
+!server/internal/static/dist/index.html
+
+# 服务端运行时持久化数据与编译产物
+server/data/
+data/
+baychat
+baychat.exe
+*.exe
+*.out
+*.test
+
+# 编辑器与操作系统杂项
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.log

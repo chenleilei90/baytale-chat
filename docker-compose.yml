@@ -1,0 +1,95 @@
+services:
+  # 1. BayChat 主服务（Go 信令 + 房间管理 + 动态 TURN 凭证签发 + 内嵌静态 Web UI）
+  baychat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: baychat-app
+    restart: unless-stopped
+    environment:
+      PORT: "8080"
+      DATA_DIR: "/data"
+      DOMAIN: "${DOMAIN:-chat.example.com}"
+      TURN_HOST: "${TURN_HOST:-chat.example.com}"
+      TURN_PORT: "${TURN_PORT:-3478}"
+      TURN_TLS_PORT: "${TURN_TLS_PORT:-0}"
+      TURN_SECRET: "${TURN_SECRET:-please-change-this-to-a-strong-random-secret-key}"
+      MAX_ROOM_PEERS: "${MAX_ROOM_PEERS:-6}"
+      MAX_ATTACHMENT_MB: "${MAX_ATTACHMENT_MB:-0}"
+      DEFAULT_ROOM_MAX_FILE_MB: "${DEFAULT_ROOM_MAX_FILE_MB:-500}"
+      HISTORY_MAX_MEDIA_MB: "${HISTORY_MAX_MEDIA_MB:-10}"
+      ALLOWED_ORIGIN: "${ALLOWED_ORIGIN:-}"
+      GOMEMLIMIT: "128MiB"
+    volumes:
+      - baychat_data:/data
+    networks:
+      - baychat_net
+
+  # 2. Caddy 反向代理（自动为 DOMAIN 申请与续期 Let's Encrypt HTTPS 证书，并自动处理 HTTP -> HTTPS 与 WebSocket）
+  caddy:
+    image: caddy:2-alpine
+    container_name: baychat-caddy
+    restart: unless-stopped
+    depends_on:
+      - baychat
+    environment:
+      DOMAIN: "${DOMAIN:-chat.example.com}"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - baychat_net
+
+  # 3. coturn STUN/TURN 中转服务（Linux VPS 下使用 host 网络以获得最佳 UDP NAT 穿透性能）
+  coturn:
+    image: coturn/coturn:4.6-alpine
+    container_name: baychat-coturn
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      PUBLIC_IP: "${PUBLIC_IP}"
+      TURN_HOST: "${TURN_HOST:-chat.example.com}"
+      TURN_PORT: "${TURN_PORT:-3478}"
+      TURN_MIN_PORT: "${TURN_MIN_PORT:-49152}"
+      TURN_MAX_PORT: "${TURN_MAX_PORT:-49300}"
+      TURN_SECRET: "${TURN_SECRET:-please-change-this-to-a-strong-random-secret-key}"
+    command:
+      - -n
+      - --log-file=stdout
+      - --listening-port=${TURN_PORT:-3478}
+      - --min-port=${TURN_MIN_PORT:-49152}
+      - --max-port=${TURN_MAX_PORT:-49300}
+      - --fingerprint
+      - --use-auth-secret
+      - --static-auth-secret=${TURN_SECRET:-please-change-this-to-a-strong-random-secret-key}
+      - --realm=${TURN_HOST:-chat.example.com}
+      - --external-ip=${PUBLIC_IP}
+      - --no-loopback-peers
+      - --no-multicast-peers
+      - --denied-peer-ip=0.0.0.0-0.255.255.255
+      - --denied-peer-ip=10.0.0.0-10.255.255.255
+      - --denied-peer-ip=100.64.0.0-100.127.255.255
+      - --denied-peer-ip=127.0.0.0-127.255.255.255
+      - --denied-peer-ip=169.254.0.0-169.254.255.255
+      - --denied-peer-ip=172.16.0.0-172.31.255.255
+      - --denied-peer-ip=192.168.0.0-192.168.255.255
+      - --denied-peer-ip=::1
+      - --denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+      - --total-quota=100
+      - --max-bps=2000000
+      - --stale-nonce=600
+      - --no-cli
+
+volumes:
+  baychat_data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  baychat_net:
+    driver: bridge

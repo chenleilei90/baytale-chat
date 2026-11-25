@@ -1,0 +1,17 @@
+{
+  "name": "BayChat · 跨公网 P2P 闪传对讲屋",
+  "short_name": "BayChat",
+  "description": "跨公网点对点直连文件传输与实时加密聊天，支持文件夹打包直传、截图标注、防窥密信与限时缓存",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#fff8f6",
+  "theme_color": "#ff5487",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
