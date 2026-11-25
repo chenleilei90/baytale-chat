@@ -61,7 +61,7 @@ type CreateRoomRequest struct {
 	Mode          string `json:"mode"`                    // fixed | ephemeral
 	Code          string `json:"code,omitempty"`          // 仅 fixed 模式可自定义；留空自动生成
 	Password      string `json:"password,omitempty"`      // 可选访问密码
-	AllowRandom   *bool  `json:"allowRandom,omitempty"`   // 是否允许陌生人随机串门（无密码时默认 true；有密码时强制 false）
+	AllowRandom   *bool  `json:"allowRandom,omitempty"`   // 是否允许陌生人随机串门（未传默认 false；有密码时强制 false）
 	Topic         string `json:"topic,omitempty"`         // 可选房间主题标签（最多 24 字）
 	MaxPeers      int    `json:"maxPeers,omitempty"`      // 2~MAX_ROOM_PEERS
 	RetentionDays *int   `json:"retentionDays,omitempty"` // 0~7 天，未传时默认 3 天
@@ -399,8 +399,8 @@ func (h *Hub) CreateRoom(req CreateRoomRequest) (*RoomSummary, error) {
 	passwordHash := HashPassword(req.Password)
 	ownerToken := GenerateOwnerToken()
 	ownerTokenHash := HashOwnerToken(ownerToken)
-	// 无密码房间默认允许陌生人随机串门，用户可手动关闭；有密码房间严格禁止随机进入
-	allowRandom := passwordHash == ""
+	// 新建房间默认私密（B1），仅免密房可显式开启随机串门；有密码房间严格禁止随机进入
+	allowRandom := false
 	if passwordHash == "" && req.AllowRandom != nil {
 		allowRandom = *req.AllowRandom
 	}

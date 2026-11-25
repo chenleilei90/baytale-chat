@@ -407,10 +407,25 @@ func TestRandomAndPublicPasswordlessRooms(t *testing.T) {
 		t.Fatalf("仅有加密房和关闭随机房时应返回 ErrNoPublicRoom，实际: %v", err)
 	}
 
-	// 3. 无密码房未传 AllowRandom 时默认打开（AllowRandom=true）
+	// 3. 无密码房未传 AllowRandom 时默认私密（AllowRandom=false，B1 决策）
+	omittedDefault, err := hub.CreateRoom(CreateRoomRequest{
+		Mode: ModeEphemeral,
+	})
+	if err != nil {
+		t.Fatalf("创建未传 AllowRandom 的免密房失败: %v", err)
+	}
+	if omittedDefault.AllowRandom {
+		t.Fatalf("未传 AllowRandom 时默认必须为 false: %+v", omittedDefault)
+	}
+	if _, err := hub.PickRandomPublicRoom(""); !errors.Is(err, ErrNoPublicRoom) {
+		t.Fatalf("默认私密房不应进入公开随机池，实际: %v", err)
+	}
+
+	// 4. 显式开启 AllowRandom=true 的免密房才会出现在公开池
 	pub1, err := hub.CreateRoom(CreateRoomRequest{
-		Mode:  ModeEphemeral,
-		Topic: "☕ 闲聊摸鱼",
+		Mode:        ModeEphemeral,
+		AllowRandom: &yes,
+		Topic:       "☕ 闲聊摸鱼",
 	})
 	if err != nil {
 		t.Fatalf("创建免密公开房1失败: %v", err)
@@ -420,8 +435,9 @@ func TestRandomAndPublicPasswordlessRooms(t *testing.T) {
 	}
 
 	pub2, err := hub.CreateRoom(CreateRoomRequest{
-		Mode:  ModeEphemeral,
-		Topic: "⚡ 互传文件",
+		Mode:        ModeEphemeral,
+		AllowRandom: &yes,
+		Topic:       "⚡ 互传文件",
 	})
 	if err != nil {
 		t.Fatalf("创建免密公开房2失败: %v", err)
