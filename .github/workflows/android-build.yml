@@ -1,0 +1,85 @@
+name: Build Android App (APK & AAB)
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'android/**'
+      - '.github/workflows/android-build.yml'
+  workflow_dispatch:
+
+jobs:
+  build-android:
+    name: Test & Build Android APK / AAB
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle 8.11.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+
+      - name: Ensure Android SDK 35 & Build-Tools 35.0.0
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Configure release signing if GitHub Secrets exist
+        working-directory: android
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > app/baychat-release.jks
+            cat > keystore.properties << EOF
+          storeFile=baychat-release.jks
+          storePassword=$STORE_PASSWORD
+          keyAlias=$KEY_ALIAS
+          keyPassword=$KEY_PASSWORD
+          EOF
+            echo "Release signing configured from secrets."
+          else
+            echo "No release keystore secrets set; building release with fallback debug signing for direct testing."
+          fi
+
+      - name: Run Kotlin unit tests
+        working-directory: android
+        run: gradle testDebugUnitTest --stacktrace
+
+      - name: Build Debug APK, Release APK & Google Play AAB
+        working-directory: android
+        run: gradle assembleDebug assembleRelease bundleRelease --stacktrace
+
+      - name: Summarize build artifacts
+        working-directory: android
+        run: |
+          ls -lh app/build/outputs/apk/debug/*.apk app/build/outputs/apk/release/*.apk app/build/outputs/bundle/release/*.aab
+          sha256sum app/build/outputs/apk/debug/*.apk app/build/outputs/apk/release/*.apk app/build/outputs/bundle/release/*.aab
+
+      - name: Upload Debug & Release APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: baychat-android-apks
+          path: |
+            android/app/build/outputs/apk/debug/*.apk
+            android/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+
+      - name: Upload Google Play AAB Bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: baychat-google-play-aab
+          path: android/app/build/outputs/bundle/release/*.aab
+          if-no-files-found: error

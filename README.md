@@ -334,5 +334,5 @@ cd server && go test -v -race ./...
    - 检查 `https://你的域名/api/config` 中 `"hasTurn"` 是否为 `true`；
    - 确认 `TURN_HOST` 对应域名未开启 CDN 代理（必须为「仅 DNS」指向真实公网 IP）；
    - 确认云服务器安全组与系统防火墙（UFW/firewalld）已放行 `3478/udp`、`3478/tcp` 及 `49152-49300/udp`。
-3. **未来能打包成 Windows 桌面客户端吗？**
-   - 可以。前端全部平台相关能力（磁盘流式写入、剪贴板、截屏、提示音）均已抽离在 `web/src/lib/platform.ts`，后续接入 Tauri 即可无缝打包出约 10MB 的桌面客户端并与网页端完全互通。
+3. **有原生 Android APP 吗？**
+   - 已内置纯原生 Android 客户端（`android/` 目录，基于 **Kotlin + Jetpack Compose + 原生 WebRTC**，目标 API 35），支持后台保活大文件直传、系统「分享到 BayChat」、无 GMS 竖屏扫码、深链唤起及与网页端 100% 互通，详见 [android/README.md](android/README.md)。
