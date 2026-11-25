@@ -2,7 +2,6 @@ package com.baytale.baychat
 
 import com.baytale.baychat.core.model.AppReleaseInfo
 import com.baytale.baychat.core.network.ResumableApkDownloader
-import com.sun.net.httpserver.HttpServer
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
 import org.junit.Assert.assertEquals
@@ -11,8 +10,14 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
+import java.io.BufferedReader
+import java.io.Closeable
 import java.io.File
-import java.net.InetSocketAddress
+import java.io.InputStreamReader
+import java.io.OutputStream
+import java.net.InetAddress
+import java.net.ServerSocket
+import java.net.Socket
 import java.security.MessageDigest
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -21,11 +26,83 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
-// 企业级 OTA 断点续传下载引擎纯 JVM 单元测试（基于 JDK 内置 HttpServer 真实本地端口回归验证）
+// 企业级 OTA 断点续传下载引擎纯 JVM 单元测试（基于标准 java.net.ServerSocket 真实本地端口回归验证）
 class AppUpdateManagerTest {
 
     @get:Rule
     val tempFolder = TemporaryFolder()
+
+    // 零第三方依赖的轻量本地 HTTP 测试服务（兼容 Android bootClasspath 与所有 JVM）
+    private class MiniHttpServer(
+        private val handler: (path: String, headers: Map<String, String>, out: OutputStream, socket: Socket) -> Unit,
+    ) : Closeable {
+        private val serverSocket = ServerSocket(0, 16, InetAddress.getByName("127.0.0.1"))
+        private val executor = Executors.newCachedThreadPool()
+        private val running = AtomicBoolean(true)
+
+        val port: Int get() = serverSocket.localPort
+
+        init {
+            executor.execute {
+                while (running.get() && !serverSocket.isClosed) {
+                    val client = try {
+                        serverSocket.accept()
+                    } catch (_: Exception) {
+                        break
+                    }
+                    executor.execute {
+                        try {
+                            client.soTimeout = 5000
+                            val reader = BufferedReader(InputStreamReader(client.getInputStream(), Charsets.ISO_8859_1))
+                            val requestLine = reader.readLine() ?: return@execute
+                            val parts = requestLine.split(" ")
+                            val path = parts.getOrNull(1) ?: "/"
+                            val headers = mutableMapOf<String, String>()
+                            while (true) {
+                                val line = reader.readLine() ?: break
+                                if (line.isEmpty()) break
+                                val idx = line.indexOf(':')
+                                if (idx > 0) {
+                                    headers[line.substring(0, idx).trim().lowercase()] =
+                                        line.substring(idx + 1).trim()
+                                }
+                            }
+                            handler(path, headers, client.getOutputStream(), client)
+                        } catch (_: Exception) {
+                            // 模拟主动断流或客户端暂停中断时忽略正常关闭异常
+                        } finally {
+                            runCatching { client.close() }
+                        }
+                    }
+                }
+            }
+        }
+
+        override fun close() {
+            running.set(false)
+            runCatching { serverSocket.close() }
+            executor.shutdownNow()
+        }
+    }
+
+    private fun writeHttpResponseHeaders(
+        out: OutputStream,
+        statusCode: Int,
+        reason: String,
+        contentLength: Long,
+        extraHeaders: Map<String, String> = emptyMap(),
+    ) {
+        val sb = StringBuilder()
+        sb.append("HTTP/1.1 ").append(statusCode).append(' ').append(reason).append("\r\n")
+        sb.append("Content-Length: ").append(contentLength).append("\r\n")
+        sb.append("Connection: close\r\n")
+        for ((k, v) in extraHeaders) {
+            sb.append(k).append(": ").append(v).append("\r\n")
+        }
+        sb.append("\r\n")
+        out.write(sb.toString().toByteArray(Charsets.ISO_8859_1))
+        out.flush()
+    }
 
     private fun createTestClient(): OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
@@ -53,21 +130,22 @@ class AppUpdateManagerTest {
         val receivedRangeHeader = AtomicReference<String?>(null)
         val firstCutReceivedLatch = CountDownLatch(1)
 
-        val executor = Executors.newCachedThreadPool()
-        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
-        server.executor = executor
-        server.createContext("/apk/BayChat-v1.1.4.apk") { exchange ->
+        MiniHttpServer { _, headers, out, socket ->
             val seq = requestCount.incrementAndGet()
-            val rangeHeader = exchange.requestHeaders.getFirst("Range")
+            val rangeHeader = headers["range"]
             if (seq == 1) {
                 // 首次请求只发送前 40% 后主动断开连接，模拟弱网/切后台断流
-                exchange.responseHeaders.add("Accept-Ranges", "bytes")
-                exchange.sendResponseHeaders(200, payload.size.toLong())
-                val out = exchange.responseBody
+                writeHttpResponseHeaders(
+                    out = out,
+                    statusCode = 200,
+                    reason = "OK",
+                    contentLength = payload.size.toLong(),
+                    extraHeaders = mapOf("Accept-Ranges" to "bytes"),
+                )
                 out.write(payload, 0, firstCut)
                 out.flush()
                 firstCutReceivedLatch.await(3, TimeUnit.SECONDS)
-                runCatching { exchange.close() }
+                runCatching { socket.close() }
             } else {
                 // 二次请求校验 Range 头并返回 HTTP 206 Partial Content 剩余 60%
                 receivedRangeHeader.set(rangeHeader)
@@ -77,19 +155,21 @@ class AppUpdateManagerTest {
                     ?.toIntOrNull()
                     ?: 0
                 val remaining = payload.size - start
-                exchange.responseHeaders.add("Accept-Ranges", "bytes")
-                exchange.responseHeaders.add("Content-Range", "bytes $start-${payload.size - 1}/${payload.size}")
-                exchange.sendResponseHeaders(206, remaining.toLong())
-                exchange.responseBody.use { out ->
-                    out.write(payload, start, remaining)
-                    out.flush()
-                }
+                writeHttpResponseHeaders(
+                    out = out,
+                    statusCode = 206,
+                    reason = "Partial Content",
+                    contentLength = remaining.toLong(),
+                    extraHeaders = mapOf(
+                        "Accept-Ranges" to "bytes",
+                        "Content-Range" to "bytes $start-${payload.size - 1}/${payload.size}",
+                    ),
+                )
+                out.write(payload, start, remaining)
+                out.flush()
             }
-        }
-        server.start()
-
-        try {
-            val url = "http://127.0.0.1:${server.address.port}/apk/BayChat-v1.1.4.apk"
+        }.use { server ->
+            val url = "http://127.0.0.1:${server.port}/apk/BayChat-v1.1.4.apk"
             val release = AppReleaseInfo(
                 versionCode = 8,
                 versionName = "1.1.5",
@@ -138,9 +218,6 @@ class AppUpdateManagerTest {
             assertEquals(payload.size.toLong(), success.apkFile.length())
             assertFalse("重命名完成后 .part 临时文件应已移除", partFile.exists())
             assertEquals(expectedSha, ResumableApkDownloader.computeSha256(success.apkFile))
-        } finally {
-            server.stop(0)
-            executor.shutdownNow()
         }
     }
 
@@ -153,27 +230,21 @@ class AppUpdateManagerTest {
         val primaryHits = AtomicInteger(0)
         val fallbackHits = AtomicInteger(0)
 
-        val executor = Executors.newCachedThreadPool()
-        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
-        server.executor = executor
-        server.createContext("/primary/BayChat.apk") { exchange ->
-            primaryHits.incrementAndGet()
-            val msg = "Service Unavailable".toByteArray()
-            exchange.sendResponseHeaders(503, msg.size.toLong())
-            exchange.responseBody.use { it.write(msg) }
-        }
-        server.createContext("/fallback/BayChat.apk") { exchange ->
-            fallbackHits.incrementAndGet()
-            exchange.sendResponseHeaders(200, payload.size.toLong())
-            exchange.responseBody.use { out ->
+        MiniHttpServer { path, _, out, _ ->
+            if (path.startsWith("/primary/")) {
+                primaryHits.incrementAndGet()
+                val msg = "Service Unavailable".toByteArray()
+                writeHttpResponseHeaders(out, 503, "Service Unavailable", msg.size.toLong())
+                out.write(msg)
+                out.flush()
+            } else {
+                fallbackHits.incrementAndGet()
+                writeHttpResponseHeaders(out, 200, "OK", payload.size.toLong())
                 out.write(payload)
                 out.flush()
             }
-        }
-        server.start()
-
-        try {
-            val baseUrl = "http://127.0.0.1:${server.address.port}"
+        }.use { server ->
+            val baseUrl = "http://127.0.0.1:${server.port}"
             val release = AppReleaseInfo(
                 versionCode = 9,
                 versionName = "1.1.6",
@@ -195,9 +266,6 @@ class AppUpdateManagerTest {
             assertEquals("备用节点应成功命中 1 次", 1, fallbackHits.get())
             assertTrue(success.apkFile.exists())
             assertEquals(expectedSha, ResumableApkDownloader.computeSha256(success.apkFile))
-        } finally {
-            server.stop(0)
-            executor.shutdownNow()
         }
     }
 
@@ -211,23 +279,15 @@ class AppUpdateManagerTest {
         }
         val updatesDir = tempFolder.newFolder("updates_corrupt")
 
-        val executor = Executors.newCachedThreadPool()
-        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
-        server.executor = executor
-        server.createContext("/corrupt/BayChat.apk") { exchange ->
-            exchange.sendResponseHeaders(200, tamperedPayload.size.toLong())
-            exchange.responseBody.use { out ->
-                out.write(tamperedPayload)
-                out.flush()
-            }
-        }
-        server.start()
-
-        try {
+        MiniHttpServer { _, _, out, _ ->
+            writeHttpResponseHeaders(out, 200, "OK", tamperedPayload.size.toLong())
+            out.write(tamperedPayload)
+            out.flush()
+        }.use { server ->
             val release = AppReleaseInfo(
                 versionCode = 10,
                 versionName = "1.1.7",
-                apkUrl = "http://127.0.0.1:${server.address.port}/corrupt/BayChat.apk",
+                apkUrl = "http://127.0.0.1:${server.port}/corrupt/BayChat.apk",
                 sha256 = expectedSha,
                 sizeBytes = originalPayload.size.toLong(),
             )
@@ -249,9 +309,6 @@ class AppUpdateManagerTest {
                 "损坏的 .part 临时文件必须立即删除",
                 ResumableApkDownloader.targetPartFile(updatesDir, release).exists(),
             )
-        } finally {
-            server.stop(0)
-            executor.shutdownNow()
         }
     }
 
@@ -262,21 +319,16 @@ class AppUpdateManagerTest {
         val updatesDir = tempFolder.newFolder("updates_cached")
 
         val networkHits = AtomicInteger(0)
-        val executor = Executors.newCachedThreadPool()
-        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
-        server.executor = executor
-        server.createContext("/cached/BayChat.apk") { exchange ->
+        MiniHttpServer { _, _, out, _ ->
             networkHits.incrementAndGet()
-            exchange.sendResponseHeaders(200, payload.size.toLong())
-            exchange.responseBody.use { it.write(payload) }
-        }
-        server.start()
-
-        try {
+            writeHttpResponseHeaders(out, 200, "OK", payload.size.toLong())
+            out.write(payload)
+            out.flush()
+        }.use { server ->
             val release = AppReleaseInfo(
                 versionCode = 11,
                 versionName = "1.1.8",
-                apkUrl = "http://127.0.0.1:${server.address.port}/cached/BayChat.apk",
+                apkUrl = "http://127.0.0.1:${server.port}/cached/BayChat.apk",
                 sha256 = expectedSha,
                 sizeBytes = payload.size.toLong(),
             )
@@ -302,59 +354,58 @@ class AppUpdateManagerTest {
             assertEquals(cachedApk.absolutePath, success.apkFile.absolutePath)
             assertFalse("旧版本 .apk 垃圾文件必须被自动清理", obsoleteOldApk.exists())
             assertFalse("旧版本 .part 垃圾文件必须被自动清理", obsoleteOldPart.exists())
-        } finally {
-            server.stop(0)
-            executor.shutdownNow()
         }
     }
 
     @Test
     fun testPausePreservesBreakpointAndResumesCleanly() = runBlocking {
-        val payload = generatePayload(192 * 1024)
+        val payload = generatePayload(256 * 1024)
         val expectedSha = sha256Hex(payload)
         val updatesDir = tempFolder.newFolder("updates_pause")
         val pausedFlag = AtomicBoolean(false)
         val receivedRange = AtomicReference<String?>(null)
 
-        val executor = Executors.newCachedThreadPool()
-        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
-        server.executor = executor
-        server.createContext("/pause/BayChat.apk") { exchange ->
-            val rangeHeader = exchange.requestHeaders.getFirst("Range")
+        MiniHttpServer { _, headers, out, _ ->
+            val rangeHeader = headers["range"]
             if (rangeHeader != null) {
                 receivedRange.set(rangeHeader)
                 val start = rangeHeader.removePrefix("bytes=").substringBefore("-").toIntOrNull() ?: 0
                 val rem = payload.size - start
-                exchange.responseHeaders.add("Accept-Ranges", "bytes")
-                exchange.responseHeaders.add("Content-Range", "bytes $start-${payload.size - 1}/${payload.size}")
-                exchange.sendResponseHeaders(206, rem.toLong())
-                exchange.responseBody.use { out ->
-                    out.write(payload, start, rem)
-                    out.flush()
-                }
+                writeHttpResponseHeaders(
+                    out = out,
+                    statusCode = 206,
+                    reason = "Partial Content",
+                    contentLength = rem.toLong(),
+                    extraHeaders = mapOf(
+                        "Accept-Ranges" to "bytes",
+                        "Content-Range" to "bytes $start-${payload.size - 1}/${payload.size}",
+                    ),
+                )
+                out.write(payload, start, rem)
+                out.flush()
             } else {
-                exchange.responseHeaders.add("Accept-Ranges", "bytes")
-                exchange.sendResponseHeaders(200, payload.size.toLong())
-                runCatching {
-                    exchange.responseBody.use { out ->
-                        var offset = 0
-                        while (offset < payload.size) {
-                            val chunk = minOf(16 * 1024, payload.size - offset)
-                            out.write(payload, offset, chunk)
-                            out.flush()
-                            offset += chunk
-                        }
-                    }
+                writeHttpResponseHeaders(
+                    out = out,
+                    statusCode = 200,
+                    reason = "OK",
+                    contentLength = payload.size.toLong(),
+                    extraHeaders = mapOf("Accept-Ranges" to "bytes"),
+                )
+                var offset = 0
+                while (offset < payload.size && !pausedFlag.get()) {
+                    val chunk = minOf(16 * 1024, payload.size - offset)
+                    out.write(payload, offset, chunk)
+                    out.flush()
+                    offset += chunk
+                    // 限速发送确保客户端在收到 32KB 触发暂停前不会一次性把全量读完
+                    Thread.sleep(15)
                 }
             }
-        }
-        server.start()
-
-        try {
+        }.use { server ->
             val release = AppReleaseInfo(
                 versionCode = 12,
                 versionName = "1.1.9",
-                apkUrl = "http://127.0.0.1:${server.address.port}/pause/BayChat.apk",
+                apkUrl = "http://127.0.0.1:${server.port}/pause/BayChat.apk",
                 sha256 = expectedSha,
                 sizeBytes = payload.size.toLong(),
             )
@@ -390,9 +441,6 @@ class AppUpdateManagerTest {
             assertTrue(resumeResult is ResumableApkDownloader.DownloadResult.Success)
             val success = resumeResult as ResumableApkDownloader.DownloadResult.Success
             assertEquals(expectedSha, ResumableApkDownloader.computeSha256(success.apkFile))
-        } finally {
-            server.stop(0)
-            executor.shutdownNow()
         }
     }
 }
