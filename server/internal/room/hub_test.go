@@ -2,12 +2,19 @@ package room
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"baychat/server/internal/config"
+	"github.com/gorilla/websocket"
 )
 
 func newTestConfig(t *testing.T) *config.Config {
@@ -100,7 +107,7 @@ func TestEphemeralRoomDestroyAndBurnedCode(t *testing.T) {
 	}
 
 	// 销毁房间后应无法再次访问，并返回 ErrRoomExpired，且聊天记录被立即清空
-	if err := hub.DeleteRoom(created.Code, "", "测试用户"); err != nil {
+	if err := hub.DeleteRoom(created.Code, created.OwnerToken, "", "测试用户"); err != nil {
 		t.Fatalf("销毁一次性房间失败: %v", err)
 	}
 	if _, err := hub.GetRoomInfo(created.Code); !errors.Is(err, ErrRoomExpired) {
@@ -262,7 +269,7 @@ func TestAdjustableAttachmentLimitAndRecall(t *testing.T) {
 		t.Fatalf("创建房间附件上限异常: room=%+v err=%v", created, err)
 	}
 
-	updated, err := hub.UpdateMaxFileSize("size-room", "", 256, "小美")
+	updated, err := hub.UpdateMaxFileSize("size-room", created.OwnerToken, "", 256, "小美")
 	if err != nil || updated != 256 {
 		t.Fatalf("动态修改房间附件上限失败: updated=%d err=%v", updated, err)
 	}
@@ -432,7 +439,7 @@ func TestRandomAndPublicPasswordlessRooms(t *testing.T) {
 	}
 
 	// 5. 动态关闭 pub2 的随机串门开关后，再次排除 pub1 必须无房可抽
-	updatedAllow, err := hub.UpdateAllowRandom(pub2.Code, "", false, "房主")
+	updatedAllow, err := hub.UpdateAllowRandom(pub2.Code, pub2.OwnerToken, "", false, "房主")
 	if err != nil || updatedAllow {
 		t.Fatalf("关闭随机串门失败: allow=%v err=%v", updatedAllow, err)
 	}
@@ -490,10 +497,265 @@ func TestCachedFileAttachmentLifecycle(t *testing.T) {
 	}
 
 	// 清空历史记录后文件必须被物理删除
-	if _, err := hub.ClearHistory(rm.Code, "p123", "tester"); err != nil {
+	if _, err := hub.ClearHistory(rm.Code, rm.OwnerToken, "p123", "tester"); err != nil {
 		t.Fatalf("清空历史失败: %v", err)
 	}
 	if _, _, _, err := hub.OpenRoomFile(rm.Code, "p123", fileID); !errors.Is(err, ErrMediaNotFound) {
 		t.Fatalf("清空历史后预期附件返回 ErrMediaNotFound，实际: %v", err)
+	}
+}
+
+func TestOwnerTokenAndRoomProfileAndWebSocketAuth(t *testing.T) {
+	cfg := newTestConfig(t)
+	hub, err := NewHub(cfg)
+	if err != nil {
+		t.Fatalf("初始化 Hub 失败: %v", err)
+	}
+	defer hub.Close()
+
+	// 创建房间必须返回 32 位十六进制 ownerToken 且 hasOwner=true
+	yes := true
+	created, err := hub.CreateRoom(CreateRoomRequest{
+		Mode:        ModeFixed,
+		Code:        "owner-room-1",
+		AllowRandom: &yes,
+	})
+	if err != nil {
+		t.Fatalf("创建房间失败: %v", err)
+	}
+	if !created.HasOwner || len(created.OwnerToken) != 32 {
+		t.Fatalf("预期返回 32 位 ownerToken 且 hasOwner=true，实际: %+v", created)
+	}
+	// GetRoomInfo 绝不能泄露 ownerToken
+	info, err := hub.GetRoomInfo(created.Code)
+	if err != nil || !info.HasOwner || info.OwnerToken != "" {
+		t.Fatalf("GetRoomInfo 不应返回 ownerToken: %+v err=%v", info, err)
+	}
+
+	// 非房主 REST 管理操作必须返回 ErrNotOwner
+	if _, err := hub.UpdateMaxFileSize(created.Code, "wrong-token", "", 100, "路人"); !errors.Is(err, ErrNotOwner) {
+		t.Fatalf("预期非房主修改上限返回 ErrNotOwner，实际: %v", err)
+	}
+	if _, err := hub.UpdateAllowRandom(created.Code, "", "", false, "路人"); !errors.Is(err, ErrNotOwner) {
+		t.Fatalf("预期非房主修改随机开关返回 ErrNotOwner，实际: %v", err)
+	}
+	if _, _, err := hub.UpdateRetention(created.Code, "", "", 1, "路人"); !errors.Is(err, ErrNotOwner) {
+		t.Fatalf("预期非房主修改保留天数返回 ErrNotOwner，实际: %v", err)
+	}
+	if _, err := hub.ClearHistory(created.Code, "", "", "路人"); !errors.Is(err, ErrNotOwner) {
+		t.Fatalf("预期非房主清空历史返回 ErrNotOwner，实际: %v", err)
+	}
+	if err := hub.DeleteRoom(created.Code, "", "", "路人"); !errors.Is(err, ErrNotOwner) {
+		t.Fatalf("预期非房主销毁房间返回 ErrNotOwner，实际: %v", err)
+	}
+
+	// 房主调用 UpdateRoomProfile 设置密码与主题后，allowRandom 必须强制为 false
+	newPwd := "roompass123"
+	newTopic := "工作传文件"
+	updatedProfile, err := hub.UpdateRoomProfile(created.Code, created.OwnerToken, "", &newPwd, &newTopic, "房主")
+	if err != nil {
+		t.Fatalf("房主更新房间资料失败: %v", err)
+	}
+	if !updatedProfile.HasPassword || updatedProfile.AllowRandom || updatedProfile.Topic != "工作传文件" {
+		t.Fatalf("更新资料后状态异常: %+v", updatedProfile)
+	}
+
+	// 启动 WS 测试服务器校验 join 的 ownerToken、isOwner、clientId 透传及非房主 WS 操作拦截
+	srv := httptest.NewServer(http.HandlerFunc(hub.ServeWS))
+	defer srv.Close()
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+
+	// 1) 房主连入
+	ownerConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("房主 WS 连接失败: %v", err)
+	}
+	defer func() { _ = ownerConn.Close() }()
+	_ = ownerConn.WriteJSON(SignalEnvelope{
+		Type:       "join",
+		RoomCode:   created.Code,
+		PeerID:     "p_owner",
+		Password:   "roompass123",
+		OwnerToken: created.OwnerToken,
+		Profile:    &PeerProfile{Name: "房主A", ClientID: "cid_owner_1"},
+	})
+	var ownerJoined SignalEnvelope
+	if err := ownerConn.ReadJSON(&ownerJoined); err != nil {
+		t.Fatalf("读取房主 joined 失败: %v", err)
+	}
+	if ownerJoined.Type != "joined" || ownerJoined.IsOwner == nil || !*ownerJoined.IsOwner {
+		t.Fatalf("房主 joined 应标记 isOwner=true: %+v", ownerJoined)
+	}
+
+	// 2) 访客连入（不带 ownerToken）
+	guestConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("访客 WS 连接失败: %v", err)
+	}
+	defer func() { _ = guestConn.Close() }()
+	_ = guestConn.WriteJSON(SignalEnvelope{
+		Type:     "join",
+		RoomCode: created.Code,
+		PeerID:   "p_guest",
+		Password: "roompass123",
+		Profile:  &PeerProfile{Name: "访客B", ClientID: "cid_guest_2"},
+	})
+	var guestJoined SignalEnvelope
+	if err := guestConn.ReadJSON(&guestJoined); err != nil {
+		t.Fatalf("读取访客 joined 失败: %v", err)
+	}
+	if guestJoined.IsOwner == nil || *guestJoined.IsOwner {
+		t.Fatalf("访客 joined 应标记 isOwner=false: %+v", guestJoined)
+	}
+	if len(guestJoined.Peers) != 1 || guestJoined.Peers[0].ClientID != "cid_owner_1" {
+		t.Fatalf("PeerProfile.ClientID 未透传给其他成员: %+v", guestJoined.Peers)
+	}
+
+	// 访客尝试发送 destroy_room 与 clear_history 必须收到 NOT_OWNER 错误，房间不能被销毁
+	_ = guestConn.WriteJSON(SignalEnvelope{Type: "destroy_room"})
+	var errEnv SignalEnvelope
+	if err := guestConn.ReadJSON(&errEnv); err != nil {
+		t.Fatalf("读取 NOT_OWNER 错误回包失败: %v", err)
+	}
+	if errEnv.Type != "error" || errEnv.ErrorCode != "NOT_OWNER" {
+		t.Fatalf("预期 WS 返回 NOT_OWNER，实际: %+v", errEnv)
+	}
+	if _, err := hub.GetRoomInfo(created.Code); err != nil {
+		t.Fatalf("非房主操作后房间不应被销毁: %v", err)
+	}
+
+	// 房主移除密码（传空字符串）
+	emptyPwd := ""
+	clearedPwd, err := hub.UpdateRoomProfile(created.Code, created.OwnerToken, "", &emptyPwd, nil, "房主")
+	if err != nil || clearedPwd.HasPassword {
+		t.Fatalf("移除密码失败: %+v err=%v", clearedPwd, err)
+	}
+}
+
+func TestLegacyFixedRoomWithoutOwnerFallback(t *testing.T) {
+	cfg := newTestConfig(t)
+	// 手动写入一个无 ownerTokenHash 的老版本常驻房
+	fs, err := NewFixedStore(cfg.DataDir)
+	if err != nil {
+		t.Fatalf("创建 FixedStore 失败: %v", err)
+	}
+	nowMs := time.Now().UnixMilli()
+	err = fs.SaveAll(map[string]*FixedRoomRecord{
+		"legacy-room": {
+			Code:          "legacy-room",
+			Mode:          ModeFixed,
+			PasswordHash:  HashPassword("oldpass"),
+			MaxPeers:      4,
+			RetentionDays: 3,
+			CreatedAt:     nowMs,
+			LastActiveAt:  nowMs,
+		},
+	})
+	if err != nil {
+		t.Fatalf("写入老房间失败: %v", err)
+	}
+
+	hub, err := NewHub(cfg)
+	if err != nil {
+		t.Fatalf("加载 Hub 失败: %v", err)
+	}
+	defer hub.Close()
+
+	info, err := hub.GetRoomInfo("legacy-room")
+	if err != nil || info.HasOwner {
+		t.Fatalf("老房间应标记 hasOwner=false: %+v err=%v", info, err)
+	}
+	// 错误密码被拒
+	if _, err := hub.UpdateMaxFileSize("legacy-room", "", "wrong", 100, "老用户"); !errors.Is(err, ErrWrongPassword) {
+		t.Fatalf("老房间错误密码预期返回 ErrWrongPassword，实际: %v", err)
+	}
+	// 正确密码放行
+	if mb, err := hub.UpdateMaxFileSize("legacy-room", "", "oldpass", 100, "老用户"); err != nil || mb != 100 {
+		t.Fatalf("老房间正确密码应允许修改: mb=%d err=%v", mb, err)
+	}
+}
+
+func TestFixedRoomSixDigitReservedAndIdleEviction(t *testing.T) {
+	cfg := newTestConfig(t)
+	cfg.FixedRoomIdleDays = 60
+	now := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+
+	hub, err := NewHub(cfg)
+	if err != nil {
+		t.Fatalf("初始化 Hub 失败: %v", err)
+	}
+	defer hub.Close()
+	hub.SetNowFunc(func() time.Time { return now })
+
+	// 1. 6 位纯数字禁止创建常驻房
+	if _, err := hub.CreateRoom(CreateRoomRequest{
+		Mode: ModeFixed,
+		Code: "123456",
+	}); !errors.Is(err, ErrCodeReserved) {
+		t.Fatalf("预期 6 位纯数字常驻房返回 ErrCodeReserved，实际: %v", err)
+	}
+
+	// 2. 创建一个合法常驻房与一个较新常驻房，验证 60 天无人活跃回收
+	if _, err := hub.CreateRoom(CreateRoomRequest{
+		Mode: ModeFixed,
+		Code: "idle-room",
+	}); err != nil {
+		t.Fatalf("创建 idle-room 失败: %v", err)
+	}
+	now = now.Add(30 * 24 * time.Hour)
+	if _, err := hub.CreateRoom(CreateRoomRequest{
+		Mode: ModeFixed,
+		Code: "active-room",
+	}); err != nil {
+		t.Fatalf("创建 active-room 失败: %v", err)
+	}
+
+	// 推进到第 61 天：idle-room 已空闲 61 天应被回收，active-room 仅 31 天应保留
+	now = now.Add(31 * 24 * time.Hour)
+	purged := hub.PurgeIdleFixedRooms(now)
+	if purged != 1 {
+		t.Fatalf("预期回收 1 个空闲常驻房，实际回收 %d 个", purged)
+	}
+	if _, err := hub.GetRoomInfo("idle-room"); !errors.Is(err, ErrRoomNotFound) {
+		t.Fatalf("idle-room 应已被回收，实际: %v", err)
+	}
+	if _, err := hub.GetRoomInfo("active-room"); err != nil {
+		t.Fatalf("active-room 不应被回收: %v", err)
+	}
+}
+
+func TestReportStoreAppendAndNoPlaintextIP(t *testing.T) {
+	dir := t.TempDir()
+	rs, err := NewReportStore(dir)
+	if err != nil {
+		t.Fatalf("创建 ReportStore 失败: %v", err)
+	}
+
+	now := time.Date(2026, 11, 25, 18, 0, 0, 0, time.UTC)
+	if err := rs.Append(ReportRequest{
+		RoomCode:         "BAY-8888",
+		ReportedName:     "恶意访客",
+		ReportedClientID: "u_bad_1",
+		Reason:           "发送垃圾广告",
+		MessageID:        "msg_123",
+		ReporterClientID: "u_good_1",
+	}, "203.0.113.88", now); err != nil {
+		t.Fatalf("写入举报失败: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dir, "reports.jsonl"))
+	if err != nil {
+		t.Fatalf("读取 reports.jsonl 失败: %v", err)
+	}
+	text := string(raw)
+	if strings.Contains(text, "203.0.113.88") {
+		t.Fatalf("reports.jsonl 绝不可包含明文 IP: %s", text)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(text)), &parsed); err != nil {
+		t.Fatalf("reports.jsonl JSON 格式无效: %v", err)
+	}
+	if parsed["roomCode"] != "bay-8888" || parsed["reason"] != "发送垃圾广告" || parsed["ipHash"] == "" {
+		t.Fatalf("举报记录字段异常: %+v", parsed)
 	}
 }

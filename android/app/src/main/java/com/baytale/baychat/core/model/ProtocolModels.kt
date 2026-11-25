@@ -74,7 +74,7 @@ data class RoomSummary(
     val code: String,
     val mode: String = "ephemeral",
     val hasPassword: Boolean = false,
-    val allowRandom: Boolean = true,
+    val allowRandom: Boolean = false,
     val topic: String = "",
     val maxPeers: Int = 6,
     val peerCount: Int = 0,
@@ -84,6 +84,9 @@ data class RoomSummary(
     val createdAt: Long = 0,
     val lastActiveAt: Long = 0,
     val history: HistoryMeta = HistoryMeta(),
+    // 房主令牌与房主身份标识（仅创房时由服务端下发）
+    val ownerToken: String? = null,
+    val isOwner: Boolean = false,
 )
 
 @Serializable
@@ -134,7 +137,10 @@ data class TransferRecord(
     val peerName: String = "",
     val savedDisplayPath: String? = null,
     val localPath: String? = null,
+    val contentUri: String? = null,
     val verified: Boolean = false,
+    val recipientsDone: Int = 1,
+    val recipientsTotal: Int = 1,
     val timestamp: Long = System.currentTimeMillis(),
 )
 
@@ -145,6 +151,7 @@ data class PartialFileMeta(
     val fileSize: Long,
     val roomCode: String,
     val peerName: String = "",
+    val resumeKey: String = "",
     val updatedAt: Long = System.currentTimeMillis(),
 )
 
@@ -156,6 +163,7 @@ data class PartialResumeItem(
     val roomCode: String,
     val peerName: String,
     val lastModified: Long,
+    val resumeKey: String = "",
 )
 
 @Serializable
@@ -192,6 +200,7 @@ data class PeerProfile(
     val name: String,
     val avatar: String = "preset:cat",
     val joinedAt: Long = 0,
+    val clientId: String? = null,
 )
 
 @Serializable
@@ -200,6 +209,8 @@ data class SavedFixedRoom(
     val hasPassword: Boolean = false,
     val password: String = "",
     val lastVisitedAt: Long = System.currentTimeMillis(),
+    val ownerToken: String = "",
+    val alias: String = "",
 )
 
 @Serializable
@@ -209,6 +220,173 @@ data class RecentRoom(
     val hasPassword: Boolean = false,
     val password: String = "",
     val lastVisitedAt: Long = System.currentTimeMillis(),
+    val ownerToken: String = "",
+)
+
+// 持久化已屏蔽成员信息（优先匹配 clientId，兜底匹配名称）
+@Serializable
+data class BlockedPeer(
+    val clientId: String,
+    val name: String,
+    val blockedAt: Long = System.currentTimeMillis(),
+)
+
+// 进程被杀后用于 10 分钟内快速恢复的最近活跃房间快照
+@Serializable
+data class LastActiveRoom(
+    val code: String,
+    val password: String = "",
+    val ownerToken: String = "",
+    val at: Long = System.currentTimeMillis(),
+)
+
+// 本地已发出的离线取件码记录
+@Serializable
+data class SavedPickupRecord(
+    val code: String,
+    val fileName: String,
+    val fileSize: Long,
+    val mimeType: String = "application/octet-stream",
+    val manageToken: String = "",
+    val fileId: String = "",
+    val createdAt: Long = System.currentTimeMillis(),
+    val expiresAt: Long = 0L,
+    val burnAfterRead: Boolean = false,
+    val downloadCount: Int = 0,
+)
+
+// 取件码上传/查询响应与元信息模型（与 Go server/internal/pickup/pickup.go 100% 字节对齐）
+@Serializable
+data class PickupCreateFileInput(
+    val name: String,
+    val size: Long,
+    val mime: String = "application/octet-stream",
+)
+
+@Serializable
+data class PickupCreateInitRequest(
+    val files: List<PickupCreateFileInput>,
+    val expireHours: Int = 24, // 1 | 24 | 72
+    val burnAfterRead: Boolean = false,
+    val password: String? = null,
+)
+
+@Serializable
+data class PickupFileInfo(
+    val fileId: String,
+    val name: String,
+    val size: Long,
+    val mime: String = "application/octet-stream",
+    val ready: Boolean = false,
+)
+
+@Serializable
+data class PickupCreateResponse(
+    val code: String,
+    val ownerToken: String = "",
+    val expiresAt: Long = 0L,
+    val files: List<PickupFileInfo> = emptyList(),
+)
+
+@Serializable
+data class PickupInfo(
+    val code: String,
+    val files: List<PickupFileInfo> = emptyList(),
+    val expiresAt: Long = 0L,
+    val burnAfterRead: Boolean = false,
+    val downloads: Int = 0,
+    val hasPassword: Boolean = false,
+    val burnedAt: Long = 0L,
+) {
+    val primaryFile: PickupFileInfo? get() = files.firstOrNull()
+    val fileName: String get() = primaryFile?.name.orEmpty()
+    val fileSize: Long get() = files.sumOf { it.size }
+    val mimeType: String get() = primaryFile?.mime ?: "application/octet-stream"
+}
+
+data class PickupTransferProgress(
+    val active: Boolean = false,
+    val code: String = "",
+    val fileName: String = "",
+    val transferredBytes: Long = 0L,
+    val totalBytes: Long = 0L,
+    val speedBps: Double = 0.0,
+    val isUpload: Boolean = true,
+    val errorMessage: String? = null,
+)
+
+// 附近设备发现与邀请协议模型（与 Go server/internal/nearby/nearby.go 100% 对齐）
+@Serializable
+data class NearbyPeer(
+    val clientId: String,
+    val name: String,
+    val avatar: String = "preset:cat",
+    val device: String = "android",
+) {
+    val deviceType: String get() = device
+}
+
+@Serializable
+data class NearbyInvite(
+    val inviteId: String,
+    val fromClientId: String,
+    val fromName: String,
+    val fromAvatar: String = "preset:cat",
+    val roomCode: String,
+    val expiresAt: Long = 0L,
+)
+
+@Serializable
+data class NearbyHeartbeatRequest(
+    val clientId: String,
+    val name: String,
+    val avatar: String,
+    val device: String = "android",
+    val network: String = "wifi", // wifi | cellular | unknown
+)
+
+@Serializable
+data class NearbyHeartbeatResponse(
+    val devices: List<NearbyPeer> = emptyList(),
+    val invites: List<NearbyInvite> = emptyList(),
+)
+
+@Serializable
+data class NearbyInviteRequest(
+    val fromClientId: String,
+    val toClientId: String,
+    val fromName: String,
+    val fromAvatar: String,
+)
+
+@Serializable
+data class NearbyInviteResponse(
+    val inviteId: String,
+    val room: RoomSummary? = null,
+    val ownerToken: String = "",
+)
+
+@Serializable
+data class NearbyRespondRequest(
+    val clientId: String,
+    val accept: Boolean,
+)
+
+@Serializable
+data class NearbyRespondResponse(
+    val status: String,
+    val roomCode: String = "",
+)
+
+// 举报接口请求体（与 Go server/internal/room/report.go 对齐）
+@Serializable
+data class ReportRequest(
+    val roomCode: String,
+    val reportedName: String,
+    val reportedClientId: String = "",
+    val reason: String = "违规内容",
+    val messageId: String? = null,
+    val reporterClientId: String = "",
 )
 
 @Serializable
@@ -246,6 +424,8 @@ data class SignalEnvelope(
     val targetPeerId: String? = null,
     val fromPeerId: String? = null,
     val password: String? = null,
+    val ownerToken: String? = null,
+    val isOwner: Boolean? = null,
     val profile: PeerProfile? = null,
     val peers: List<PeerProfile>? = null,
     val room: RoomSummary? = null,
@@ -307,6 +487,21 @@ enum class TransferStatus {
     ERROR,
 }
 
+// 云端附件备份上传状态
+enum class CloudUploadStatus {
+    NONE,
+    UPLOADING,
+    DONE,
+    FAILED,
+}
+
+// 文本/聊天消息发送状态
+enum class MessageSendStatus {
+    SENDING,
+    SENT,
+    FAILED,
+}
+
 data class FileTransferInfo(
     val transferId: String,
     val streamId: Int,
@@ -326,15 +521,37 @@ data class FileTransferInfo(
     val sha256: String? = null,
     val verified: Boolean = false,
     val localPath: String? = null,
+    val contentUri: String? = null,
     val savedDisplayPath: String? = null,
     val cachedDownloadUrl: String? = null,
     val isHistoryRecord: Boolean = false,
     val resumedFromBytes: Long = 0L,
     val canResumeBytes: Long = 0L,
     val errorMessage: String? = null,
+    val resumeKey: String? = null,
+    val cloudStatus: CloudUploadStatus = CloudUploadStatus.NONE,
+    val cloudError: String? = null,
+    val recipientsDone: Int = 0,
+    val recipientsTotal: Int = 1,
 )
 
-enum class ChatKind { TEXT, IMAGE, AUDIO, FILE, SYSTEM }
+// 消息种类定义：保持与既有 UI when 分支兼容，同时提供 CLIP 剪贴板同步类型
+class ChatKind private constructor(val name: String) {
+    override fun equals(other: Any?): Boolean = other is ChatKind && other.name == name
+    override fun hashCode(): Int = name.hashCode()
+    override fun toString(): String = name
+
+    companion object {
+        val TEXT = ChatKind("TEXT")
+        val IMAGE = ChatKind("IMAGE")
+        val AUDIO = ChatKind("AUDIO")
+        val FILE = ChatKind("FILE")
+        val SYSTEM = ChatKind("SYSTEM")
+        val CLIP = ChatKind("CLIP")
+
+        val entries: List<ChatKind> = listOf(TEXT, IMAGE, AUDIO, FILE, SYSTEM, CLIP)
+    }
+}
 
 data class ChatItem(
     val id: String,
@@ -352,5 +569,6 @@ data class ChatItem(
     val replyTo: ReplyQuote? = null,
     val reactions: Map<String, List<String>> = emptyMap(),
     val fromCache: Boolean = false,
+    val sendStatus: MessageSendStatus = MessageSendStatus.SENT,
     val transfer: FileTransferInfo? = null,
 )

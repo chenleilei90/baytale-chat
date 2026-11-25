@@ -3,9 +3,13 @@ package com.baytale.baychat.core.storage
 import android.content.Context
 import com.baytale.baychat.BuildConfig
 import com.baytale.baychat.core.model.AppThemeMode
+import com.baytale.baychat.core.model.AppearanceMode
+import com.baytale.baychat.core.model.BlockedPeer
+import com.baytale.baychat.core.model.LastActiveRoom
 import com.baytale.baychat.core.model.PartialFileMeta
 import com.baytale.baychat.core.model.RecentRoom
 import com.baytale.baychat.core.model.SavedFixedRoom
+import com.baytale.baychat.core.model.SavedPickupRecord
 import com.baytale.baychat.core.model.TransferRecord
 import com.baytale.baychat.core.model.UserProfile
 import com.baytale.baychat.core.util.FormatUtils
@@ -26,12 +30,34 @@ data class AppUserPrefs(
     // 原生交互音效与触感反馈开关
     val soundEnabled: Boolean = true,
     val hapticEnabled: Boolean = true,
+    // v1.2.0 外观与隐私/协同偏好设置
+    val appearance: AppearanceMode = AppearanceMode.SYSTEM,
+    val nearbyDiscoverable: Boolean = true,
+    val cloudBackupOnWifi: Boolean = true,
+    val acceptClipShare: Boolean = true,
+    val onboardingDone: Boolean = false,
+    val notificationAsked: Boolean = false,
 )
 
-// 本地偏好、传输记录与身份持久化仓库（全部存于应用私有 SharedPreferences，卸载自动清理）
+// 本地偏好、传输记录与身份持久化仓库（全部存于应用私有 SharedPreferences，已禁用系统云备份）
 class AppPrefsStore(context: Context) {
     private val sp = context.applicationContext.getSharedPreferences("baychat_prefs_v1", Context.MODE_PRIVATE)
     private val json = Json { ignoreUnknownKeys = true }
+
+    init {
+        migrateLegacyThemeIfNeeded()
+    }
+
+    // 若旧版存有 "neon" 暗黑主题，自动迁移为清风极简 (AIR) + 强制深色外观并立即持久化
+    private fun migrateLegacyThemeIfNeeded() {
+        val rawTheme = sp.getString(KEY_THEME_V2, null)
+        if (rawTheme.equals(AppThemeMode.NEON.id, ignoreCase = true)) {
+            sp.edit()
+                .putString(KEY_THEME_V2, AppThemeMode.AIR.id)
+                .putString(KEY_APPEARANCE, AppearanceMode.DARK.id)
+                .apply()
+        }
+    }
 
     fun hasAcceptedPrivacy(): Boolean = sp.getBoolean(KEY_PRIVACY_ACCEPTED, false)
 
@@ -58,25 +84,43 @@ class AppPrefsStore(context: Context) {
         sp.edit().putString(KEY_PROFILE, raw).apply()
     }
 
-    // v1.1.0 切换默认主题为方案 B「清风极简 (AIR)」，独立存储键确保老用户升级后立即体验新视觉
-    fun loadTheme(): AppThemeMode = AppThemeMode.fromId(sp.getString(KEY_THEME_V2, null))
+    fun loadTheme(): AppThemeMode {
+        migrateLegacyThemeIfNeeded()
+        return AppThemeMode.fromId(sp.getString(KEY_THEME_V2, null))
+    }
 
     fun saveTheme(mode: AppThemeMode) {
+        if (mode == AppThemeMode.NEON) {
+            sp.edit()
+                .putString(KEY_THEME_V2, AppThemeMode.AIR.id)
+                .putString(KEY_APPEARANCE, AppearanceMode.DARK.id)
+                .apply()
+            return
+        }
         sp.edit().putString(KEY_THEME_V2, mode.id).apply()
     }
 
-    fun loadPrefs(): AppUserPrefs = AppUserPrefs(
-        autoAcceptSmallFiles = sp.getBoolean(KEY_AUTO_ACCEPT, true),
-        autoAcceptMaxMB = sp.getInt(KEY_AUTO_ACCEPT_MB, 50).coerceIn(5, 500),
-        imageOriginalMode = sp.getBoolean(KEY_IMAGE_ORIGINAL, true),
-        serverUrl = sp.getString(KEY_SERVER_URL, BuildConfig.DEFAULT_SERVER_URL)
-            ?.takeIf { it.isNotBlank() } ?: BuildConfig.DEFAULT_SERVER_URL,
-        autoDownloadOnWifi = sp.getBoolean(KEY_AUTO_DOWNLOAD_WIFI, true),
-        ignoredVersionCode = sp.getInt(KEY_IGNORED_VERSION_CODE, 0),
-        lastUpdateCheckAt = sp.getLong(KEY_LAST_UPDATE_CHECK_AT, 0L),
-        soundEnabled = sp.getBoolean(KEY_SOUND_ENABLED, true),
-        hapticEnabled = sp.getBoolean(KEY_HAPTIC_ENABLED, true),
-    )
+    fun loadPrefs(): AppUserPrefs {
+        migrateLegacyThemeIfNeeded()
+        return AppUserPrefs(
+            autoAcceptSmallFiles = sp.getBoolean(KEY_AUTO_ACCEPT, true),
+            autoAcceptMaxMB = sp.getInt(KEY_AUTO_ACCEPT_MB, 50).coerceIn(5, 500),
+            imageOriginalMode = sp.getBoolean(KEY_IMAGE_ORIGINAL, true),
+            serverUrl = sp.getString(KEY_SERVER_URL, BuildConfig.DEFAULT_SERVER_URL)
+                ?.takeIf { it.isNotBlank() } ?: BuildConfig.DEFAULT_SERVER_URL,
+            autoDownloadOnWifi = sp.getBoolean(KEY_AUTO_DOWNLOAD_WIFI, true),
+            ignoredVersionCode = sp.getInt(KEY_IGNORED_VERSION_CODE, 0),
+            lastUpdateCheckAt = sp.getLong(KEY_LAST_UPDATE_CHECK_AT, 0L),
+            soundEnabled = sp.getBoolean(KEY_SOUND_ENABLED, true),
+            hapticEnabled = sp.getBoolean(KEY_HAPTIC_ENABLED, true),
+            appearance = AppearanceMode.fromId(sp.getString(KEY_APPEARANCE, null)),
+            nearbyDiscoverable = sp.getBoolean(KEY_NEARBY_DISCOVERABLE, true),
+            cloudBackupOnWifi = sp.getBoolean(KEY_CLOUD_BACKUP_WIFI, true),
+            acceptClipShare = sp.getBoolean(KEY_ACCEPT_CLIP_SHARE, true),
+            onboardingDone = sp.getBoolean(KEY_ONBOARDING_DONE, false),
+            notificationAsked = sp.getBoolean(KEY_NOTIFICATION_ASKED, false),
+        )
+    }
 
     fun savePrefs(prefs: AppUserPrefs) {
         sp.edit()
@@ -89,10 +133,15 @@ class AppPrefsStore(context: Context) {
             .putLong(KEY_LAST_UPDATE_CHECK_AT, prefs.lastUpdateCheckAt)
             .putBoolean(KEY_SOUND_ENABLED, prefs.soundEnabled)
             .putBoolean(KEY_HAPTIC_ENABLED, prefs.hapticEnabled)
+            .putString(KEY_APPEARANCE, prefs.appearance.id)
+            .putBoolean(KEY_NEARBY_DISCOVERABLE, prefs.nearbyDiscoverable)
+            .putBoolean(KEY_CLOUD_BACKUP_WIFI, prefs.cloudBackupOnWifi)
+            .putBoolean(KEY_ACCEPT_CLIP_SHARE, prefs.acceptClipShare)
+            .putBoolean(KEY_ONBOARDING_DONE, prefs.onboardingDone)
+            .putBoolean(KEY_NOTIFICATION_ASKED, prefs.notificationAsked)
             .apply()
     }
 
-    // OTA 与交互反馈独立快捷持久化方法，避免局部更新误覆盖其他字段
     fun setAutoDownloadOnWifi(enabled: Boolean) {
         sp.edit().putBoolean(KEY_AUTO_DOWNLOAD_WIFI, enabled).apply()
     }
@@ -113,6 +162,30 @@ class AppPrefsStore(context: Context) {
         sp.edit().putBoolean(KEY_HAPTIC_ENABLED, enabled).apply()
     }
 
+    fun setAppearance(mode: AppearanceMode) {
+        sp.edit().putString(KEY_APPEARANCE, mode.id).apply()
+    }
+
+    fun setNearbyDiscoverable(enabled: Boolean) {
+        sp.edit().putBoolean(KEY_NEARBY_DISCOVERABLE, enabled).apply()
+    }
+
+    fun setCloudBackupOnWifi(enabled: Boolean) {
+        sp.edit().putBoolean(KEY_CLOUD_BACKUP_WIFI, enabled).apply()
+    }
+
+    fun setAcceptClipShare(enabled: Boolean) {
+        sp.edit().putBoolean(KEY_ACCEPT_CLIP_SHARE, enabled).apply()
+    }
+
+    fun setOnboardingDone(done: Boolean) {
+        sp.edit().putBoolean(KEY_ONBOARDING_DONE, done).apply()
+    }
+
+    fun setNotificationAsked(asked: Boolean) {
+        sp.edit().putBoolean(KEY_NOTIFICATION_ASKED, asked).apply()
+    }
+
     fun loadSavedRooms(): List<SavedFixedRoom> {
         val raw = sp.getString(KEY_SAVED_ROOMS, null) ?: return emptyList()
         return runCatching {
@@ -121,11 +194,38 @@ class AppPrefsStore(context: Context) {
     }
 
     fun upsertSavedRoom(room: SavedFixedRoom): List<SavedFixedRoom> {
+        val existing = loadSavedRooms().firstOrNull { it.code.equals(room.code, ignoreCase = true) }
+        val merged = room.copy(
+            ownerToken = room.ownerToken.ifBlank { existing?.ownerToken.orEmpty() },
+            alias = room.alias.ifBlank { existing?.alias.orEmpty() },
+            lastVisitedAt = System.currentTimeMillis(),
+        )
         val list = loadSavedRooms().filterNot { it.code.equals(room.code, ignoreCase = true) }.toMutableList()
-        list.add(0, room.copy(lastVisitedAt = System.currentTimeMillis()))
+        list.add(0, merged)
         val trimmed = list.take(20)
         sp.edit().putString(KEY_SAVED_ROOMS, json.encodeToString(ListSerializer(SavedFixedRoom.serializer()), trimmed)).apply()
         return trimmed
+    }
+
+    fun renameSavedRoom(code: String, alias: String): List<SavedFixedRoom> {
+        val next = loadSavedRooms().map {
+            if (it.code.equals(code, ignoreCase = true)) it.copy(alias = alias.trim().take(24)) else it
+        }
+        sp.edit().putString(KEY_SAVED_ROOMS, json.encodeToString(ListSerializer(SavedFixedRoom.serializer()), next)).apply()
+        return next
+    }
+
+    fun updateSavedPassword(code: String, newPassword: String): List<SavedFixedRoom> {
+        val clean = newPassword.trim()
+        val next = loadSavedRooms().map {
+            if (it.code.equals(code, ignoreCase = true)) {
+                it.copy(hasPassword = clean.isNotBlank(), password = clean)
+            } else {
+                it
+            }
+        }
+        sp.edit().putString(KEY_SAVED_ROOMS, json.encodeToString(ListSerializer(SavedFixedRoom.serializer()), next)).apply()
+        return next
     }
 
     fun removeSavedRoom(code: String): List<SavedFixedRoom> {
@@ -143,8 +243,13 @@ class AppPrefsStore(context: Context) {
     }
 
     fun upsertRecentRoom(room: RecentRoom): List<RecentRoom> {
+        val existing = loadRecentRooms().firstOrNull { it.code.equals(room.code, ignoreCase = true) }
+        val merged = room.copy(
+            ownerToken = room.ownerToken.ifBlank { existing?.ownerToken.orEmpty() },
+            lastVisitedAt = System.currentTimeMillis(),
+        )
         val list = loadRecentRooms().filterNot { it.code.equals(room.code, ignoreCase = true) }.toMutableList()
-        list.add(0, room.copy(lastVisitedAt = System.currentTimeMillis()))
+        list.add(0, merged)
         val trimmed = list.take(10)
         sp.edit().putString(KEY_RECENT_ROOMS, json.encodeToString(ListSerializer(RecentRoom.serializer()), trimmed)).apply()
         return trimmed
@@ -159,6 +264,77 @@ class AppPrefsStore(context: Context) {
     fun clearRecentRooms(): List<RecentRoom> {
         sp.edit().remove(KEY_RECENT_ROOMS).apply()
         return emptyList()
+    }
+
+    // 持久化屏蔽列表（按 clientId 唯一去重）
+    fun loadBlockedPeers(): List<BlockedPeer> {
+        val raw = sp.getString(KEY_BLOCKED_CLIENTS, null) ?: return emptyList()
+        return runCatching {
+            json.decodeFromString(ListSerializer(BlockedPeer.serializer()), raw)
+                .sortedByDescending { it.blockedAt }
+        }.getOrDefault(emptyList())
+    }
+
+    fun addBlockedPeer(peer: BlockedPeer): List<BlockedPeer> {
+        val list = loadBlockedPeers()
+            .filterNot { it.clientId.equals(peer.clientId, ignoreCase = true) }
+            .toMutableList()
+        list.add(0, peer)
+        val trimmed = list.take(200)
+        sp.edit().putString(KEY_BLOCKED_CLIENTS, json.encodeToString(ListSerializer(BlockedPeer.serializer()), trimmed)).apply()
+        return trimmed
+    }
+
+    fun removeBlockedPeer(clientId: String): List<BlockedPeer> {
+        val next = loadBlockedPeers().filterNot { it.clientId.equals(clientId, ignoreCase = true) }
+        sp.edit().putString(KEY_BLOCKED_CLIENTS, json.encodeToString(ListSerializer(BlockedPeer.serializer()), next)).apply()
+        return next
+    }
+
+    fun clearBlockedPeers(): List<BlockedPeer> {
+        sp.edit().remove(KEY_BLOCKED_CLIENTS).apply()
+        return emptyList()
+    }
+
+    // 我发出的离线取件码持久化记录
+    fun loadMyPickups(): List<SavedPickupRecord> {
+        val raw = sp.getString(KEY_MY_PICKUPS, null) ?: return emptyList()
+        return runCatching {
+            json.decodeFromString(ListSerializer(SavedPickupRecord.serializer()), raw)
+                .sortedByDescending { it.createdAt }
+        }.getOrDefault(emptyList())
+    }
+
+    fun upsertMyPickup(record: SavedPickupRecord): List<SavedPickupRecord> {
+        val list = loadMyPickups()
+            .filterNot { it.code.equals(record.code, ignoreCase = true) }
+            .toMutableList()
+        list.add(0, record)
+        val trimmed = list.take(30)
+        sp.edit().putString(KEY_MY_PICKUPS, json.encodeToString(ListSerializer(SavedPickupRecord.serializer()), trimmed)).apply()
+        return trimmed
+    }
+
+    fun removeMyPickup(code: String): List<SavedPickupRecord> {
+        val next = loadMyPickups().filterNot { it.code.equals(code, ignoreCase = true) }
+        sp.edit().putString(KEY_MY_PICKUPS, json.encodeToString(ListSerializer(SavedPickupRecord.serializer()), next)).apply()
+        return next
+    }
+
+    // 进程被杀后最近活跃房间持久化（用于 10 分钟内冷启动恢复提示）
+    fun loadLastActiveRoom(): LastActiveRoom? {
+        val raw = sp.getString(KEY_LAST_ACTIVE_ROOM, null) ?: return null
+        return runCatching {
+            json.decodeFromString(LastActiveRoom.serializer(), raw)
+        }.getOrNull()
+    }
+
+    fun saveLastActiveRoom(room: LastActiveRoom) {
+        sp.edit().putString(KEY_LAST_ACTIVE_ROOM, json.encodeToString(LastActiveRoom.serializer(), room)).apply()
+    }
+
+    fun clearLastActiveRoom() {
+        sp.edit().remove(KEY_LAST_ACTIVE_ROOM).apply()
     }
 
     // 传输中心：持久化已完成文件记录
@@ -227,5 +403,14 @@ class AppPrefsStore(context: Context) {
         private const val KEY_LAST_UPDATE_CHECK_AT = "ota_last_update_check_at_v1"
         private const val KEY_SOUND_ENABLED = "ui_sound_enabled_v1"
         private const val KEY_HAPTIC_ENABLED = "ui_haptic_enabled_v1"
+        private const val KEY_APPEARANCE = "ui_appearance_mode_v1"
+        private const val KEY_NEARBY_DISCOVERABLE = "nearby_discoverable_v1"
+        private const val KEY_CLOUD_BACKUP_WIFI = "cloud_backup_wifi_v1"
+        private const val KEY_ACCEPT_CLIP_SHARE = "accept_clip_share_v1"
+        private const val KEY_ONBOARDING_DONE = "onboarding_done_v1"
+        private const val KEY_NOTIFICATION_ASKED = "notification_asked_v1"
+        private const val KEY_BLOCKED_CLIENTS = "blocked_clients_v1"
+        private const val KEY_MY_PICKUPS = "my_pickups_v1"
+        private const val KEY_LAST_ACTIVE_ROOM = "last_active_room_v1"
     }
 }

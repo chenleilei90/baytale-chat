@@ -516,9 +516,12 @@ func detectSafeMediaMIME(content []byte, declaredMime string) (string, bool) {
 	case "audio/ogg", "audio/mpeg", "audio/wav", "audio/webm":
 		return detected, true
 	}
-	// WebM / Ogg / MP4 语音流在部分浏览器中 DetectContentType 可能返回 video/webm 或 application/octet-stream
+	// WebM / Ogg / MP4 语音流在部分浏览器或移动端中 DetectContentType 可能返回 video/webm、video/mp4 或 application/octet-stream
 	lower := strings.ToLower(strings.TrimSpace(strings.Split(declaredMime, ";")[0]))
-	if (detected == "video/webm" || detected == "application/octet-stream") &&
+	if lower == "audio/m4a" || lower == "audio/x-m4a" {
+		lower = "audio/mp4"
+	}
+	if (detected == "video/webm" || detected == "video/mp4" || detected == "application/octet-stream") &&
 		(lower == "audio/webm" || lower == "audio/ogg" || lower == "audio/mp4") {
 		// 二次核验常见容器魔数（EBML 0x1A45DFA3 / OggS / ftyp）
 		if len(content) >= 8 {

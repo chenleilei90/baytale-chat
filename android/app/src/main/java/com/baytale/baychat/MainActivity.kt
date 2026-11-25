@@ -73,7 +73,11 @@ class MainActivity : ComponentActivity() {
                 android.graphics.Color.TRANSPARENT,
             ),
         )
-        parseIncomingIntent(intent)
+        // B10：仅冷启动 (savedInstanceState == null) 时解析启动 Intent，并在解析后立即清空，防止旋转/重建重放
+        if (savedInstanceState == null) {
+            parseIncomingIntent(intent)
+            setIntent(Intent())
+        }
 
         setContent {
             val uiState by viewModel.uiState.collectAsState()
@@ -82,7 +86,12 @@ class MainActivity : ComponentActivity() {
 
             val notificationPermLauncher = rememberLauncherForActivityResult(
                 contract = ActivityResultContracts.RequestPermission()
-            ) { /* 拒绝也不阻断应用使用 */ }
+            ) { granted ->
+                viewModel.markNotificationAsked()
+                if (!granted) {
+                    viewModel.showToast("已跳过通知权限，如需后台来件提醒可在系统设置中开启")
+                }
+            }
 
             val qrScanLauncher = rememberLauncherForActivityResult(
                 contract = ScanContract()
@@ -105,17 +114,28 @@ class MainActivity : ComponentActivity() {
                 qrScanLauncher.launch(opts)
             }
 
-            LaunchedEffect(uiState.activeRoom?.roomCode, uiState.otaState.status) {
+            // B24：仅在尚未询问过通知权限时按需引导一次，避免每次切换房间重复弹窗
+            LaunchedEffect(uiState.activeRoom?.roomCode, uiState.otaState.status, uiState.prefs.notificationAsked) {
                 val needNotify = uiState.activeRoom != null ||
                     (uiState.otaState.status == OtaUpdateStatus.DOWNLOADING && !uiState.otaState.isSilentBackground)
-                if (needNotify && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                if (needNotify && !uiState.prefs.notificationAsked && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     val granted = ContextCompat.checkSelfPermission(
                         this@MainActivity,
                         Manifest.permission.POST_NOTIFICATIONS
                     ) == PackageManager.PERMISSION_GRANTED
                     if (!granted) {
                         notificationPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    } else {
+                        viewModel.markNotificationAsked()
                     }
+                }
+            }
+
+            // Phase 1 安全适配：桌面快捷方式触发扫码时直接呼起原生扫码器（QUICK_SEND / PICKUP 留待 Phase 2 UI 路由）
+            LaunchedEffect(uiState.pendingAppAction, uiState.privacyAccepted) {
+                if (uiState.privacyAccepted && uiState.pendingAppAction == com.baytale.baychat.ui.AppShortcutAction.SCAN) {
+                    viewModel.consumePendingAppAction()
+                    launchQrScanner()
                 }
             }
 
@@ -127,7 +147,7 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            BayChatTheme(themeMode = uiState.themeMode) {
+            BayChatTheme(accent = uiState.themeMode, appearance = uiState.prefs.appearance) {
                 val colors = LocalBayColors.current
 
                 BackHandler(enabled = uiState.activeRoom != null && !uiState.roomMinimized) {
@@ -362,10 +382,18 @@ class MainActivity : ComponentActivity() {
         viewModel.onAppForegrounded()
     }
 
+    override fun onStop() {
+        if (!isChangingConfigurations) {
+            viewModel.onAppBackgrounded()
+        }
+        super.onStop()
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        setIntent(intent)
         parseIncomingIntent(intent)
+        // B10：解析完毕后清空 Intent，防止配置变更或重建时重放深链/分享
+        setIntent(Intent())
     }
 
     private fun parseIncomingIntent(intent: Intent?) {

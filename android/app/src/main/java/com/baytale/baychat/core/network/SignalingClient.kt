@@ -35,9 +35,11 @@ interface SignalingCallbacks {
     fun onHistoryCleared(env: SignalEnvelope)
     fun onRoomDestroyed(reason: String)
     fun onError(code: String, message: String)
+    fun onQueuedMessagesDropped(messageIds: List<String>) {}
+    fun onQueuedMessageFlushed(messageId: String) {}
 }
 
-// 持久化 WebSocket 信令客户端：支持 18 秒保活心跳、指数退避断线重连与致命错误熔断
+// 持久化 WebSocket 信令客户端：支持 18 秒保活心跳、断线重发队列（上限 200 条/10 分钟）、网络恢复秒重连与致命错误熔断
 class SignalingClient(
     private val wsUrl: String,
     private val roomCode: String,
@@ -45,6 +47,7 @@ class SignalingClient(
     @Volatile private var profile: PeerProfile,
     private val okHttpClient: OkHttpClient,
     private val callbacks: SignalingCallbacks,
+    private val ownerToken: String = "",
 ) {
     private val json = Json {
         ignoreUnknownKeys = true
@@ -53,6 +56,8 @@ class SignalingClient(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val closedManually = AtomicBoolean(false)
+    private val joinedReady = AtomicBoolean(false)
+    private val outboundQueue = OutboundSignalQueue()
 
     @Volatile
     private var webSocket: WebSocket? = null
@@ -68,14 +73,29 @@ class SignalingClient(
         "INVALID_JOIN",
     )
 
+    fun isConnected(): Boolean = webSocket != null && joinedReady.get()
+
     fun connect() {
         closedManually.set(false)
         reconnectAttempts = 0
         openSocket()
     }
 
+    // B17：系统网络恢复时清零退避计数并立即触发重连
+    fun notifyNetworkAvailable() {
+        if (closedManually.get()) return
+        reconnectAttempts = 0
+        if (webSocket == null) {
+            reconnectJob?.cancel()
+            reconnectJob = null
+            openSocket()
+        }
+    }
+
+    @Synchronized
     private fun openSocket() {
         if (closedManually.get()) return
+        joinedReady.set(false)
         cleanupSocketOnly()
 
         val request = Request.Builder().url(wsUrl).build()
@@ -86,12 +106,14 @@ class SignalingClient(
                     if (this@SignalingClient.webSocket !== webSocket) return
                     reconnectAttempts = 0
                     callbacks.onConnectionState(true)
-                    send(
+                    sendRawImmediate(
+                        webSocket,
                         SignalEnvelope(
                             type = "join",
                             roomCode = roomCode,
                             peerId = profile.peerId,
                             password = password,
+                            ownerToken = ownerToken.takeIf { it.isNotBlank() },
                             profile = profile,
                         )
                     )
@@ -103,7 +125,11 @@ class SignalingClient(
                     val env = runCatching { json.decodeFromString(SignalEnvelope.serializer(), text) }.getOrNull()
                         ?: return
                     when (env.type) {
-                        "joined" -> callbacks.onJoined(env)
+                        "joined" -> {
+                            joinedReady.set(true)
+                            callbacks.onJoined(env)
+                            flushQueuedSignals(webSocket)
+                        }
                         "peer_joined" -> env.profile?.let { callbacks.onPeerJoined(it) }
                         "peer_updated" -> env.profile?.let { callbacks.onPeerUpdated(it) }
                         "peer_left" -> env.peerId?.let { callbacks.onPeerLeft(it) }
@@ -116,12 +142,14 @@ class SignalingClient(
                         "history_cleared" -> callbacks.onHistoryCleared(env)
                         "room_destroyed" -> {
                             closedManually.set(true)
+                            joinedReady.set(false)
                             callbacks.onRoomDestroyed(env.reason ?: "房间已销毁")
                         }
                         "error" -> {
                             val code = env.errorCode ?: "ERROR"
                             if (code in fatalErrors) {
                                 closedManually.set(true)
+                                joinedReady.set(false)
                             }
                             callbacks.onError(code, env.error ?: "连接失败")
                         }
@@ -143,11 +171,14 @@ class SignalingClient(
     }
 
     private fun handleDisconnect() {
+        joinedReady.set(false)
+        webSocket = null
         stopTimers()
         callbacks.onConnectionState(false)
         if (!closedManually.get()) {
             val delayMs = min(10_000L, (1000.0 * 2.0.pow(reconnectAttempts)).toLong())
             reconnectAttempts = min(reconnectAttempts + 1, 5)
+            reconnectJob?.cancel()
             reconnectJob = scope.launch {
                 delay(delayMs)
                 if (!closedManually.get()) {
@@ -157,9 +188,45 @@ class SignalingClient(
         }
     }
 
-    fun send(env: SignalEnvelope) {
-        val raw = runCatching { json.encodeToString(SignalEnvelope.serializer(), env) }.getOrNull() ?: return
-        webSocket?.send(raw)
+    private fun flushQueuedSignals(ws: WebSocket) {
+        val drained = outboundQueue.drainValid()
+        if (drained.expiredMessageIds.isNotEmpty()) {
+            callbacks.onQueuedMessagesDropped(drained.expiredMessageIds)
+        }
+        drained.readyToSend.forEach { env ->
+            val ok = sendRawImmediate(ws, env)
+            if (ok) {
+                env.message?.id?.let { callbacks.onQueuedMessageFlushed(it) }
+            } else {
+                val evicted = outboundQueue.enqueue(env)
+                if (evicted != null) {
+                    callbacks.onQueuedMessagesDropped(listOf(evicted))
+                }
+            }
+        }
+    }
+
+    private fun sendRawImmediate(ws: WebSocket, env: SignalEnvelope): Boolean {
+        val raw = runCatching { json.encodeToString(SignalEnvelope.serializer(), env) }.getOrNull() ?: return false
+        return runCatching { ws.send(raw) }.getOrDefault(false)
+    }
+
+    // 返回是否即时发出（false 表示已暂存断线重发队列）
+    fun send(env: SignalEnvelope): Boolean {
+        val ws = webSocket
+        if (env.type == "join" || env.type == "ping") {
+            return ws != null && sendRawImmediate(ws, env)
+        }
+        if (ws != null && joinedReady.get() && sendRawImmediate(ws, env)) {
+            return true
+        }
+        if (!closedManually.get()) {
+            val evicted = outboundQueue.enqueue(env)
+            if (evicted != null) {
+                callbacks.onQueuedMessagesDropped(listOf(evicted))
+            }
+        }
+        return false
     }
 
     fun updateProfile(next: PeerProfile) {
@@ -167,8 +234,8 @@ class SignalingClient(
         send(SignalEnvelope(type = "profile_update", profile = next))
     }
 
-    fun cacheMessage(message: CachedMessage) {
-        send(SignalEnvelope(type = "cache_message", message = message))
+    fun cacheMessage(message: CachedMessage): Boolean {
+        return send(SignalEnvelope(type = "cache_message", message = message))
     }
 
     fun recallMessage(messageId: String) {
@@ -197,18 +264,22 @@ class SignalingClient(
 
     fun leaveRoom() {
         closedManually.set(true)
-        send(SignalEnvelope(type = "leave_room"))
+        outboundQueue.clear()
+        webSocket?.let { sendRawImmediate(it, SignalEnvelope(type = "leave_room")) }
         disconnect()
     }
 
     fun destroyRoom() {
         closedManually.set(true)
-        send(SignalEnvelope(type = "destroy_room"))
+        outboundQueue.clear()
+        webSocket?.let { sendRawImmediate(it, SignalEnvelope(type = "destroy_room")) }
         disconnect()
     }
 
     fun disconnect() {
         closedManually.set(true)
+        joinedReady.set(false)
+        outboundQueue.clear()
         stopTimers()
         cleanupSocketOnly()
     }
@@ -218,7 +289,7 @@ class SignalingClient(
         heartbeatJob = scope.launch {
             while (isActive && !closedManually.get()) {
                 delay(18_000L)
-                send(SignalEnvelope(type = "ping"))
+                webSocket?.let { sendRawImmediate(it, SignalEnvelope(type = "ping")) }
             }
         }
     }

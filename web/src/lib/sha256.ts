@@ -143,3 +143,48 @@ export function bytesToHex(bytes: Uint8Array): string {
   }
   return hex;
 }
+
+const ONE_MIB = 1024 * 1024;
+const TWO_MIB = 2 * ONE_MIB;
+
+// 计算单段字节数组的 SHA-256 小写十六进制摘要
+export function sha256Hex(bytes: Uint8Array): string {
+  const sha = new IncrementalSHA256();
+  sha.update(bytes);
+  return sha.digestHex();
+}
+
+// 计算跨端一致的断点续传唯一键 resumeKey（Web 与 Android 严格对齐）：
+// - file.size < 2MiB: sha256(utf8(`${fileName}|${file.size}|${fullHex}`))
+// - file.size >= 2MiB: sha256(utf8(`${fileName}|${file.size}|${first1MiBHex}|${last1MiBHex}`))
+export async function computeFileResumeKey(file: Blob, fileName: string): Promise<string> {
+  const encoder = new TextEncoder();
+  if (file.size < TWO_MIB) {
+    const allBuf = await file.arrayBuffer();
+    const fullHex = sha256Hex(new Uint8Array(allBuf));
+    return sha256Hex(encoder.encode(`${fileName}|${file.size}|${fullHex}`));
+  }
+  const [firstBuf, lastBuf] = await Promise.all([
+    file.slice(0, ONE_MIB).arrayBuffer(),
+    file.slice(file.size - ONE_MIB, file.size).arrayBuffer(),
+  ]);
+  const firstHex = sha256Hex(new Uint8Array(firstBuf));
+  const lastHex = sha256Hex(new Uint8Array(lastBuf));
+  return sha256Hex(encoder.encode(`${fileName}|${file.size}|${firstHex}|${lastHex}`));
+}
+
+// 流式将文件前缀 [0, byteLength) 喂入增量 SHA-256（每片 1MiB，避免大文件占满内存）
+export async function feedBlobPrefixToSha(
+  blob: Blob,
+  byteLength: number,
+  sha: IncrementalSHA256
+): Promise<void> {
+  const target = Math.max(0, Math.min(byteLength, blob.size));
+  let pos = 0;
+  while (pos < target) {
+    const end = Math.min(pos + ONE_MIB, target);
+    const buf = await blob.slice(pos, end).arrayBuffer();
+    sha.update(new Uint8Array(buf));
+    pos = end;
+  }
+}

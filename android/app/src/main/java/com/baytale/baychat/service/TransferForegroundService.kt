@@ -16,7 +16,7 @@ import androidx.core.app.NotificationCompat
 import com.baytale.baychat.MainActivity
 import com.baytale.baychat.R
 
-// 前台保活传输服务：持有 CPU Partial WakeLock + 高性能 WifiLock，切到其他 App 或锁屏时防止系统冻结 P2P/WebSocket 传输
+// 前台保活传输服务：持有 CPU Partial WakeLock + 高性能 WifiLock，切后台或锁屏时防止系统冻结 P2P/WebSocket 传输
 class TransferForegroundService : Service() {
 
     private var wakeLock: PowerManager.WakeLock? = null
@@ -25,36 +25,83 @@ class TransferForegroundService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
+        // B11：系统异常重启传入 null intent 时不显示僵尸通知，直接安全退出
+        if (intent == null) {
+            stopForegroundSafely()
+            return START_NOT_STICKY
+        }
+        when (intent.action) {
             ACTION_STOP -> {
-                releaseLocks()
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelf()
+                stopForegroundSafely()
                 return START_NOT_STICKY
             }
-            else -> {
+            ACTION_UPDATE -> {
                 acquireLocks()
-                val title = intent?.getStringExtra(EXTRA_TITLE) ?: "湾聊 P2P 通道保持中"
-                val text = intent?.getStringExtra(EXTRA_TEXT) ?: "正在维持后台高速直连通道"
-                val progress = intent?.getIntExtra(EXTRA_PROGRESS, -1) ?: -1
+                val title = intent.getStringExtra(EXTRA_TITLE) ?: "湾聊 P2P 通道保持中"
+                val text = intent.getStringExtra(EXTRA_TEXT) ?: "正在维持后台高速直连通道"
+                val progress = intent.getIntExtra(EXTRA_PROGRESS, -1)
                 val notification = buildNotification(title, text, progress)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    startForeground(
-                        NOTIFICATION_ID,
-                        notification,
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
-                    )
-                } else {
-                    startForeground(NOTIFICATION_ID, notification)
+                val started = runCatching {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        startForeground(
+                            NOTIFICATION_ID,
+                            notification,
+                            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+                        )
+                    } else {
+                        startForeground(NOTIFICATION_ID, notification)
+                    }
+                    true
+                }.getOrDefault(false)
+                if (!started) {
+                    stopForegroundSafely()
                 }
             }
+            else -> {
+                stopForegroundSafely()
+            }
         }
-        return START_STICKY
+        return START_NOT_STICKY
+    }
+
+    // B11：Android 15 (API 35) dataSync 配额超时安全回调：立即释放唤醒锁、发提示通知并优雅停止
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        releaseLocks()
+        runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+        runCatching {
+            IncomingNotificationHelper.ensureChannel(this)
+            val openIntent = Intent(this, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            }
+            val pi = PendingIntent.getActivity(
+                this,
+                10087,
+                openIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            val nm = getSystemService(NotificationManager::class.java)
+            val note = NotificationCompat.Builder(this, IncomingNotificationHelper.CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_launcher_foreground)
+                .setContentTitle("湾聊后台保活已暂停")
+                .setContentText("系统限制单日后台直连时长，点击回到湾聊继续传输")
+                .setAutoCancel(true)
+                .setContentIntent(pi)
+                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                .build()
+            nm?.notify(NOTIFICATION_ID_TIMEOUT, note)
+        }
+        stopSelf()
     }
 
     override fun onDestroy() {
         releaseLocks()
         super.onDestroy()
+    }
+
+    private fun stopForegroundSafely() {
+        releaseLocks()
+        runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+        stopSelf()
     }
 
     private fun acquireLocks() {
@@ -130,6 +177,7 @@ class TransferForegroundService : Service() {
     companion object {
         const val CHANNEL_ID = "baychat_transfer_channel"
         private const val NOTIFICATION_ID = 10086
+        private const val NOTIFICATION_ID_TIMEOUT = 10087
         private const val ACTION_UPDATE = "com.baytale.baychat.action.UPDATE"
         private const val ACTION_STOP = "com.baytale.baychat.action.STOP"
         private const val EXTRA_TITLE = "extra_title"

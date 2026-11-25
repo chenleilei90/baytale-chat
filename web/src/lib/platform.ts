@@ -6,6 +6,7 @@ export interface DiskWriteStream {
   close: () => Promise<void>;
   abort: () => Promise<void>;
   initialOffset: number; // 断点续传时已存在于硬盘的字节偏移
+  existingFile?: File; // 断点续传时用于补算 [0, initialOffset) 完整哈希的原始句柄文件
 }
 
 interface WritableHandleLike {
@@ -18,15 +19,20 @@ interface WritableHandleLike {
   }>;
 }
 
-// 按 fileKey (fileName::fileSize) 缓存本标签页内直写硬盘的句柄，断线重连后可免选文件一键续传
+// 优先按 resumeKey（否则退化为 fileName::fileSize）缓存本标签页内直写硬盘句柄，断线重连后可免选文件一键续传
 const resumeHandleCache = new Map<string, WritableHandleLike>();
 
-export function makeFileResumeKey(fileName: string, fileSize: number): string {
-  return `${fileName}::${fileSize}`;
+export function makeFileResumeKey(fileName: string, fileSize: number, resumeKey?: string): string {
+  return resumeKey ? `rk:${resumeKey}` : `${fileName}::${fileSize}`;
 }
 
-export async function getCachedResumeOffset(fileName: string, fileSize: number): Promise<number> {
-  const handle = resumeHandleCache.get(makeFileResumeKey(fileName, fileSize));
+export async function getCachedResumeOffset(
+  fileName: string,
+  fileSize: number,
+  resumeKey?: string
+): Promise<number> {
+  const key = makeFileResumeKey(fileName, fileSize, resumeKey);
+  const handle = resumeHandleCache.get(key) || (resumeKey ? resumeHandleCache.get(`${fileName}::${fileSize}`) : undefined);
   if (!handle) return 0;
   try {
     const file = await handle.getFile();
@@ -34,13 +40,18 @@ export async function getCachedResumeOffset(fileName: string, fileSize: number):
       return file.size;
     }
   } catch {
-    resumeHandleCache.delete(makeFileResumeKey(fileName, fileSize));
+    resumeHandleCache.delete(key);
   }
   return 0;
 }
 
-export function clearCachedResumeHandle(fileName: string, fileSize: number): void {
-  resumeHandleCache.delete(makeFileResumeKey(fileName, fileSize));
+export function clearCachedResumeHandle(
+  fileName: string,
+  fileSize: number,
+  resumeKey?: string
+): void {
+  resumeHandleCache.delete(makeFileResumeKey(fileName, fileSize, resumeKey));
+  resumeHandleCache.delete(`${fileName}::${fileSize}`);
 }
 
 // 检查当前浏览器是否支持 File System Access API（支持 GB 级大文件流式直写硬盘）
@@ -50,7 +61,8 @@ export function supportsDirectDiskSave(): boolean {
 
 async function createStreamFromHandle(
   handle: WritableHandleLike,
-  resumeOffset: number
+  resumeOffset: number,
+  existingFile?: File
 ): Promise<DiskWriteStream> {
   const writable = await handle.createWritable({ keepExistingData: resumeOffset > 0 });
   if (resumeOffset > 0) {
@@ -58,6 +70,7 @@ async function createStreamFromHandle(
   }
   return {
     initialOffset: resumeOffset,
+    existingFile,
     write: async (chunk: Uint8Array) => {
       const copy = new Uint8Array(chunk.byteLength);
       copy.set(chunk);
@@ -71,7 +84,8 @@ async function createStreamFromHandle(
 // 弹出系统保存对话框并打开流式写入句柄（同时缓存句柄以支持断线后一键续传）
 export async function openDiskWriteStream(
   suggestedName: string,
-  expectedFileSize?: number
+  expectedFileSize?: number,
+  resumeKey?: string
 ): Promise<DiskWriteStream | null> {
   if (!supportsDirectDiskSave()) {
     return null;
@@ -85,7 +99,7 @@ export async function openDiskWriteStream(
 
     const handle = await picker({ suggestedName });
     if (expectedFileSize && expectedFileSize > 0) {
-      resumeHandleCache.set(makeFileResumeKey(suggestedName, expectedFileSize), handle);
+      resumeHandleCache.set(makeFileResumeKey(suggestedName, expectedFileSize, resumeKey), handle);
     }
     return await createStreamFromHandle(handle, 0);
   } catch (err) {
@@ -100,18 +114,19 @@ export async function openDiskWriteStream(
 // 打开断点续传写盘流：优先复用上次缓存句柄，否则允许用户选中硬盘里已下载一半的文件接着写
 export async function openDiskResumeStream(
   fileName: string,
-  expectedFileSize: number
+  expectedFileSize: number,
+  resumeKey?: string
 ): Promise<DiskWriteStream | null> {
   if (!supportsDirectDiskSave()) {
     return null;
   }
-  const key = makeFileResumeKey(fileName, expectedFileSize);
-  const cached = resumeHandleCache.get(key);
+  const key = makeFileResumeKey(fileName, expectedFileSize, resumeKey);
+  const cached = resumeHandleCache.get(key) || (resumeKey ? resumeHandleCache.get(`${fileName}::${expectedFileSize}`) : undefined);
   if (cached) {
     try {
       const existing = await cached.getFile();
       if (existing.size > 0 && existing.size < expectedFileSize) {
-        return await createStreamFromHandle(cached, existing.size);
+        return await createStreamFromHandle(cached, existing.size, existing);
       }
     } catch {
       resumeHandleCache.delete(key);
@@ -125,7 +140,7 @@ export async function openDiskResumeStream(
       }
     ).showOpenFilePicker;
     if (!openPicker) {
-      return await openDiskWriteStream(fileName, expectedFileSize);
+      return await openDiskWriteStream(fileName, expectedFileSize, resumeKey);
     }
     const [handle] = await openPicker({ multiple: false });
     if (!handle) return null;
@@ -134,7 +149,7 @@ export async function openDiskResumeStream(
       throw new Error('所选文件体积已不小于原文件，无法从此位置续传，请改用「直写硬盘」重新保存');
     }
     resumeHandleCache.set(key, handle);
-    return await createStreamFromHandle(handle, existing.size);
+    return await createStreamFromHandle(handle, existing.size, existing);
   } catch (err) {
     if ((err as DOMException)?.name === 'AbortError') {
       return null;

@@ -1,4 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">湾聊</string>
+    <string name="shortcut_quick_send_short">快传建房</string>
+    <string name="shortcut_quick_send_long">立即开启私密快传房间</string>
+    <string name="shortcut_scan_short">扫码加入</string>
+    <string name="shortcut_scan_long">扫描桌面端或好友房间二维码</string>
+    <string name="shortcut_pickup_short">取件码</string>
+    <string name="shortcut_pickup_long">输入取件码或寄送离线文件</string>
 </resources>

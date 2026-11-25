@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import type {
+  PendingNearbyInvite,
   RecentRoom,
   RoomMode,
   SavedFixedRoom,
@@ -27,10 +28,18 @@ import { fetchRoomInfo, fetchServerConfig } from './lib/signaling';
 import { Lobby } from './components/Lobby';
 import { ChatRoom } from './components/ChatRoom';
 import { ProfileModal } from './components/ProfileModal';
+import { PickupPage } from './components/PickupPage';
 
 interface ActiveRoomSession {
   code: string;
   password: string;
+  ownerToken?: string;
+}
+
+function parsePickupCodeFromLocation(): string | null {
+  if (typeof window === 'undefined') return null;
+  const m = window.location.pathname.match(/^\/p\/(\d{6})\/?$/);
+  return m ? m[1] : null;
 }
 
 const FALLBACK_CONFIG: ServerConfig = {
@@ -56,7 +65,11 @@ export const App: React.FC = () => {
   const [recentRooms, setRecentRooms] = useState<RecentRoom[]>(() => loadRecentRooms());
 
   const [serverConfig, setServerConfig] = useState<ServerConfig>(FALLBACK_CONFIG);
+  const [pickupRouteCode, setPickupRouteCode] = useState<string | null>(() =>
+    parsePickupCodeFromLocation()
+  );
   const [activeRoom, setActiveRoom] = useState<ActiveRoomSession | null>(null);
+  const [pendingNearbyInvite, setPendingNearbyInvite] = useState<PendingNearbyInvite | null>(null);
   const [roomMinimized, setRoomMinimized] = useState(false);
   const [minimizedStatus, setMinimizedStatus] = useState('后台运行中');
   const [initialJoinCode, setInitialJoinCode] = useState<string>('');
@@ -84,6 +97,15 @@ export const App: React.FC = () => {
   }, [profile.clientId]);
 
   useEffect(() => {
+    const onPopState = () => {
+      setPickupRouteCode(parsePickupCodeFromLocation());
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
+
+  useEffect(() => {
+    if (pickupRouteCode) return;
     const params = new URLSearchParams(window.location.search);
     let code = (params.get('room') || '').trim().toLowerCase();
     if (!code) {
@@ -143,7 +165,7 @@ export const App: React.FC = () => {
 
   const syncUrlRoom = (code: string | null) => {
     const url = new URL(window.location.href);
-    if (url.pathname.startsWith('/r/')) {
+    if (url.pathname.startsWith('/r/') || url.pathname.startsWith('/p/')) {
       url.pathname = '/';
     }
     if (code) url.searchParams.set('room', code);
@@ -151,12 +173,42 @@ export const App: React.FC = () => {
     window.history.replaceState({}, '', url.toString());
   };
 
+  const handleOpenPickupPage = useCallback((code: string) => {
+    const url = new URL(window.location.href);
+    url.pathname = `/p/${encodeURIComponent(code)}`;
+    url.search = '';
+    window.history.pushState({}, '', url.toString());
+    setPickupRouteCode(code);
+  }, []);
+
+  const handleBackFromPickupPage = useCallback(() => {
+    const url = new URL(window.location.href);
+    url.pathname = '/';
+    url.search = '';
+    window.history.pushState({}, '', url.toString());
+    setPickupRouteCode(null);
+  }, []);
+
   const handleEnterRoom = useCallback(
-    (code: string, password: string, mode: RoomMode, rememberFixed?: boolean) => {
+    (
+      code: string,
+      password: string,
+      mode: RoomMode,
+      rememberFixed?: boolean,
+      ownerToken?: string,
+      nearbyInvite?: PendingNearbyInvite
+    ) => {
+      const resolvedOwnerToken =
+        ownerToken ||
+        loadSavedFixedRooms().find((r) => r.code === code)?.ownerToken ||
+        loadRecentRooms().find((r) => r.code === code)?.ownerToken;
+
+      setPickupRouteCode(null);
       setLobbyNotice('');
       setInitialJoinCode('');
       setRoomMinimized(false);
-      setActiveRoom({ code, password });
+      setPendingNearbyInvite(nearbyInvite || null);
+      setActiveRoom({ code, password, ownerToken: resolvedOwnerToken });
       syncUrlRoom(code);
 
       setRecentRooms(
@@ -165,6 +217,7 @@ export const App: React.FC = () => {
           mode,
           hasPassword: Boolean(password),
           password: password || undefined,
+          ownerToken: resolvedOwnerToken,
           lastVisitedAt: Date.now(),
         })
       );
@@ -175,6 +228,7 @@ export const App: React.FC = () => {
             code,
             hasPassword: Boolean(password),
             password: password || undefined,
+            ownerToken: resolvedOwnerToken,
             lastVisitedAt: Date.now(),
           })
         );
@@ -184,9 +238,15 @@ export const App: React.FC = () => {
   );
 
   const handleSwitchRoom = useCallback(
-    (newCode: string, password: string, mode: RoomMode = 'ephemeral') => {
+    (newCode: string, password: string, mode: RoomMode = 'ephemeral', ownerToken?: string) => {
+      const resolvedOwnerToken =
+        ownerToken ||
+        loadSavedFixedRooms().find((r) => r.code === newCode)?.ownerToken ||
+        loadRecentRooms().find((r) => r.code === newCode)?.ownerToken;
+
       setRoomMinimized(false);
-      setActiveRoom({ code: newCode, password });
+      setPendingNearbyInvite(null);
+      setActiveRoom({ code: newCode, password, ownerToken: resolvedOwnerToken });
       syncUrlRoom(newCode);
       setRecentRooms(
         upsertRecentRoom({
@@ -194,9 +254,24 @@ export const App: React.FC = () => {
           mode,
           hasPassword: Boolean(password),
           password: password || undefined,
+          ownerToken: resolvedOwnerToken,
           lastVisitedAt: Date.now(),
         })
       );
+      if (mode === 'fixed') {
+        const existingSaved = loadSavedFixedRooms().find((r) => r.code === newCode);
+        if (existingSaved) {
+          setSavedFixedRooms(
+            upsertSavedFixedRoom({
+              ...existingSaved,
+              hasPassword: Boolean(password),
+              password: password || undefined,
+              ownerToken: resolvedOwnerToken ?? existingSaved.ownerToken,
+              lastVisitedAt: Date.now(),
+            })
+          );
+        }
+      }
     },
     []
   );
@@ -213,6 +288,7 @@ export const App: React.FC = () => {
   const handleExitToLobby = useCallback(
     (notice?: string) => {
       setActiveRoom(null);
+      setPendingNearbyInvite(null);
       setRoomMinimized(false);
       setInitialJoinCode('');
       setLobbyNotice('');
@@ -245,6 +321,15 @@ export const App: React.FC = () => {
 
   return (
     <>
+      {pickupRouteCode && (!activeRoom || roomMinimized) ? (
+        <PickupPage
+          code={pickupRouteCode}
+          theme={theme}
+          onSelectTheme={setTheme}
+          onBackToLobby={handleBackFromPickupPage}
+        />
+      ) : null}
+
       {/* 最小化挂起时通过 display:none 保持 ChatRoom 组件存活，WS、WebRTC 与大文件传输 100% 不断线 */}
       {activeRoom && (
         <div
@@ -255,6 +340,8 @@ export const App: React.FC = () => {
           <ChatRoom
             roomCode={activeRoom.code}
             password={activeRoom.password}
+            ownerToken={activeRoom.ownerToken}
+            pendingNearbyInvite={pendingNearbyInvite}
             profile={profile}
             prefs={prefs}
             theme={theme}
@@ -265,6 +352,7 @@ export const App: React.FC = () => {
             onUpdatePrefs={handleUpdatePrefs}
             onEditProfile={() => setProfileModalOpen(true)}
             onSwitchRoom={handleSwitchRoom}
+            onClearPendingNearbyInvite={() => setPendingNearbyInvite(null)}
             onRemoveRecentRoom={handleRemoveRecentRoom}
             onMinimizeRoom={handleMinimizeRoom}
             onStatusSummary={setMinimizedStatus}
@@ -274,19 +362,23 @@ export const App: React.FC = () => {
         </div>
       )}
 
-      {(!activeRoom || roomMinimized) && (
+      {!pickupRouteCode && (!activeRoom || roomMinimized) && (
         <Lobby
           profile={profile}
+          prefs={prefs}
           theme={theme}
+          isActiveLobby={!pickupRouteCode && (!activeRoom || roomMinimized)}
           serverConfig={serverConfig}
           savedFixedRooms={savedFixedRooms}
           recentRooms={recentRooms}
           initialJoinCode={initialJoinCode}
           initialNotice={lobbyNotice}
           onSelectTheme={setTheme}
+          onUpdatePrefs={handleUpdatePrefs}
           onQuickRandomProfile={handleSaveProfile}
           onEditProfile={() => setProfileModalOpen(true)}
           onEnterRoom={handleEnterRoom}
+          onOpenPickupPage={handleOpenPickupPage}
           onRemoveSavedRoom={handleRemoveSavedRoom}
           onRemoveRecentRoom={handleRemoveRecentRoom}
           onClearRecentRooms={handleClearRecentRooms}

@@ -31,6 +31,7 @@ const (
 // PeerProfile 表示房间内成员的自定义昵称与头像信息
 type PeerProfile struct {
 	PeerID   string `json:"peerId"`
+	ClientID string `json:"clientId,omitempty"` // 稳定设备/浏览器标识，用于持久化屏蔽列表
 	Name     string `json:"name"`
 	Avatar   string `json:"avatar"` // 支持预设头像标识或轻量 base64 DataURL
 	JoinedAt int64  `json:"joinedAt"`
@@ -41,8 +42,10 @@ type RoomSummary struct {
 	Code          string      `json:"code"`
 	Mode          string      `json:"mode"` // fixed | ephemeral
 	HasPassword   bool        `json:"hasPassword"`
-	AllowRandom   bool        `json:"allowRandom"`     // 是否允许陌生人随机进入（仅无密码房可能为 true）
-	Topic         string      `json:"topic,omitempty"` // 房间主题标签
+	HasOwner      bool        `json:"hasOwner"`             // 是否绑定房主令牌（新房间均为 true）
+	OwnerToken    string      `json:"ownerToken,omitempty"` // 仅在创建房间时返回一次，用于房主管理鉴权
+	AllowRandom   bool        `json:"allowRandom"`          // 是否允许陌生人随机进入（仅无密码房可能为 true）
+	Topic         string      `json:"topic,omitempty"`      // 房间主题标签
 	MaxPeers      int         `json:"maxPeers"`
 	PeerCount     int         `json:"peerCount"`
 	RetentionDays int         `json:"retentionDays"`
@@ -67,6 +70,7 @@ type CreateRoomRequest struct {
 
 type peerConn struct {
 	id      string
+	isOwner bool
 	room    *Room
 	profile PeerProfile
 	conn    *websocket.Conn
@@ -105,6 +109,7 @@ type Room struct {
 	Code           string
 	Mode           string
 	PasswordHash   string
+	OwnerTokenHash string
 	AllowRandom    bool
 	Topic          string
 	MaxPeers       int
@@ -126,6 +131,9 @@ type SignalEnvelope struct {
 	TargetPeerID  string          `json:"targetPeerId,omitempty"`
 	FromPeerID    string          `json:"fromPeerId,omitempty"`
 	Password      string          `json:"password,omitempty"`
+	OwnerToken    string          `json:"ownerToken,omitempty"`
+	IsOwner       *bool           `json:"isOwner,omitempty"`
+	HasPassword   *bool           `json:"hasPassword,omitempty"`
 	Profile       *PeerProfile    `json:"profile,omitempty"`
 	Peers         []PeerProfile   `json:"peers,omitempty"`
 	Room          *RoomSummary    `json:"room,omitempty"`
@@ -140,7 +148,7 @@ type SignalEnvelope struct {
 	RetentionDays *int            `json:"retentionDays,omitempty"`
 	MaxFileSizeMB *int            `json:"maxFileSizeMB,omitempty"`
 	AllowRandom   *bool           `json:"allowRandom,omitempty"`
-	Topic         string          `json:"topic,omitempty"`
+	Topic         *string         `json:"topic,omitempty"`
 	Reason        string          `json:"reason,omitempty"`
 	ErrorCode     string          `json:"errorCode,omitempty"`
 	Error         string          `json:"error,omitempty"`
@@ -156,6 +164,7 @@ type Hub struct {
 	rooms        map[string]*Room
 	burnedCodes  map[string]time.Time // 已销毁的一次性房间码记录，避免短时间误重用
 	upgrader     websocket.Upgrader
+	nowFunc      func() time.Time
 	stopCh       chan struct{}
 }
 
@@ -176,6 +185,7 @@ func NewHub(cfg *config.Config) (*Hub, error) {
 		historyStore: historyStore,
 		rooms:        make(map[string]*Room),
 		burnedCodes:  make(map[string]time.Time),
+		nowFunc:      time.Now,
 		stopCh:       make(chan struct{}),
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  4096,
@@ -204,23 +214,41 @@ func NewHub(cfg *config.Config) (*Hub, error) {
 		}
 		allowRandom := rec.PasswordHash == "" && (rec.AllowRandom == nil || *rec.AllowRandom)
 		h.rooms[code] = &Room{
-			Code:          rec.Code,
-			Mode:          ModeFixed,
-			PasswordHash:  rec.PasswordHash,
-			AllowRandom:   allowRandom,
-			Topic:         truncateRunes(strings.TrimSpace(rec.Topic), 24),
-			MaxPeers:      clampPeerLimit(rec.MaxPeers, cfg.MaxRoomPeers),
-			RetentionDays: rec.RetentionDays,
-			MaxFileSizeMB: maxFileMB,
-			Stats:         rec.Stats,
-			CreatedAt:     rec.CreatedAt,
-			LastActiveAt:  rec.LastActiveAt,
-			peers:         make(map[string]*peerConn),
+			Code:           rec.Code,
+			Mode:           ModeFixed,
+			PasswordHash:   rec.PasswordHash,
+			OwnerTokenHash: rec.OwnerTokenHash,
+			AllowRandom:    allowRandom,
+			Topic:          truncateRunes(strings.TrimSpace(rec.Topic), 24),
+			MaxPeers:       clampPeerLimit(rec.MaxPeers, cfg.MaxRoomPeers),
+			RetentionDays:  rec.RetentionDays,
+			MaxFileSizeMB:  maxFileMB,
+			Stats:          rec.Stats,
+			CreatedAt:      rec.CreatedAt,
+			LastActiveAt:   rec.LastActiveAt,
+			peers:          make(map[string]*peerConn),
 		}
 	}
 
+	// 启动时清理长期无人活跃的常驻房间
+	h.PurgeIdleFixedRooms(h.now())
+
 	go h.maintenanceLoop()
 	return h, nil
+}
+
+// SetNowFunc 仅供单元测试注入可控时钟
+func (h *Hub) SetNowFunc(fn func() time.Time) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.nowFunc = fn
+}
+
+func (h *Hub) now() time.Time {
+	if h.nowFunc != nil {
+		return h.nowFunc()
+	}
+	return time.Now()
 }
 
 // Close 停止后台巡检任务
@@ -247,14 +275,46 @@ func (h *Hub) maintenanceLoop() {
 		case <-ticker.C:
 			h.historyStore.PurgeExpired()
 			h.purgeOldBurnedCodes()
+			h.PurgeIdleFixedRooms(h.now())
 		}
 	}
+}
+
+// PurgeIdleFixedRooms 回收无人在线且超过指定空闲天数的常驻房间
+func (h *Hub) PurgeIdleFixedRooms(now time.Time) int {
+	idleDays := h.cfg.FixedRoomIdleDays
+	if idleDays <= 0 {
+		idleDays = 60
+	}
+	cutoffMs := now.UnixMilli() - int64(idleDays)*int64(24*time.Hour/time.Millisecond)
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	var toRemove []*Room
+	for _, rm := range h.rooms {
+		if rm.Mode != ModeFixed || len(rm.peers) > 0 {
+			continue
+		}
+		if rm.LastActiveAt > 0 && rm.LastActiveAt < cutoffMs {
+			toRemove = append(toRemove, rm)
+		}
+	}
+	if len(toRemove) == 0 {
+		return 0
+	}
+	for _, rm := range toRemove {
+		delete(h.rooms, rm.Code)
+		h.historyStore.ClearRoom(rm.Code, 0)
+	}
+	_ = h.persistFixedRoomsLocked()
+	return len(toRemove)
 }
 
 func (h *Hub) purgeOldBurnedCodes() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	cutoff := time.Now().Add(-burnedCodeRetention)
+	cutoff := h.now().Add(-burnedCodeRetention)
 	for code, burnedAt := range h.burnedCodes {
 		if burnedAt.Before(cutoff) {
 			delete(h.burnedCodes, code)
@@ -306,28 +366,39 @@ func (h *Hub) CreateRoom(req CreateRoomRequest) (*RoomSummary, error) {
 	}
 
 	maxPeers := clampPeerLimit(req.MaxPeers, h.cfg.MaxRoomPeers)
-	now := time.Now()
-	nowMs := now.UnixMilli()
-	initStats := RoomStats{}
-	initStats.TouchActivity(now)
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
+	now := h.now()
+	nowMs := now.UnixMilli()
+	initStats := RoomStats{}
+	initStats.TouchActivity(now)
+
 	var code string
-	if mode == ModeFixed && strings.TrimSpace(req.Code) != "" {
-		code = NormalizeCode(req.Code)
-		if err := ValidateCode(code); err != nil {
-			return nil, err
-		}
-		if _, exists := h.rooms[code]; exists {
-			return nil, ErrRoomExists
+	if mode == ModeFixed {
+		if strings.TrimSpace(req.Code) != "" {
+			code = NormalizeCode(req.Code)
+			if err := ValidateCode(code); err != nil {
+				return nil, err
+			}
+			// 6 位纯数字保留给临时房间，常驻房间禁止使用
+			if IsReservedSixDigitCode(code) {
+				return nil, ErrCodeReserved
+			}
+			if _, exists := h.rooms[code]; exists {
+				return nil, ErrRoomExists
+			}
+		} else {
+			code = h.allocateUniqueFixedCodeLocked()
 		}
 	} else {
 		code = h.allocateUniqueCodeLocked()
 	}
 
 	passwordHash := HashPassword(req.Password)
+	ownerToken := GenerateOwnerToken()
+	ownerTokenHash := HashOwnerToken(ownerToken)
 	// 无密码房间默认允许陌生人随机串门，用户可手动关闭；有密码房间严格禁止随机进入
 	allowRandom := passwordHash == ""
 	if passwordHash == "" && req.AllowRandom != nil {
@@ -336,18 +407,19 @@ func (h *Hub) CreateRoom(req CreateRoomRequest) (*RoomSummary, error) {
 	topic := truncateRunes(strings.TrimSpace(req.Topic), 24)
 
 	rm := &Room{
-		Code:          code,
-		Mode:          mode,
-		PasswordHash:  passwordHash,
-		AllowRandom:   allowRandom,
-		Topic:         topic,
-		MaxPeers:      maxPeers,
-		RetentionDays: retentionDays,
-		MaxFileSizeMB: maxFileSizeMB,
-		Stats:         initStats,
-		CreatedAt:     nowMs,
-		LastActiveAt:  nowMs,
-		peers:         make(map[string]*peerConn),
+		Code:           code,
+		Mode:           mode,
+		PasswordHash:   passwordHash,
+		OwnerTokenHash: ownerTokenHash,
+		AllowRandom:    allowRandom,
+		Topic:          topic,
+		MaxPeers:       maxPeers,
+		RetentionDays:  retentionDays,
+		MaxFileSizeMB:  maxFileSizeMB,
+		Stats:          initStats,
+		CreatedAt:      nowMs,
+		LastActiveAt:   nowMs,
+		peers:          make(map[string]*peerConn),
 	}
 
 	// 一次性房间若创建后长时间无人连入，自动回收
@@ -367,7 +439,23 @@ func (h *Hub) CreateRoom(req CreateRoomRequest) (*RoomSummary, error) {
 		}
 	}
 
-	return h.buildRoomSummaryLocked(rm), nil
+	summary := h.buildRoomSummaryLocked(rm)
+	summary.OwnerToken = ownerToken
+	return summary, nil
+}
+
+func (h *Hub) allocateUniqueFixedCodeLocked() string {
+	for i := 0; i < 64; i++ {
+		candidate := "bay-" + randomHex(3)
+		if _, exists := h.rooms[candidate]; exists {
+			continue
+		}
+		if _, burned := h.burnedCodes[candidate]; burned {
+			continue
+		}
+		return candidate
+	}
+	return "bay-" + randomHex(4)
 }
 
 func (h *Hub) allocateUniqueCodeLocked() string {
@@ -393,17 +481,18 @@ func (h *Hub) persistFixedRoomsLocked() error {
 		maxFileMB := rm.MaxFileSizeMB
 		allowRandom := rm.PasswordHash == "" && rm.AllowRandom
 		records[code] = &FixedRoomRecord{
-			Code:          rm.Code,
-			Mode:          ModeFixed,
-			PasswordHash:  rm.PasswordHash,
-			MaxPeers:      rm.MaxPeers,
-			RetentionDays: rm.RetentionDays,
-			MaxFileSizeMB: &maxFileMB,
-			AllowRandom:   &allowRandom,
-			Topic:         rm.Topic,
-			Stats:         rm.Stats,
-			CreatedAt:     rm.CreatedAt,
-			LastActiveAt:  rm.LastActiveAt,
+			Code:           rm.Code,
+			Mode:           ModeFixed,
+			PasswordHash:   rm.PasswordHash,
+			OwnerTokenHash: rm.OwnerTokenHash,
+			MaxPeers:       rm.MaxPeers,
+			RetentionDays:  rm.RetentionDays,
+			MaxFileSizeMB:  &maxFileMB,
+			AllowRandom:    &allowRandom,
+			Topic:          rm.Topic,
+			Stats:          rm.Stats,
+			CreatedAt:      rm.CreatedAt,
+			LastActiveAt:   rm.LastActiveAt,
 		}
 	}
 	return h.fixedStore.SaveAll(records)
@@ -416,6 +505,7 @@ func (h *Hub) buildRoomSummaryLocked(rm *Room) *RoomSummary {
 		Code:          rm.Code,
 		Mode:          rm.Mode,
 		HasPassword:   rm.PasswordHash != "",
+		HasOwner:      rm.OwnerTokenHash != "",
 		AllowRandom:   rm.PasswordHash == "" && rm.AllowRandom,
 		Topic:         rm.Topic,
 		MaxPeers:      rm.MaxPeers,
@@ -504,8 +594,22 @@ func (h *Hub) PickRandomPublicRoom(excludeCode string) (*RoomSummary, error) {
 	return h.buildRoomSummaryLocked(pool[idx]), nil
 }
 
+// authorizeOwnerOrLegacyLocked 校验房主令牌（新房间强制校验 ownerToken；老房间无 ownerTokenHash 时回退校验房间密码）
+func authorizeOwnerOrLegacyLocked(rm *Room, ownerToken, password string) error {
+	if rm.OwnerTokenHash != "" {
+		if !VerifyOwnerToken(rm.OwnerTokenHash, ownerToken) {
+			return ErrNotOwner
+		}
+		return nil
+	}
+	if !VerifyPassword(rm.PasswordHash, password) {
+		return ErrWrongPassword
+	}
+	return nil
+}
+
 // UpdateAllowRandom 动态开启或关闭房间的「允许陌生人随机串门」开关（仅免密房支持开启）
-func (h *Hub) UpdateAllowRandom(rawCode, password string, allowRandom bool, actorName string) (bool, error) {
+func (h *Hub) UpdateAllowRandom(rawCode, ownerToken, password string, allowRandom bool, actorName string) (bool, error) {
 	code := NormalizeCode(rawCode)
 
 	h.mu.Lock()
@@ -517,15 +621,15 @@ func (h *Hub) UpdateAllowRandom(rawCode, password string, allowRandom bool, acto
 		}
 		return false, ErrRoomNotFound
 	}
-	if !VerifyPassword(rm.PasswordHash, password) {
+	if err := authorizeOwnerOrLegacyLocked(rm, ownerToken, password); err != nil {
 		h.mu.Unlock()
-		return false, ErrWrongPassword
+		return false, err
 	}
 
 	// 有密码房间严格禁止被随机进入
 	effective := rm.PasswordHash == "" && allowRandom
 	rm.AllowRandom = effective
-	rm.LastActiveAt = time.Now().UnixMilli()
+	rm.LastActiveAt = h.now().UnixMilli()
 	if rm.Mode == ModeFixed {
 		_ = h.persistFixedRoomsLocked()
 	}
@@ -544,6 +648,62 @@ func (h *Hub) UpdateAllowRandom(rawCode, password string, allowRandom bool, acto
 		ActorName:   actorName,
 	})
 	return effective, nil
+}
+
+// UpdateRoomProfile 由房主更新房间密码与主题（设置密码后强制关闭 allowRandom 并广播）
+func (h *Hub) UpdateRoomProfile(rawCode, ownerToken, password string, newPassword *string, newTopic *string, actorName string) (*RoomSummary, error) {
+	code := NormalizeCode(rawCode)
+
+	h.mu.Lock()
+	rm, ok := h.rooms[code]
+	if !ok {
+		h.mu.Unlock()
+		if _, burned := h.burnedCodes[code]; burned {
+			return nil, ErrRoomExpired
+		}
+		return nil, ErrRoomNotFound
+	}
+	if err := authorizeOwnerOrLegacyLocked(rm, ownerToken, password); err != nil {
+		h.mu.Unlock()
+		return nil, err
+	}
+
+	if newPassword != nil {
+		trimmed := strings.TrimSpace(*newPassword)
+		if trimmed == "" {
+			rm.PasswordHash = ""
+		} else {
+			rm.PasswordHash = HashPassword(trimmed)
+			rm.AllowRandom = false
+		}
+	}
+	if newTopic != nil {
+		rm.Topic = truncateRunes(strings.TrimSpace(*newTopic), 24)
+	}
+	rm.LastActiveAt = h.now().UnixMilli()
+	if rm.Mode == ModeFixed {
+		_ = h.persistFixedRoomsLocked()
+	}
+
+	summary := h.buildRoomSummaryLocked(rm)
+	peers := make([]*peerConn, 0, len(rm.peers))
+	for _, p := range rm.peers {
+		peers = append(peers, p)
+	}
+	hasPwd := rm.PasswordHash != ""
+	allowRand := rm.PasswordHash == "" && rm.AllowRandom
+	topicCopy := rm.Topic
+	h.mu.Unlock()
+
+	h.broadcastToPeers(peers, SignalEnvelope{
+		Type:        "room_settings_updated",
+		RoomCode:    code,
+		AllowRandom: &allowRand,
+		HasPassword: &hasPwd,
+		Topic:       &topicCopy,
+		ActorName:   actorName,
+	})
+	return summary, nil
 }
 
 // GetRoomInfo 查询房间摘要信息（区分不存在与一次性房间已销毁）
@@ -580,8 +740,8 @@ func (h *Hub) VerifyAccess(rawCode, password string) (*RoomSummary, error) {
 	return h.buildRoomSummaryLocked(rm), nil
 }
 
-// DeleteRoom 销毁房间（一次性房间直接作废，固定房间需校验密码后从持久化删除；同时立即清空服务器聊天缓存）
-func (h *Hub) DeleteRoom(rawCode, password, actorName string) error {
+// DeleteRoom 销毁房间（一次性房间直接作废，固定房间需校验房主或旧版密码后从持久化删除；同时立即清空服务器聊天缓存）
+func (h *Hub) DeleteRoom(rawCode, ownerToken, password, actorName string) error {
 	code := NormalizeCode(rawCode)
 	h.mu.Lock()
 	rm, ok := h.rooms[code]
@@ -592,9 +752,9 @@ func (h *Hub) DeleteRoom(rawCode, password, actorName string) error {
 		}
 		return ErrRoomNotFound
 	}
-	if !VerifyPassword(rm.PasswordHash, password) {
+	if err := authorizeOwnerOrLegacyLocked(rm, ownerToken, password); err != nil {
 		h.mu.Unlock()
-		return ErrWrongPassword
+		return err
 	}
 
 	reason := "房间已被销毁，聊天记录已立即清空"
@@ -612,7 +772,7 @@ func (h *Hub) DeleteRoom(rawCode, password, actorName string) error {
 }
 
 // UpdateRetention 更新房间聊天记录服务器缓存天数（0~7 天），并实时广播给所有成员
-func (h *Hub) UpdateRetention(rawCode, password string, retentionDays int, actorName string) (HistoryMeta, bool, error) {
+func (h *Hub) UpdateRetention(rawCode, ownerToken, password string, retentionDays int, actorName string) (HistoryMeta, bool, error) {
 	if err := ValidateRetentionDays(retentionDays); err != nil {
 		return HistoryMeta{}, false, err
 	}
@@ -627,13 +787,13 @@ func (h *Hub) UpdateRetention(rawCode, password string, retentionDays int, actor
 		}
 		return HistoryMeta{}, false, ErrRoomNotFound
 	}
-	if !VerifyPassword(rm.PasswordHash, password) {
+	if err := authorizeOwnerOrLegacyLocked(rm, ownerToken, password); err != nil {
 		h.mu.Unlock()
-		return HistoryMeta{}, false, ErrWrongPassword
+		return HistoryMeta{}, false, err
 	}
 
 	rm.RetentionDays = retentionDays
-	rm.LastActiveAt = time.Now().UnixMilli()
+	rm.LastActiveAt = h.now().UnixMilli()
 	if rm.Mode == ModeFixed {
 		_ = h.persistFixedRoomsLocked()
 	}
@@ -673,7 +833,7 @@ func (h *Hub) UpdateRetention(rawCode, password string, retentionDays int, actor
 }
 
 // UpdateMaxFileSize 动态修改房间单文件附件大小上限（MB，0 表示不限制），并实时广播全员
-func (h *Hub) UpdateMaxFileSize(rawCode, password string, maxFileSizeMB int, actorName string) (int, error) {
+func (h *Hub) UpdateMaxFileSize(rawCode, ownerToken, password string, maxFileSizeMB int, actorName string) (int, error) {
 	if err := ValidateMaxFileSizeMB(maxFileSizeMB, h.cfg.MaxAttachmentMB); err != nil {
 		return 0, err
 	}
@@ -688,13 +848,13 @@ func (h *Hub) UpdateMaxFileSize(rawCode, password string, maxFileSizeMB int, act
 		}
 		return 0, ErrRoomNotFound
 	}
-	if !VerifyPassword(rm.PasswordHash, password) {
+	if err := authorizeOwnerOrLegacyLocked(rm, ownerToken, password); err != nil {
 		h.mu.Unlock()
-		return 0, ErrWrongPassword
+		return 0, err
 	}
 
 	rm.MaxFileSizeMB = maxFileSizeMB
-	rm.LastActiveAt = time.Now().UnixMilli()
+	rm.LastActiveAt = h.now().UnixMilli()
 	if rm.Mode == ModeFixed {
 		_ = h.persistFixedRoomsLocked()
 	}
@@ -716,7 +876,7 @@ func (h *Hub) UpdateMaxFileSize(rawCode, password string, maxFileSizeMB int, act
 }
 
 // ClearHistory 立即删除指定房间的全部服务器缓存聊天记录与缓存图片，并实时广播清空房间内所有在线终端
-func (h *Hub) ClearHistory(rawCode, password, actorName string) (HistoryMeta, error) {
+func (h *Hub) ClearHistory(rawCode, ownerToken, password, actorName string) (HistoryMeta, error) {
 	code := NormalizeCode(rawCode)
 
 	h.mu.Lock()
@@ -728,9 +888,9 @@ func (h *Hub) ClearHistory(rawCode, password, actorName string) (HistoryMeta, er
 		}
 		return HistoryMeta{}, ErrRoomNotFound
 	}
-	if !VerifyPassword(rm.PasswordHash, password) {
+	if err := authorizeOwnerOrLegacyLocked(rm, ownerToken, password); err != nil {
 		h.mu.Unlock()
-		return HistoryMeta{}, ErrWrongPassword
+		return HistoryMeta{}, err
 	}
 
 	meta := h.historyStore.ClearRoom(code, rm.RetentionDays)
@@ -1009,23 +1169,29 @@ func (h *Hub) attachPeer(conn *websocket.Conn, req SignalEnvelope) (*peerConn, S
 
 	name := "访客"
 	avatar := ""
+	clientID := ""
 	if req.Profile != nil {
 		if n := strings.TrimSpace(req.Profile.Name); n != "" {
 			name = truncateRunes(n, 24)
 		}
 		avatar = sanitizeAvatar(req.Profile.Avatar)
+		clientID = truncateRunes(strings.TrimSpace(req.Profile.ClientID), 64)
 	}
 
-	nowMs := time.Now().UnixMilli()
+	nowMs := h.now().UnixMilli()
 	profile := PeerProfile{
 		PeerID:   peerID,
+		ClientID: clientID,
 		Name:     name,
 		Avatar:   avatar,
 		JoinedAt: nowMs,
 	}
 
+	isOwner := rm.OwnerTokenHash != "" && VerifyOwnerToken(rm.OwnerTokenHash, req.OwnerToken)
+
 	peer := &peerConn{
 		id:      peerID,
+		isOwner: isOwner,
 		room:    rm,
 		profile: profile,
 		conn:    conn,
@@ -1061,6 +1227,7 @@ func (h *Hub) attachPeer(conn *websocket.Conn, req SignalEnvelope) (*peerConn, S
 		Type:     "joined",
 		RoomCode: rm.Code,
 		PeerID:   peerID,
+		IsOwner:  &isOwner,
 		Profile:  &profile,
 		Peers:    existingProfiles,
 		Room:     summary,
@@ -1134,8 +1301,9 @@ func (h *Hub) readPump(peer *peerConn) {
 			return
 
 		case "destroy_room":
-			h.destroyRoomInternal(peer)
-			return
+			if h.destroyRoomInternal(peer) {
+				return
+			}
 		}
 	}
 }
@@ -1208,6 +1376,9 @@ func (h *Hub) handleProfileUpdate(sender *peerConn, env SignalEnvelope) {
 		if safeAvatar := sanitizeAvatar(env.Profile.Avatar); safeAvatar != "" {
 			sender.profile.Avatar = safeAvatar
 		}
+	}
+	if cid := strings.TrimSpace(env.Profile.ClientID); cid != "" {
+		sender.profile.ClientID = truncateRunes(cid, 64)
 	}
 	updated := sender.profile
 	others := make([]*peerConn, 0, len(rm.peers))
@@ -1292,9 +1463,18 @@ func (h *Hub) updateRetentionInternal(sender *peerConn, retentionDays int) {
 		h.mu.Unlock()
 		return
 	}
+	if rm.OwnerTokenHash != "" && !sender.isOwner {
+		h.mu.Unlock()
+		h.sendEnvelope(sender, SignalEnvelope{
+			Type:      "error",
+			ErrorCode: "NOT_OWNER",
+			Error:     ErrNotOwner.Error(),
+		})
+		return
+	}
 	actorName := sender.profile.Name
 	rm.RetentionDays = retentionDays
-	rm.LastActiveAt = time.Now().UnixMilli()
+	rm.LastActiveAt = h.now().UnixMilli()
 	if rm.Mode == ModeFixed {
 		_ = h.persistFixedRoomsLocked()
 	}
@@ -1344,9 +1524,18 @@ func (h *Hub) updateMaxFileSizeInternal(sender *peerConn, maxFileSizeMB int) {
 		h.mu.Unlock()
 		return
 	}
+	if rm.OwnerTokenHash != "" && !sender.isOwner {
+		h.mu.Unlock()
+		h.sendEnvelope(sender, SignalEnvelope{
+			Type:      "error",
+			ErrorCode: "NOT_OWNER",
+			Error:     ErrNotOwner.Error(),
+		})
+		return
+	}
 	actorName := sender.profile.Name
 	rm.MaxFileSizeMB = maxFileSizeMB
-	rm.LastActiveAt = time.Now().UnixMilli()
+	rm.LastActiveAt = h.now().UnixMilli()
 	if rm.Mode == ModeFixed {
 		_ = h.persistFixedRoomsLocked()
 	}
@@ -1372,10 +1561,19 @@ func (h *Hub) updateAllowRandomInternal(sender *peerConn, allowRandom bool) {
 		h.mu.Unlock()
 		return
 	}
+	if rm.OwnerTokenHash != "" && !sender.isOwner {
+		h.mu.Unlock()
+		h.sendEnvelope(sender, SignalEnvelope{
+			Type:      "error",
+			ErrorCode: "NOT_OWNER",
+			Error:     ErrNotOwner.Error(),
+		})
+		return
+	}
 	actorName := sender.profile.Name
 	effective := rm.PasswordHash == "" && allowRandom
 	rm.AllowRandom = effective
-	rm.LastActiveAt = time.Now().UnixMilli()
+	rm.LastActiveAt = h.now().UnixMilli()
 	if rm.Mode == ModeFixed {
 		_ = h.persistFixedRoomsLocked()
 	}
@@ -1490,6 +1688,15 @@ func (h *Hub) clearHistoryInternal(sender *peerConn) {
 		h.mu.Unlock()
 		return
 	}
+	if rm.OwnerTokenHash != "" && !sender.isOwner {
+		h.mu.Unlock()
+		h.sendEnvelope(sender, SignalEnvelope{
+			Type:      "error",
+			ErrorCode: "NOT_OWNER",
+			Error:     ErrNotOwner.Error(),
+		})
+		return
+	}
 	actorName := sender.profile.Name
 	meta := h.historyStore.ClearRoom(rm.Code, rm.RetentionDays)
 	peers := make([]*peerConn, 0, len(rm.peers))
@@ -1507,12 +1714,21 @@ func (h *Hub) clearHistoryInternal(sender *peerConn) {
 	})
 }
 
-func (h *Hub) destroyRoomInternal(sender *peerConn) {
+func (h *Hub) destroyRoomInternal(sender *peerConn) bool {
 	h.mu.Lock()
 	rm, ok := h.rooms[sender.room.Code]
 	if !ok {
 		h.mu.Unlock()
-		return
+		return false
+	}
+	if rm.OwnerTokenHash != "" && !sender.isOwner {
+		h.mu.Unlock()
+		h.sendEnvelope(sender, SignalEnvelope{
+			Type:      "error",
+			ErrorCode: "NOT_OWNER",
+			Error:     ErrNotOwner.Error(),
+		})
+		return false
 	}
 	reason := sender.profile.Name + " 结束了聊天并销毁了房间，该房间码已失效"
 	if rm.Mode == ModeFixed {
@@ -1522,6 +1738,7 @@ func (h *Hub) destroyRoomInternal(sender *peerConn) {
 	h.mu.Unlock()
 
 	h.notifyDestroyedPeers(peers, rm.Code, reason)
+	return true
 }
 
 func (h *Hub) detachPeer(peer *peerConn, explicitLeave bool) {

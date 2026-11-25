@@ -1,7 +1,11 @@
 import type {
   CachedMessage,
   HistoryMeta,
+  NearbyHeartbeatResponse,
+  NearbyInviteResponse,
   PeerProfile,
+  PickupCreateResponse,
+  PickupInfo,
   RoomMode,
   RoomSummary,
   ServerConfig,
@@ -89,13 +93,20 @@ export function verifyRoomPassword(code: string, password: string): Promise<Room
 }
 
 // 销毁房间
-export function deleteRoom(code: string, password: string, actorName: string): Promise<{ deleted: boolean }> {
+export function deleteRoom(
+  code: string,
+  password: string,
+  actorName: string,
+  ownerToken?: string
+): Promise<{ deleted: boolean }> {
+  const headers: Record<string, string> = {
+    'X-Room-Password': password,
+    'X-Actor-Name': encodeURIComponent(actorName),
+  };
+  if (ownerToken) headers['X-Owner-Token'] = ownerToken;
   return requestJSON<{ deleted: boolean }>(`/api/rooms/${encodeURIComponent(code)}`, {
     method: 'DELETE',
-    headers: {
-      'X-Room-Password': password,
-      'X-Actor-Name': encodeURIComponent(actorName),
-    },
+    headers,
   });
 }
 
@@ -104,36 +115,251 @@ export function updateRoomRetention(
   code: string,
   password: string,
   retentionDays: number,
-  actorName: string
+  actorName: string,
+  ownerToken?: string
 ): Promise<{ history: HistoryMeta; cleared: boolean }> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'X-Room-Password': password,
+  };
+  if (ownerToken) headers['X-Owner-Token'] = ownerToken;
   return requestJSON<{ history: HistoryMeta; cleared: boolean }>(
     `/api/rooms/${encodeURIComponent(code)}/retention`,
     {
       method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Room-Password': password,
-      },
+      headers,
       body: JSON.stringify({ retentionDays, password, actorName }),
     }
   );
+}
+
+// 房主修改房间密码与主题（password 传 "" 表示移除密码，不传表示不修改）
+export function updateRoomProfile(
+  code: string,
+  opts: {
+    ownerToken?: string;
+    roomPassword?: string;
+    password?: string | null;
+    topic?: string;
+    actorName?: string;
+  }
+): Promise<RoomSummary> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (opts.ownerToken) headers['X-Owner-Token'] = opts.ownerToken;
+  if (opts.roomPassword) headers['X-Room-Password'] = opts.roomPassword;
+  if (opts.actorName) headers['X-Actor-Name'] = encodeURIComponent(opts.actorName);
+  const body: Record<string, unknown> = {};
+  if (opts.password !== undefined) body.password = opts.password;
+  if (opts.topic !== undefined) body.topic = opts.topic;
+  if (opts.actorName) body.actorName = opts.actorName;
+  return requestJSON<RoomSummary>(`/api/rooms/${encodeURIComponent(code)}/profile`, {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify(body),
+  });
 }
 
 // 立即删除房间全部服务器缓存聊天记录
 export function clearRoomHistory(
   code: string,
   password: string,
-  actorName: string
+  actorName: string,
+  ownerToken?: string
 ): Promise<{ cleared: boolean; history: HistoryMeta }> {
+  const headers: Record<string, string> = {
+    'X-Room-Password': password,
+    'X-Actor-Name': encodeURIComponent(actorName),
+  };
+  if (ownerToken) headers['X-Owner-Token'] = ownerToken;
   return requestJSON<{ cleared: boolean; history: HistoryMeta }>(
     `/api/rooms/${encodeURIComponent(code)}/history`,
     {
       method: 'DELETE',
-      headers: {
-        'X-Room-Password': password,
-        'X-Actor-Name': encodeURIComponent(actorName),
-      },
+      headers,
     }
+  );
+}
+
+// 提交违规成员或消息举报
+export async function submitReport(params: {
+  roomCode: string;
+  reportedName: string;
+  reportedClientId: string;
+  reason: string;
+  messageId?: string;
+  reporterClientId: string;
+}): Promise<void> {
+  const res = await fetch('/api/report', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    throw new ApiError(res.status, String(data.errorCode || 'REPORT_FAILED'), String(data.error || '举报提交失败'));
+  }
+}
+
+// ================= 取件码离线投递接口 =================
+
+export function createPickup(params: {
+  files: { name: string; size: number; mime: string }[];
+  expireHours: 1 | 24 | 72;
+  burnAfterRead: boolean;
+  password?: string;
+}): Promise<PickupCreateResponse> {
+  return requestJSON<PickupCreateResponse>('/api/pickups', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+}
+
+export async function headPickupFile(
+  code: string,
+  fileId: string,
+  ownerToken: string
+): Promise<number> {
+  const res = await fetch(
+    `/api/pickups/${encodeURIComponent(code)}/files/${encodeURIComponent(fileId)}`,
+    {
+      method: 'HEAD',
+      headers: { 'X-Owner-Token': ownerToken },
+    }
+  );
+  if (!res.ok) return 0;
+  const raw = res.headers.get('X-Uploaded-Bytes');
+  const parsed = raw ? Number(raw) : 0;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+// 使用 XMLHttpRequest 流式上传取件码文件以获取实时上传进度，并支持断点偏移续传
+export function uploadPickupFile(
+  code: string,
+  fileId: string,
+  ownerToken: string,
+  file: File,
+  offset = 0,
+  onProgress?: (uploadedBytes: number) => void
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open(
+      'PUT',
+      `/api/pickups/${encodeURIComponent(code)}/files/${encodeURIComponent(fileId)}`,
+      true
+    );
+    xhr.setRequestHeader('X-Owner-Token', ownerToken);
+    if (offset > 0) {
+      xhr.setRequestHeader('X-Upload-Offset', String(offset));
+    }
+    xhr.upload.onprogress = (ev) => {
+      if (ev.lengthComputable && onProgress) {
+        onProgress(Math.min(file.size, offset + ev.loaded));
+      }
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        onProgress?.(file.size);
+        resolve();
+      } else {
+        let errCode = 'UPLOAD_FAILED';
+        let errMsg = `上传失败 (${xhr.status})`;
+        try {
+          const data = JSON.parse(xhr.responseText) as Record<string, unknown>;
+          if (data.errorCode) errCode = String(data.errorCode);
+          if (data.error) errMsg = String(data.error);
+        } catch {
+          // 忽略解析异常
+        }
+        reject(new ApiError(xhr.status, errCode, errMsg));
+      }
+    };
+    xhr.onerror = () => reject(new ApiError(0, 'NETWORK_ERROR', '网络连接中断，可重试续传'));
+    xhr.onabort = () => reject(new ApiError(0, 'ABORTED', '上传已取消'));
+    xhr.send(offset > 0 ? file.slice(offset) : file);
+  });
+}
+
+export function fetchPickupInfo(code: string, password?: string): Promise<PickupInfo> {
+  const headers: Record<string, string> = {};
+  if (password) headers['X-Pickup-Password'] = password;
+  return requestJSON<PickupInfo>(`/api/pickups/${encodeURIComponent(code)}`, {
+    headers,
+  });
+}
+
+export function buildPickupFileDownloadUrl(
+  code: string,
+  fileId: string,
+  password?: string
+): string {
+  const base = `/api/pickups/${encodeURIComponent(code)}/files/${encodeURIComponent(fileId)}`;
+  if (!password) return base;
+  return `${base}?password=${encodeURIComponent(password)}`;
+}
+
+export async function deletePickup(code: string, ownerToken: string): Promise<void> {
+  const res = await fetch(`/api/pickups/${encodeURIComponent(code)}`, {
+    method: 'DELETE',
+    headers: { 'X-Owner-Token': ownerToken },
+  });
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    throw new ApiError(res.status, String(data.errorCode || 'DELETE_FAILED'), String(data.error || '撤销取件码失败'));
+  }
+}
+
+// ================= 附近设备（同 IP）发现与邀请接口 =================
+
+export function sendNearbyHeartbeat(params: {
+  clientId: string;
+  name: string;
+  avatar: string;
+  device: 'web' | 'android';
+  network: 'wifi' | 'cellular' | 'unknown';
+}): Promise<NearbyHeartbeatResponse> {
+  return requestJSON<NearbyHeartbeatResponse>('/api/nearby/heartbeat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+}
+
+export function sendNearbyInvite(params: {
+  fromClientId: string;
+  toClientId: string;
+  fromName: string;
+  fromAvatar: string;
+}): Promise<NearbyInviteResponse> {
+  return requestJSON<NearbyInviteResponse>('/api/nearby/invite', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+}
+
+export function respondNearbyInvite(
+  inviteId: string,
+  params: { clientId: string; accept: boolean }
+): Promise<{ status: string; roomCode?: string }> {
+  return requestJSON<{ status: string; roomCode?: string }>(
+    `/api/nearby/invite/${encodeURIComponent(inviteId)}/respond`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    }
+  );
+}
+
+export function fetchNearbyInviteStatus(
+  inviteId: string
+): Promise<{ status: 'pending' | 'accepted' | 'declined' | 'expired' }> {
+  return requestJSON<{ status: 'pending' | 'accepted' | 'declined' | 'expired' }>(
+    `/api/nearby/invite/${encodeURIComponent(inviteId)}`
   );
 }
 
@@ -246,6 +472,7 @@ export class SignalingClient {
 
   private roomCode: string;
   private password: string;
+  private ownerToken?: string;
   private profile: PeerProfile;
   private handlers: SignalingHandlers;
 
@@ -253,12 +480,14 @@ export class SignalingClient {
     roomCode: string,
     password: string,
     profile: PeerProfile,
-    handlers: SignalingHandlers
+    handlers: SignalingHandlers,
+    ownerToken?: string
   ) {
     this.roomCode = roomCode;
     this.password = password;
     this.profile = profile;
     this.handlers = handlers;
+    this.ownerToken = ownerToken;
   }
 
   connect(): void {
@@ -285,6 +514,7 @@ export class SignalingClient {
         roomCode: this.roomCode,
         peerId: this.profile.peerId,
         password: this.password,
+        ownerToken: this.ownerToken || undefined,
         profile: this.profile,
       });
       this.startHeartbeat();

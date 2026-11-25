@@ -90,6 +90,7 @@ export interface UserProfile {
 // 房间内在线成员资料
 export interface PeerProfile {
   peerId: string;
+  clientId?: string;
   name: string;
   avatar: string;
   joinedAt: number;
@@ -108,6 +109,8 @@ export interface RoomSummary {
   code: string;
   mode: RoomMode;
   hasPassword: boolean;
+  hasOwner?: boolean; // 是否已绑定房主令牌
+  ownerToken?: string; // 仅在创建房间时返回一次
   allowRandom?: boolean; // 是否允许陌生人随机进入（仅无密码房有效）
   topic?: string; // 可选房间主题标签
   maxPeers: number;
@@ -129,6 +132,8 @@ export interface ServerConfig {
   historyMaxFileBytes?: number; // 单个历史附件云端限时缓存上限（字节），默认 100MB
   maxAttachmentMB: number; // 服务端允许的最高硬上限（MB），0 表示不限制
   defaultRoomMaxFileMB: number; // 新建房间默认单附件上限（MB），0 表示不限制
+  pickupMaxFileMB?: number; // 取件码单文件上限（MB）
+  pickupMaxTotalMB?: number; // 单个取件码总上限（MB）
   hasTurn: boolean;
   iceServers: RTCIceServer[];
 }
@@ -139,6 +144,7 @@ export interface SavedFixedRoom {
   label?: string;
   hasPassword: boolean;
   password?: string; // 仅在用户主动勾选记住密码时保存在本机
+  ownerToken?: string; // 房主管理令牌
   lastVisitedAt: number;
 }
 
@@ -148,6 +154,7 @@ export interface RecentRoom {
   mode: RoomMode;
   hasPassword: boolean;
   password?: string;
+  ownerToken?: string; // 房主管理令牌
   lastVisitedAt: number;
 }
 
@@ -222,6 +229,8 @@ export interface FileTransferInfo {
   savedToDisk?: boolean; // 是否通过 File System Access API 流式直写硬盘
   resumedFromBytes?: number; // 若本次传输从断点续传，记录起始字节偏移
   canResumeBytes?: number; // 本地检测到可续传的已落盘字节数（大于 0 时显示断点续传按钮）
+  resumeKey?: string; // 基于文件指纹的断点续传唯一键
+  hashScope?: 'full'; // 校验范围标识（full 表示覆盖完整文件）
   errorMessage?: string;
 }
 
@@ -242,6 +251,7 @@ export interface ChatItem {
   isScreenshot?: boolean;
   isDoodle?: boolean;
   isSecret?: boolean;
+  isClipSync?: boolean;
   replyTo?: ReplyQuote;
   reactions?: Record<string, string[]>; // emoji -> peerIds
   fromCache?: boolean; // 标识该消息恢复自服务器缓存
@@ -256,6 +266,9 @@ export interface SignalEnvelope {
   targetPeerId?: string;
   fromPeerId?: string;
   password?: string;
+  ownerToken?: string;
+  isOwner?: boolean;
+  hasPassword?: boolean;
   profile?: PeerProfile;
   peers?: PeerProfile[];
   room?: RoomSummary;
@@ -275,4 +288,81 @@ export interface SignalEnvelope {
   errorCode?: string;
   error?: string;
   actorName?: string;
+}
+
+// 取件码离线文件元信息
+export interface PickupFileMeta {
+  fileId: string;
+  name: string;
+  size: number;
+  mime: string;
+  ready?: boolean;
+}
+
+export interface PickupCreateResponse {
+  code: string;
+  ownerToken: string;
+  expiresAt: number;
+  files: PickupFileMeta[];
+}
+
+export interface PickupInfo {
+  code: string;
+  files: PickupFileMeta[];
+  expiresAt: number;
+  burnAfterRead: boolean;
+  downloads: number;
+  hasPassword: boolean;
+  burnedAt?: number;
+}
+
+export interface MyPickupRecord {
+  code: string;
+  ownerToken: string;
+  expiresAt: number;
+  fileCount: number;
+  totalSize: number;
+  burnAfterRead: boolean;
+  hasPassword: boolean;
+  createdAt: number;
+}
+
+// 附近设备与邀请数据结构
+export interface NearbyDevice {
+  clientId: string;
+  name: string;
+  avatar: string;
+  device: 'android' | 'web';
+}
+
+export interface NearbyInviteNotice {
+  inviteId: string;
+  fromClientId: string;
+  fromName: string;
+  fromAvatar: string;
+  roomCode: string;
+  expiresAt: number;
+}
+
+export interface NearbyHeartbeatResponse {
+  devices: NearbyDevice[];
+  invites: NearbyInviteNotice[];
+}
+
+export interface NearbyInviteResponse {
+  inviteId: string;
+  room: RoomSummary;
+  ownerToken: string;
+}
+
+export interface PendingNearbyInvite {
+  inviteId: string;
+  targetName: string;
+}
+
+// 本地持久化屏蔽成员记录
+export interface BlockedPeer {
+  clientId: string;
+  name: string;
+  blockedAt: number;
 }

@@ -30,15 +30,21 @@ import {
   MonitorUp,
   PhoneOff,
   Minimize2,
+  Flag,
+  Ban,
+  Settings2,
 } from 'lucide-react';
 import QRCode from 'qrcode';
 import type {
+  BlockedPeer,
   CachedMessage,
   ChatItem,
+  FileTransferInfo,
   HistoryMeta,
   PeerLinkStatus,
   PeerMediaState,
   PeerProfile,
+  PendingNearbyInvite,
   PomodoroMode,
   PomodoroState,
   RecentRoom,
@@ -60,8 +66,11 @@ import {
   buildCachedFileUrl,
   buildCachedMediaUrl,
   createRoom,
+  fetchNearbyInviteStatus,
   fetchRoomInfo,
   SignalingClient,
+  submitReport,
+  updateRoomProfile,
   uploadCachedFile,
   uploadCachedMedia,
 } from '../lib/signaling';
@@ -72,6 +81,7 @@ import {
   formatBytes,
   formatExpiryTime,
   formatRelativeTime,
+  getCachedResumeOffset,
   openDiskResumeStream,
   openDiskWriteStream,
   playNoticeTone,
@@ -85,7 +95,13 @@ import {
   computeEntriesTotalBytes,
   extractDroppedItems,
 } from '../lib/zip';
-import { getTabPeerId, type UserPrefs } from '../lib/storage';
+import {
+  addBlockedPeer,
+  getTabPeerId,
+  loadBlockedPeers,
+  removeBlockedPeer,
+  type UserPrefs,
+} from '../lib/storage';
 import { Avatar } from './Avatar';
 import { PalettePicker, Switch } from './Controls';
 import { MessageList } from './MessageList';
@@ -98,6 +114,8 @@ import { Lightbox } from './Lightbox';
 interface ChatRoomProps {
   roomCode: string;
   password: string;
+  ownerToken?: string;
+  pendingNearbyInvite?: PendingNearbyInvite | null;
   profile: UserProfile;
   prefs: UserPrefs;
   theme: ThemeMode;
@@ -107,7 +125,8 @@ interface ChatRoomProps {
   onSelectTheme: (theme: ThemeMode) => void;
   onUpdatePrefs: (next: UserPrefs) => void;
   onEditProfile: () => void;
-  onSwitchRoom: (newCode: string, password: string, mode?: RoomMode) => void;
+  onSwitchRoom: (newCode: string, password: string, mode?: RoomMode, ownerToken?: string) => void;
+  onClearPendingNearbyInvite?: () => void;
   onRemoveRecentRoom: (code: string) => void;
   onMinimizeRoom: () => void;
   onStatusSummary?: (summary: string) => void;
@@ -179,6 +198,8 @@ interface PendingPasteImage {
 export const ChatRoom: React.FC<ChatRoomProps> = ({
   roomCode,
   password,
+  ownerToken,
+  pendingNearbyInvite,
   profile,
   prefs,
   theme,
@@ -189,6 +210,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   onUpdatePrefs,
   onEditProfile,
   onSwitchRoom,
+  onClearPendingNearbyInvite,
   onRemoveRecentRoom,
   onMinimizeRoom,
   onStatusSummary,
@@ -199,6 +221,27 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   const [selfPeerId] = useState<string>(() => getTabPeerId());
 
   const [roomInfo, setRoomInfo] = useState<RoomSummary | null>(null);
+  const [isOwner, setIsOwner] = useState<boolean>(Boolean(ownerToken));
+  const [blockedPeers, setBlockedPeers] = useState<BlockedPeer[]>(() => loadBlockedPeers());
+  const [nearbyInviteStatus, setNearbyInviteStatus] = useState<
+    'pending' | 'accepted' | 'declined' | 'expired' | null
+  >(pendingNearbyInvite ? 'pending' : null);
+
+  // 举报与房间资料修改弹窗状态
+  const [reportTarget, setReportTarget] = useState<{
+    peerId: string;
+    clientId: string;
+    name: string;
+    messageId?: string;
+  } | null>(null);
+  const [reportReason, setReportReason] = useState('发送垃圾广告或恶意文件');
+  const [submittingReport, setSubmittingReport] = useState(false);
+
+  const [roomProfileOpen, setRoomProfileOpen] = useState(false);
+  const [editTopicInput, setEditTopicInput] = useState('');
+  const [editPasswordInput, setEditPasswordInput] = useState('');
+  const [clearPasswordChecked, setClearPasswordChecked] = useState(false);
+  const [savingRoomProfile, setSavingRoomProfile] = useState(false);
   const [historyMeta, setHistoryMeta] = useState<HistoryMeta>({
     retentionDays: 3,
     messageCount: 0,
@@ -288,6 +331,10 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   const imageInputRef = useRef<HTMLInputElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const typingTimerRef = useRef<number | null>(null);
+  const remoteTypingTimersRef = useRef<Record<string, number>>({});
+  const blockedPeersRef = useRef<BlockedPeer[]>(blockedPeers);
+  const ownerTokenRef = useRef<string | undefined>(ownerToken);
+  const onSwitchRoomRef = useRef(onSwitchRoom);
   const dragDepthRef = useRef(0);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordChunksRef = useRef<Blob[]>([]);
@@ -308,6 +355,9 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   profileRef.current = profile;
   prefsRef.current = prefs;
   peersRef.current = peers;
+  blockedPeersRef.current = blockedPeers;
+  ownerTokenRef.current = ownerToken;
+  onSwitchRoomRef.current = onSwitchRoom;
   serverConfigRef.current = serverConfig;
   historyMetaRef.current = historyMeta;
   pomodoroRef.current = pomodoro;
@@ -815,8 +865,19 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     voiceCancelledRef.current = false;
     revokeAllTrackedUrls();
 
+    const isBlockedProfile = (p?: PeerProfile | null): boolean => {
+      if (!p) return false;
+      const cid = p.clientId || p.peerId;
+      return blockedPeersRef.current.some((b) => b.clientId === cid || b.clientId === p.peerId);
+    };
+    const isBlockedPeerId = (peerId: string): boolean => {
+      return isBlockedProfile(peersRef.current[peerId]) ||
+        blockedPeersRef.current.some((b) => b.clientId === peerId);
+    };
+
     const selfPeerProfile: PeerProfile = {
       peerId: selfPeerId,
+      clientId: profileRef.current.clientId,
       name: profileRef.current.name,
       avatar: profileRef.current.avatar,
       joinedAt: Date.now(),
@@ -828,6 +889,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         setLinkStatuses((prev) => ({ ...prev, [status.peerId]: status }));
       },
       onTextMessage: (peerId, msg) => {
+        if (isBlockedPeerId(peerId)) return;
         const sender = peersRef.current[peerId];
         const decoded = decodeSecretText(msg.text);
         setMessages((prev) => {
@@ -856,10 +918,74 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         applyMessageRecalled(msgId, peerId, sender?.name);
       },
       onTyping: (peerId, isTyping) => {
+        if (isBlockedPeerId(peerId)) return;
+        if (remoteTypingTimersRef.current[peerId]) {
+          clearTimeout(remoteTypingTimersRef.current[peerId]);
+          delete remoteTypingTimersRef.current[peerId];
+        }
         setTypingPeers((prev) => ({ ...prev, [peerId]: isTyping }));
+        // 接收端 6 秒超时自动清除「正在输入」状态
+        if (isTyping) {
+          remoteTypingTimersRef.current[peerId] = window.setTimeout(() => {
+            delete remoteTypingTimersRef.current[peerId];
+            setTypingPeers((prev) => ({ ...prev, [peerId]: false }));
+          }, 6000);
+        }
       },
       onReaction: (peerId, msgId, emoji) => {
+        if (isBlockedPeerId(peerId)) return;
         toggleMessageReaction(msgId, emoji, peerId);
+      },
+      onClipboardSync: (peerId, text, updatedAt) => {
+        if (isBlockedPeerId(peerId) || !text) return;
+        const sender = peersRef.current[peerId];
+        const id = `clip_${updatedAt || Date.now()}_${peerId}`;
+        setMessages((prev) => {
+          if (prev.some((m) => m.id === id)) return prev;
+          return [
+            ...prev,
+            {
+              id,
+              kind: 'text',
+              senderId: peerId,
+              senderName: sender?.name || '对方',
+              senderAvatar: sender?.avatar,
+              isSelf: false,
+              timestamp: updatedAt || Date.now(),
+              text,
+              isClipSync: true,
+            },
+          ];
+        });
+        bumpUnreadIfHidden();
+        onToast(`📋 收到 ${sender?.name || '伙伴'} 共享的剪贴板内容`);
+      },
+      onRoomMoved: (_peerId, nextCode, nextPassword) => {
+        onToast('房间已更换口令');
+        sig.leaveRoom();
+        mesh.destroyAll();
+        revokeAllTrackedUrls();
+        onSwitchRoomRef.current(nextCode, nextPassword ?? '', 'ephemeral');
+      },
+      onResumeUnavailable: (_peerId, _resumeKey, fileName) => {
+        onToast(`对方已无法重发「${fileName}」`);
+      },
+      onOutgoingResend: (peerId, info) => {
+        const peerName = peersRef.current[peerId]?.name;
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `tr_${info.transferId}`,
+            kind: 'file',
+            senderId: selfPeerId,
+            senderName: profileRef.current.name,
+            senderAvatar: profileRef.current.avatar,
+            isSelf: true,
+            timestamp: Date.now(),
+            transfer: { ...info, targetPeerName: peerName },
+          },
+        ]);
+        onToast(`⚡ 正在响应续传重发「${info.fileName}」`);
       },
       onRemoteAudioStream: (peerId, stream) => {
         setRemoteAudioStreams((prev) => {
@@ -905,6 +1031,10 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         }
       },
       onFileOffer: (peerId, info, msgId, caption, timestamp) => {
+        if (isBlockedPeerId(peerId)) {
+          mesh.rejectIncomingTransfer(peerId, info.transferId);
+          return;
+        }
         const sender = peersRef.current[peerId];
         const kind = info.isImage ? 'image' : info.isAudio ? 'audio' : 'file';
         const itemId = info.isImage || info.isAudio ? msgId : `tr_${info.transferId}`;
@@ -967,6 +1097,9 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         }
       },
       shouldAutoAccept: (info) => {
+        if (info.targetPeerId && isBlockedPeerId(info.targetPeerId)) {
+          return false;
+        }
         const limitMB = effectiveMaxFileMBRef.current;
         if (limitMB > 0 && info.fileSize > limitMB * 1024 * 1024) {
           return false;
@@ -978,22 +1111,30 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     });
     meshRef.current = mesh;
 
-    const sig = new SignalingClient(roomCode, password, selfPeerProfile, {
-      onConnectionState: (connected) => setWsConnected(connected),
-      onJoined: (env) => {
-        if (env.room) {
-          setRoomInfo(env.room);
-          if (env.room.stats) setRoomStats(env.room.stats);
-        }
-        if (env.history) setHistoryMeta(env.history);
+    const sig = new SignalingClient(
+      roomCode,
+      password,
+      selfPeerProfile,
+      {
+        onConnectionState: (connected) => setWsConnected(connected),
+        onJoined: (env) => {
+          if (typeof env.isOwner === 'boolean') {
+            setIsOwner(env.isOwner);
+          }
+          if (env.room) {
+            setRoomInfo(env.room);
+            if (env.room.stats) setRoomStats(env.room.stats);
+          }
+          if (env.history) setHistoryMeta(env.history);
 
-        const peerMap: Record<string, PeerProfile> = {};
-        const activeIds: string[] = [];
-        (env.peers || []).forEach((p) => {
-          peerMap[p.peerId] = p;
-          activeIds.push(p.peerId);
-        });
-        setPeers(peerMap);
+          const peerMap: Record<string, PeerProfile> = {};
+          const activeIds: string[] = [];
+          (env.peers || []).forEach((p) => {
+            if (isBlockedProfile(p)) return;
+            peerMap[p.peerId] = p;
+            activeIds.push(p.peerId);
+          });
+          setPeers(peerMap);
         // 信令重连拿到全量在线列表时，同步裁掉断线期间已离房成员的残留状态
         const pruneByActive = <T,>(prev: Record<string, T>): Record<string, T> => {
           const next: Record<string, T> = {};
@@ -1016,14 +1157,16 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         // 同步清理重连期间已离开的僵尸会话，避免内存与定时器残留
         mesh.syncPeers(activeIds);
       },
-      onPeerJoined: (p) => {
-        setPeers((prev) => ({ ...prev, [p.peerId]: p }));
-        // 成员新加入或重连时强制重建干净的 PeerConnection，防止僵尸连接卡死
-        mesh.ensurePeer(p.peerId, true);
-        appendSystemMessage(`✨ ${p.name} 加入了房间`);
-      },
-      onPeerUpdated: (p) => {
-        setPeers((prev) => ({ ...prev, [p.peerId]: p }));
+        onPeerJoined: (p) => {
+          if (isBlockedProfile(p)) return;
+          setPeers((prev) => ({ ...prev, [p.peerId]: p }));
+          // 成员新加入或重连时强制重建干净的 PeerConnection，防止僵尸连接卡死
+          mesh.ensurePeer(p.peerId, true);
+          appendSystemMessage(`✨ ${p.name} 加入了房间`);
+        },
+        onPeerUpdated: (p) => {
+          if (isBlockedProfile(p)) return;
+          setPeers((prev) => ({ ...prev, [p.peerId]: p }));
         setMessages((prev) =>
           prev.map((m) =>
             m.senderId === p.peerId
@@ -1044,6 +1187,10 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           delete next[peerId];
           return next;
         });
+        if (remoteTypingTimersRef.current[peerId]) {
+          clearTimeout(remoteTypingTimersRef.current[peerId]);
+          delete remoteTypingTimersRef.current[peerId];
+        }
         setTypingPeers((prev) => {
           const next = { ...prev };
           delete next[peerId];
@@ -1090,12 +1237,23 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         }
       },
       onRoomSettingsUpdated: (env) => {
+        setRoomInfo((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            maxFileSizeMB: typeof env.maxFileSizeMB === 'number' ? env.maxFileSizeMB : prev.maxFileSizeMB,
+            allowRandom: typeof env.allowRandom === 'boolean' ? env.allowRandom : prev.allowRandom,
+            hasPassword: typeof env.hasPassword === 'boolean' ? env.hasPassword : prev.hasPassword,
+            topic: typeof env.topic === 'string' ? env.topic : prev.topic,
+          };
+        });
         if (typeof env.maxFileSizeMB === 'number') {
-          const nextMB = env.maxFileSizeMB;
-          setRoomInfo((prev) => (prev ? { ...prev, maxFileSizeMB: nextMB } : prev));
           appendSystemMessage(
-            `📦 ${env.actorName || '伙伴'} 将单附件大小上限调整为：${formatLimitMB(nextMB)}`
+            `📦 ${env.actorName || '伙伴'} 将单附件大小上限调整为：${formatLimitMB(env.maxFileSizeMB)}`
           );
+        }
+        if (typeof env.hasPassword === 'boolean' || typeof env.topic === 'string') {
+          appendSystemMessage(`🔧 ${env.actorName || '房主'} 更新了房间设置`);
         }
       },
       onRoomStatsUpdated: (env) => {
@@ -1134,13 +1292,15 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           onToast(msg);
         }
       },
-    });
+    }, ownerTokenRef.current);
     signalingRef.current = sig;
     sig.connect();
 
     return () => {
       mountedRef.current = false;
       voiceCancelledRef.current = true;
+      Object.values(remoteTypingTimersRef.current).forEach((tid) => clearTimeout(tid));
+      remoteTypingTimersRef.current = {};
       ambientEngine.stop();
       stopAllLocalMedia();
       if (recordTimerRef.current !== null) {
@@ -1178,6 +1338,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   useEffect(() => {
     signalingRef.current?.updateProfile({
       peerId: selfPeerId,
+      clientId: profile.clientId,
       name: profile.name,
       avatar: profile.avatar,
       joinedAt: Date.now(),
@@ -1188,6 +1349,49 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       )
     );
   }, [profile, selfPeerId]);
+
+  // 附近设备邀请发起方进入房间后每 3 秒轮询被邀请方响应状态
+  useEffect(() => {
+    if (!pendingNearbyInvite?.inviteId) {
+      setNearbyInviteStatus(null);
+      return;
+    }
+    setNearbyInviteStatus('pending');
+    let stopped = false;
+    let timer: number | null = null;
+
+    const poll = async () => {
+      if (stopped) return;
+      try {
+        const res = await fetchNearbyInviteStatus(pendingNearbyInvite.inviteId);
+        if (stopped) return;
+        setNearbyInviteStatus(res.status);
+        if (res.status !== 'pending') {
+          if (timer !== null) {
+            clearInterval(timer);
+            timer = null;
+          }
+          if (res.status === 'accepted') {
+            window.setTimeout(() => {
+              onClearPendingNearbyInvite?.();
+            }, 3000);
+          }
+        }
+      } catch {
+        // 忽略瞬态轮询错误
+      }
+    };
+
+    void poll();
+    timer = window.setInterval(() => {
+      void poll();
+    }, 3000);
+
+    return () => {
+      stopped = true;
+      if (timer !== null) clearInterval(timer);
+    };
+  }, [pendingNearbyInvite?.inviteId, onClearPendingNearbyInvite]);
 
   const linkStatusPill = useMemo(() => {
     const peerList = Object.values(peers);
@@ -1538,7 +1742,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     const localUrl = trackObjectUrl(URL.createObjectURL(blob));
 
     const transfers =
-      meshRef.current?.sendFileToAll(blob, {
+      (await meshRef.current?.sendFileToAll(blob, {
         transferIdPrefix: idPrefix,
         fileName: options.fileName,
         mimeType: blob.type || 'image/png',
@@ -1546,7 +1750,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         isScreenshot: options.isScreenshot,
         caption: options.caption,
         timestamp,
-      }) || [];
+      })) || [];
 
     const primaryTransfer = transfers[0];
     setMessages((prev) => [
@@ -1600,7 +1804,8 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
 
   // 发送语音对讲泡泡
   const sendVoiceBlob = async (blob: Blob, durationSec: number) => {
-    const fileName = `voice-${Date.now()}.webm`;
+    const ext = blob.type.includes('mp4') ? 'm4a' : blob.type.includes('ogg') ? 'ogg' : 'webm';
+    const fileName = `voice-${Date.now()}.${ext}`;
     if (!checkAttachmentAllowed(blob.size, fileName)) {
       return;
     }
@@ -1611,7 +1816,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     const caption = `${Math.max(1, durationSec)}″`;
 
     const transfers =
-      meshRef.current?.sendFileToAll(blob, {
+      (await meshRef.current?.sendFileToAll(blob, {
         transferIdPrefix: idPrefix,
         fileName,
         mimeType: blob.type || 'audio/webm',
@@ -1619,7 +1824,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         isAudio: true,
         caption,
         timestamp,
-      }) || [];
+      })) || [];
 
     setMessages((prev) => [
       ...prev,
@@ -1771,13 +1976,13 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
 
       if (connectedPeers > 0) {
         const transfers =
-          meshRef.current?.sendFileToAll(file, {
+          (await meshRef.current?.sendFileToAll(file, {
             transferIdPrefix: idPrefix,
             fileName: file.name,
             mimeType: file.type || 'application/octet-stream',
             isImage: false,
             timestamp,
-          }) || [];
+          })) || [];
 
         transfers.forEach((tr) => {
           const peerName = tr.targetPeerId ? peersRef.current[tr.targetPeerId]?.name : undefined;
@@ -1977,15 +2182,16 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     transferId: string,
     mode: 'memory' | 'disk' | 'resume',
     fileName: string,
-    fileSize: number
+    fileSize: number,
+    resumeKey?: string
   ) => {
     try {
       let diskStream = null;
       if (mode === 'disk') {
-        diskStream = await openDiskWriteStream(fileName, fileSize);
+        diskStream = await openDiskWriteStream(fileName, fileSize, resumeKey);
         if (!diskStream) return;
       } else if (mode === 'resume') {
-        diskStream = await openDiskResumeStream(fileName, fileSize);
+        diskStream = await openDiskResumeStream(fileName, fileSize, resumeKey);
         if (!diskStream) return;
       }
       const started = meshRef.current?.acceptIncomingTransfer(peerId, transferId, diskStream);
@@ -2000,6 +2206,44 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     }
   };
 
+  // 向原发送方主动发起断点续传重发请求（优先复用已缓存断点文件）
+  const handleRequestResume = async (peerId: string, transfer: FileTransferInfo) => {
+    if (!transfer.resumeKey) return;
+    try {
+      const cachedOffset = await getCachedResumeOffset(
+        transfer.fileName,
+        transfer.fileSize,
+        transfer.resumeKey
+      );
+      let diskStream = null;
+      let offset = cachedOffset;
+      if (cachedOffset > 0) {
+        diskStream = await openDiskResumeStream(
+          transfer.fileName,
+          transfer.fileSize,
+          transfer.resumeKey
+        );
+        offset = diskStream?.initialOffset || 0;
+      }
+      const ok = meshRef.current?.sendResumeRequest(
+        peerId,
+        transfer.resumeKey,
+        transfer.fileName,
+        transfer.fileSize,
+        offset,
+        diskStream
+      );
+      if (!ok) {
+        if (diskStream) void diskStream.close().catch(() => {});
+        onToast('⚠️ 对方不在线或 P2P 通道未就绪，无法请求续传');
+      } else {
+        onToast(`⚡ 已向对方请求续传「${transfer.fileName}」...`);
+      }
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : '无法发起续传请求');
+    }
+  };
+
   const handleAcceptAllPending = () => {
     pendingIncomingFiles.forEach((m) => {
       if (m.transfer?.targetPeerId) {
@@ -2010,7 +2254,12 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   };
 
   // 切换常用固定房间或最近房间前先探测是否仍存在及是否需要密码
-  const handleSwitchSavedFixed = async (r: { code: string; password?: string; mode?: RoomMode }) => {
+  const handleSwitchSavedFixed = async (r: {
+    code: string;
+    password?: string;
+    ownerToken?: string;
+    mode?: RoomMode;
+  }) => {
     setSidebarOpen(false);
     try {
       const info = await fetchRoomInfo(r.code);
@@ -2019,7 +2268,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         onExitToLobby(`房间 #${r.code} 设有密码，请在大厅输入密码进入`);
         return;
       }
-      onSwitchRoom(r.code, r.password || '', info.mode);
+      onSwitchRoom(r.code, r.password || '', info.mode, r.ownerToken);
     } catch (err) {
       if (
         err instanceof ApiError &&
@@ -2033,6 +2282,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     }
   };
 
+  // 「更换口令」流程：新建继承设置的临时房 -> 广播 room-moved -> 800ms 后销毁旧房 -> 发起方切入新房
   const handleRotateEphemeralCode = async () => {
     if (rotatingCode) return;
     setRotatingCode(true);
@@ -2040,19 +2290,109 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       const nextRoom = await createRoom({
         mode: 'ephemeral',
         password: password || undefined,
+        allowRandom: password ? false : roomInfo?.allowRandom ?? false,
         maxPeers: roomInfo?.maxPeers || serverConfig.maxRoomPeers,
         retentionDays: historyMeta.retentionDays,
         maxFileSizeMB: effectiveMaxFileMB,
       });
-      signalingRef.current?.destroyRoom();
-      onRemoveRecentRoom(roomCode);
-      setShowInvite(false);
-      onSwitchRoom(nextRoom.code, password, 'ephemeral');
-      onToast(`🎲 已换上全新口令：${nextRoom.code}`);
+      meshRef.current?.broadcastRoomMoved(nextRoom.code, password || undefined);
+      window.setTimeout(() => {
+        if (!mountedRef.current) return;
+        signalingRef.current?.destroyRoom();
+        onRemoveRecentRoom(roomCode);
+        setShowInvite(false);
+        setRotatingCode(false);
+        onSwitchRoom(nextRoom.code, password, 'ephemeral', nextRoom.ownerToken);
+        onToast(`🎲 已换上全新口令：${nextRoom.code}`);
+      }, 800);
     } catch (err) {
-      onToast(err instanceof Error ? err.message : '换码失败');
-    } finally {
       setRotatingCode(false);
+      onToast(err instanceof Error ? err.message : '换码失败');
+    }
+  };
+
+  const handleBlockPeer = (p: PeerProfile) => {
+    const cid = p.clientId || p.peerId;
+    const next = addBlockedPeer({
+      clientId: cid,
+      name: p.name,
+      blockedAt: Date.now(),
+    });
+    setBlockedPeers(next);
+    meshRef.current?.removePeer(p.peerId);
+    setPeers((prev) => {
+      const copy = { ...prev };
+      delete copy[p.peerId];
+      return copy;
+    });
+    onToast(`🚫 已屏蔽 ${p.name}，后续将自动拒收其消息与文件`);
+  };
+
+  const handleUnblockPeer = (clientId: string) => {
+    setBlockedPeers(removeBlockedPeer(clientId));
+    onToast('已解除屏蔽，对方重新加入后可正常通信');
+  };
+
+  const handleSubmitReport = async () => {
+    if (!reportTarget || submittingReport) return;
+    const cleanReason = reportReason.trim();
+    if (!cleanReason) {
+      onToast('请填写举报原因');
+      return;
+    }
+    setSubmittingReport(true);
+    try {
+      await submitReport({
+        roomCode,
+        reportedName: reportTarget.name,
+        reportedClientId: reportTarget.clientId,
+        reason: cleanReason,
+        messageId: reportTarget.messageId || '',
+        reporterClientId: profile.clientId,
+      });
+      setReportTarget(null);
+      onToast('✅ 已提交举报，感谢共同维护安全的传输环境');
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : '举报提交失败');
+    } finally {
+      setSubmittingReport(false);
+    }
+  };
+
+  const handleOpenRoomProfile = () => {
+    setEditTopicInput(roomInfo?.topic || '');
+    setEditPasswordInput('');
+    setClearPasswordChecked(false);
+    setRoomProfileOpen(true);
+  };
+
+  const handleSaveRoomProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (savingRoomProfile) return;
+    setSavingRoomProfile(true);
+    try {
+      const nextPwd = clearPasswordChecked
+        ? ''
+        : editPasswordInput.trim() !== ''
+          ? editPasswordInput.trim()
+          : undefined;
+      const updated = await updateRoomProfile(roomCode, {
+        ownerToken,
+        roomPassword: password,
+        password: nextPwd,
+        topic: editTopicInput.trim(),
+        actorName: profile.name,
+      });
+      setRoomInfo(updated);
+      setRoomProfileOpen(false);
+      onToast('✅ 房间资料已更新');
+      if (nextPwd !== undefined) {
+        onSwitchRoom(roomCode, nextPwd, updated.mode, ownerToken);
+      }
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : '修改房间设置失败');
+    } finally {
+      setSavingRoomProfile(false);
     }
   };
 
@@ -2129,6 +2469,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         : `最后聊天起保留 ${historyMeta.retentionDays} 天（最长 7 天）`;
 
   const inviteUrl = `${window.location.origin}/?room=${encodeURIComponent(roomCode)}`;
+  const canManageRoom = !roomInfo?.hasOwner || isOwner;
 
   // 向外同步挂起胶囊条展示的实时状态（传输进度优先，其次展示在线连线状态）
   useEffect(() => {
@@ -2296,62 +2637,64 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                   </button>
                 </div>
 
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, fontWeight: 700, color: 'var(--text-sub)' }}>
-                    <span>房间单附件上限（全房同步）</span>
-                    <span className="mono" style={{ color: 'var(--accent)' }}>
-                      {formatLimitMB(effectiveMaxFileMB)}
-                    </span>
-                  </div>
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6 }}>
-                    {ROOM_ATTACHMENT_PRESETS.filter((p) => {
-                      const cap = serverConfig.maxAttachmentMB || 0;
-                      if (cap <= 0) return true;
-                      return p.mb > 0 && p.mb <= cap;
-                    }).map((p) => (
-                      <button
-                        key={p.mb}
-                        type="button"
-                        className={`btn btn-sm ${effectiveMaxFileMB === p.mb ? 'btn-jelly' : 'btn-glass'}`}
-                        onClick={() => handleApplyRoomMaxFileMB(p.mb)}
-                      >
-                        {p.label}
-                      </button>
-                    ))}
-                  </div>
-                  <div style={{ display: 'flex', gap: 6, marginTop: 2 }}>
-                    <input
-                      className="field-input mono"
-                      type="number"
-                      min={0}
-                      max={serverConfig.maxAttachmentMB > 0 ? serverConfig.maxAttachmentMB : 102400}
-                      style={{ height: 32, fontSize: 12.5, borderRadius: 10, padding: '0 10px' }}
-                      value={customLimitMBInput}
-                      onChange={(e) => setCustomLimitMBInput(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' && customLimitMBInput.trim() !== '') {
-                          e.preventDefault();
-                          handleApplyRoomMaxFileMB(Number(customLimitMBInput));
-                        }
-                      }}
-                      placeholder="自定义 MB（填 0 = 不限制）"
-                    />
-                    <button
-                      type="button"
-                      className="btn btn-soft btn-sm"
-                      style={{ height: 32 }}
-                      disabled={customLimitMBInput.trim() === ''}
-                      onClick={() => handleApplyRoomMaxFileMB(Number(customLimitMBInput))}
-                    >
-                      应用
-                    </button>
-                  </div>
-                  {serverConfig.maxAttachmentMB > 0 && (
-                    <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                      服务端配置硬上限：{formatLimitMB(serverConfig.maxAttachmentMB)}
+                {canManageRoom && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, fontWeight: 700, color: 'var(--text-sub)' }}>
+                      <span>房间单附件上限（全房同步）</span>
+                      <span className="mono" style={{ color: 'var(--accent)' }}>
+                        {formatLimitMB(effectiveMaxFileMB)}
+                      </span>
                     </div>
-                  )}
-                </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6 }}>
+                      {ROOM_ATTACHMENT_PRESETS.filter((p) => {
+                        const cap = serverConfig.maxAttachmentMB || 0;
+                        if (cap <= 0) return true;
+                        return p.mb > 0 && p.mb <= cap;
+                      }).map((p) => (
+                        <button
+                          key={p.mb}
+                          type="button"
+                          className={`btn btn-sm ${effectiveMaxFileMB === p.mb ? 'btn-jelly' : 'btn-glass'}`}
+                          onClick={() => handleApplyRoomMaxFileMB(p.mb)}
+                        >
+                          {p.label}
+                        </button>
+                      ))}
+                    </div>
+                    <div style={{ display: 'flex', gap: 6, marginTop: 2 }}>
+                      <input
+                        className="field-input mono"
+                        type="number"
+                        min={0}
+                        max={serverConfig.maxAttachmentMB > 0 ? serverConfig.maxAttachmentMB : 102400}
+                        style={{ height: 32, fontSize: 12.5, borderRadius: 10, padding: '0 10px' }}
+                        value={customLimitMBInput}
+                        onChange={(e) => setCustomLimitMBInput(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && customLimitMBInput.trim() !== '') {
+                            e.preventDefault();
+                            handleApplyRoomMaxFileMB(Number(customLimitMBInput));
+                          }
+                        }}
+                        placeholder="自定义 MB（填 0 = 不限制）"
+                      />
+                      <button
+                        type="button"
+                        className="btn btn-soft btn-sm"
+                        style={{ height: 32 }}
+                        disabled={customLimitMBInput.trim() === ''}
+                        onClick={() => handleApplyRoomMaxFileMB(Number(customLimitMBInput))}
+                      >
+                        应用
+                      </button>
+                    </div>
+                    {serverConfig.maxAttachmentMB > 0 && (
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                        服务端配置硬上限：{formatLimitMB(serverConfig.maxAttachmentMB)}
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 <div style={{ borderTop: '1px solid var(--line-border)', paddingTop: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
                   <Switch
@@ -2441,30 +2784,32 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                 <div style={{ fontSize: 12, color: 'var(--text-sub)', lineHeight: 1.5 }}>
                   {cacheDetailText}
                 </div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6 }}>
-                  {RETENTION_STEPS.map((st) => {
-                    const active = historyMeta.retentionDays === st.days;
-                    return (
-                      <button
-                        key={st.days}
-                        type="button"
-                        className={`btn btn-sm ${
-                          active
-                            ? st.days === 0
-                              ? 'btn-danger'
-                              : 'btn-jelly'
-                            : 'btn-glass'
-                        }`}
-                        onClick={() => {
-                          setCachePopoverOpen(false);
-                          signalingRef.current?.updateRetention(st.days);
-                        }}
-                      >
-                        {st.label}
-                      </button>
-                    );
-                  })}
-                </div>
+                {canManageRoom && (
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6 }}>
+                    {RETENTION_STEPS.map((st) => {
+                      const active = historyMeta.retentionDays === st.days;
+                      return (
+                        <button
+                          key={st.days}
+                          type="button"
+                          className={`btn btn-sm ${
+                            active
+                              ? st.days === 0
+                                ? 'btn-danger'
+                                : 'btn-jelly'
+                              : 'btn-glass'
+                          }`}
+                          onClick={() => {
+                            setCachePopoverOpen(false);
+                            signalingRef.current?.updateRetention(st.days);
+                          }}
+                        >
+                          {st.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
                 <button
                   type="button"
                   className="btn btn-glass btn-sm"
@@ -2477,17 +2822,32 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                 >
                   <FileDown size={13} /> 导出当前聊天记录 (.txt)
                 </button>
-                <button
-                  type="button"
-                  className="btn btn-danger-soft btn-sm"
-                  style={{ width: '100%' }}
-                  onClick={() => {
-                    setCachePopoverOpen(false);
-                    setConfirmClearOpen(true);
-                  }}
-                >
-                  <Trash2 size={13} /> 立即清空服务器聊天记录
-                </button>
+                {canManageRoom && (
+                  <>
+                    <button
+                      type="button"
+                      className="btn btn-soft btn-sm"
+                      style={{ width: '100%' }}
+                      onClick={() => {
+                        setCachePopoverOpen(false);
+                        handleOpenRoomProfile();
+                      }}
+                    >
+                      <Settings2 size={13} /> 修改房间密码与主题
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-danger-soft btn-sm"
+                      style={{ width: '100%' }}
+                      onClick={() => {
+                        setCachePopoverOpen(false);
+                        setConfirmClearOpen(true);
+                      }}
+                    >
+                      <Trash2 size={13} /> 立即清空服务器聊天记录
+                    </button>
+                  </>
+                )}
               </div>
             )}
           </div>
@@ -2502,7 +2862,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             <span className="hide-mobile">邀请</span>
           </button>
 
-          {roomInfo?.mode === 'ephemeral' && (
+          {canManageRoom && roomInfo?.mode === 'ephemeral' && (
             <button
               type="button"
               className="btn btn-danger btn-sm hide-mobile"
@@ -2572,7 +2932,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
               >
                 <Clock size={12} /> {cacheShortLabel}
               </button>
-              {roomInfo?.mode === 'ephemeral' && (
+              {canManageRoom && roomInfo?.mode === 'ephemeral' && (
                 <button
                   type="button"
                   className="btn btn-danger btn-sm"
@@ -2700,24 +3060,86 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                       <span>{sub}</span>
                     </div>
                   </div>
-                  {!ready && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                    {!ready && (
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-icon"
+                        style={{ width: 26, height: 26 }}
+                        title="手动重建 P2P 连接"
+                        onClick={() => {
+                          meshRef.current?.reconnectPeer(p.peerId);
+                          onToast(`🔄 正在重新尝试与 ${p.name} 打洞直连...`);
+                        }}
+                      >
+                        <RotateCw size={13} />
+                      </button>
+                    )}
                     <button
                       type="button"
                       className="btn btn-ghost btn-icon"
                       style={{ width: 26, height: 26 }}
-                      title="手动重建 P2P 连接"
+                      title={`举报 ${p.name}`}
                       onClick={() => {
-                        meshRef.current?.reconnectPeer(p.peerId);
-                        onToast(`🔄 正在重新尝试与 ${p.name} 打洞直连...`);
+                        setReportReason('发送垃圾广告或恶意文件');
+                        setReportTarget({
+                          peerId: p.peerId,
+                          clientId: p.clientId || p.peerId,
+                          name: p.name,
+                        });
                       }}
                     >
-                      <RotateCw size={13} />
+                      <Flag size={12} />
                     </button>
-                  )}
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-icon"
+                      style={{ width: 26, height: 26 }}
+                      title={`屏蔽 ${p.name}`}
+                      onClick={() => handleBlockPeer(p)}
+                    >
+                      <Ban size={12} />
+                    </button>
+                  </div>
                 </div>
               );
             })}
           </div>
+
+          {blockedPeers.length > 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div style={{ fontSize: 12, fontWeight: 800, color: 'var(--text-muted)' }}>
+                🚫 已屏蔽成员 ({blockedPeers.length})
+              </div>
+              {blockedPeers.map((b) => (
+                <div
+                  key={b.clientId}
+                  style={{
+                    padding: '6px 10px',
+                    borderRadius: 12,
+                    background: 'var(--glass-subtle)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 6,
+                    fontSize: 12,
+                  }}
+                >
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {b.name}
+                  </span>
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm"
+                    style={{ height: 22, padding: '0 7px', fontSize: 11 }}
+                    onClick={() => handleUnblockPeer(b.clientId)}
+                  >
+                    解除
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
 
           {/* 陪伴自习室：全房同步番茄钟 + 零依赖合成环境白噪音 */}
           <StudyPomodoroCard
@@ -2813,7 +3235,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                 {formatLimitMB(effectiveMaxFileMB)}
               </span>
             </button>
-            {roomInfo?.mode === 'fixed' && (
+            {canManageRoom && roomInfo?.mode === 'fixed' && (
               <button
                 type="button"
                 className="btn btn-danger-soft btn-sm"
@@ -2834,6 +3256,30 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
               feeds={activeScreenFeeds}
               onStopLocalScreen={() => void handleToggleScreenShare()}
             />
+          )}
+
+          {/* 附近设备邀请状态轮询横幅（发起方进房后每 3 秒更新） */}
+          {pendingNearbyInvite && nearbyInviteStatus && (
+            <div className="wb-invite-banner">
+              <span>
+                {nearbyInviteStatus === 'pending' &&
+                  `⏳ 正在等待 ${pendingNearbyInvite.targetName} 接受邀请...`}
+                {nearbyInviteStatus === 'accepted' &&
+                  `✅ ${pendingNearbyInvite.targetName} 已接受邀请，正在建立连接`}
+                {nearbyInviteStatus === 'declined' &&
+                  `❌ ${pendingNearbyInvite.targetName} 婉拒了本次传输邀请`}
+                {nearbyInviteStatus === 'expired' &&
+                  `⏱ 等待 ${pendingNearbyInvite.targetName} 响应已超时`}
+              </span>
+              <button
+                type="button"
+                className="btn btn-ghost btn-icon"
+                style={{ width: 26, height: 26 }}
+                onClick={() => onClearPendingNearbyInvite?.()}
+              >
+                <X size={13} />
+              </button>
+            </div>
           )}
 
           {/* 协作白板召唤横幅（对方开启白板画画时提示一键加入同屏创作） */}
@@ -3001,11 +3447,12 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                 onReactMessage={handleReactMessage}
                 onReplyMessage={handleReplyMessage}
                 onRecallMessage={handleRecallMessage}
-                onAcceptFile={(peerId, tid, mode, fn, fsize) =>
-                  void handleAcceptFile(peerId, tid, mode, fn, fsize)
+                onAcceptFile={(peerId, tid, mode, fn, fsize, resumeKey) =>
+                  void handleAcceptFile(peerId, tid, mode, fn, fsize, resumeKey)
                 }
                 onRejectFile={(peerId, tid) => meshRef.current?.rejectIncomingTransfer(peerId, tid)}
                 onCancelTransfer={(peerId, tid) => meshRef.current?.cancelTransfer(peerId, tid)}
+                onRequestResume={(peerId, tr) => void handleRequestResume(peerId, tr)}
                 onPreviewImage={(src, fileName, caption) =>
                   setLightboxData({ src, fileName, caption })
                 }
@@ -3257,7 +3704,9 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           room={roomInfo}
           onClose={() => setShowInvite(false)}
           onRotateCode={
-            roomInfo.mode === 'ephemeral' ? () => void handleRotateEphemeralCode() : undefined
+            canManageRoom && roomInfo.mode === 'ephemeral'
+              ? () => void handleRotateEphemeralCode()
+              : undefined
           }
           rotating={rotatingCode}
         />
@@ -3376,6 +3825,124 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                 <Flame size={14} /> 确认销毁
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* 违规举报弹窗 */}
+      {reportTarget && (
+        <div className="modal-overlay" onClick={() => setReportTarget(null)}>
+          <div className="modal-sheet" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 420 }}>
+            <div className="modal-head">
+              <h3>🚩 举报成员：{reportTarget.name}</h3>
+              <button
+                type="button"
+                className="btn btn-ghost btn-icon"
+                onClick={() => setReportTarget(null)}
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+              {['发送垃圾广告或恶意文件', '骚扰辱骂或不当言论', '传播违法违规内容'].map((preset) => (
+                <button
+                  key={preset}
+                  type="button"
+                  className={`btn btn-sm ${reportReason === preset ? 'btn-jelly' : 'btn-glass'}`}
+                  onClick={() => setReportReason(preset)}
+                >
+                  {preset}
+                </button>
+              ))}
+            </div>
+            <textarea
+              className="field-input"
+              rows={3}
+              style={{ padding: '10px 12px', height: 'auto', resize: 'vertical' }}
+              value={reportReason}
+              onChange={(e) => setReportReason(e.target.value)}
+              placeholder="请补充举报原因..."
+            />
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button
+                type="button"
+                className="btn btn-glass"
+                onClick={() => setReportTarget(null)}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="btn btn-danger"
+                disabled={submittingReport}
+                onClick={() => void handleSubmitReport()}
+              >
+                {submittingReport ? '提交中...' : '提交举报'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 房主修改房间密码与主题弹窗 */}
+      {roomProfileOpen && (
+        <div className="modal-overlay" onClick={() => setRoomProfileOpen(false)}>
+          <div className="modal-sheet" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 420 }}>
+            <div className="modal-head">
+              <h3>🔧 修改房间密码与主题</h3>
+              <button
+                type="button"
+                className="btn btn-ghost btn-icon"
+                onClick={() => setRoomProfileOpen(false)}
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <form onSubmit={(e) => void handleSaveRoomProfile(e)} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <span style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--text-sub)' }}>
+                  房间主题标签（最多 24 字）
+                </span>
+                <input
+                  className="field-input"
+                  value={editTopicInput}
+                  onChange={(e) => setEditTopicInput(e.target.value)}
+                  maxLength={24}
+                  placeholder="例如：项目文件互传"
+                />
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <span style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--text-sub)' }}>
+                  新访问密码（留空则保持原密码不变）
+                </span>
+                <input
+                  className="field-input"
+                  type="password"
+                  disabled={clearPasswordChecked}
+                  value={editPasswordInput}
+                  onChange={(e) => setEditPasswordInput(e.target.value)}
+                  placeholder="输入新密码（设置后将自动关闭随机串门）"
+                />
+              </div>
+              <Switch
+                checked={clearPasswordChecked}
+                onChange={setClearPasswordChecked}
+                label="移除房间访问密码"
+                description="开启后房间将变为免密状态"
+              />
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+                <button
+                  type="button"
+                  className="btn btn-glass"
+                  onClick={() => setRoomProfileOpen(false)}
+                >
+                  取消
+                </button>
+                <button type="submit" className="btn btn-jelly" disabled={savingRoomProfile}>
+                  {savingRoomProfile ? '保存中...' : '保存设置'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

@@ -2,17 +2,27 @@ package com.baytale.baychat
 
 import com.baytale.baychat.core.model.AppReleaseInfo
 import com.baytale.baychat.core.model.AppThemeMode
+import com.baytale.baychat.core.model.AppearanceMode
+import com.baytale.baychat.core.model.BlockedPeer
+import com.baytale.baychat.core.model.NearbyHeartbeatResponse
+import com.baytale.baychat.core.model.PickupCreateResponse
+import com.baytale.baychat.core.model.PickupInfo
 import com.baytale.baychat.core.model.PublicRoomsResponse
+import com.baytale.baychat.core.model.RecentRoom
+import com.baytale.baychat.core.model.RoomSummary
+import com.baytale.baychat.core.model.SavedFixedRoom
 import com.baytale.baychat.core.model.SignalEnvelope
 import com.baytale.baychat.core.util.FormatUtils
+import com.baytale.baychat.core.util.TransferResumeUtils
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
-// 跨端协议兼容单元测试：验证房间码提取、信令 JSON 兼容与二进制帧头大端序编码
+// 跨端协议兼容单元测试：验证房间码提取、信令 JSON 兼容、二进制帧头、取件码/附近设备/房主令牌/屏蔽模型序列化
 class ProtocolCompatTest {
 
     private val json = Json { ignoreUnknownKeys = true }
@@ -48,6 +58,8 @@ class ProtocolCompatTest {
             {
               "type": "joined",
               "roomCode": "849205",
+              "isOwner": true,
+              "ownerToken": "otk_abc123",
               "unknownFutureField": 12345,
               "room": {
                 "code": "849205",
@@ -68,11 +80,12 @@ class ProtocolCompatTest {
         assertEquals("joined", env.type)
         assertEquals("849205", env.room?.code)
         assertEquals(500, env.room?.maxFileSizeMB)
+        assertEquals(true, env.isOwner)
+        assertEquals("otk_abc123", env.ownerToken)
     }
 
     @Test
     fun testBinaryFileFrameHeaderMatchesWebEndianness() {
-        // 验证与 web/src/lib/webrtc.ts 一致的 8 字节大端序帧头：[streamId uint32 BE][chunkIndex uint32 BE]
         val frame = ByteBuffer.allocate(12).order(ByteOrder.BIG_ENDIAN)
         frame.putInt(7)
         frame.putInt(-1) // 0xFFFFFFFF EOF_CHUNK_INDEX
@@ -90,6 +103,8 @@ class ProtocolCompatTest {
         assertEquals(AppThemeMode.AIR, AppThemeMode.fromId(null))
         assertEquals(AppThemeMode.AIR, AppThemeMode.fromId("unknown"))
         assertEquals(AppThemeMode.NEON, AppThemeMode.fromId("neon"))
+        assertEquals(AppearanceMode.SYSTEM, AppearanceMode.fromId(null))
+        assertEquals(AppearanceMode.DARK, AppearanceMode.fromId("dark"))
 
         val publicJson = """
             {
@@ -128,7 +143,6 @@ class ProtocolCompatTest {
         val rel = json.decodeFromString(AppReleaseInfo.serializer(), relJson)
         assertEquals(3, rel.versionCode)
         assertEquals("1.1.0", rel.versionName)
-        // 验证旧版 version.json 缺少企业级 OTA 新字段时的向后兼容默认值
         assertEquals("", rel.fallbackUrl)
         assertEquals(0, rel.minSupportedCode)
         assertEquals(false, rel.forceUpdate)
@@ -151,5 +165,108 @@ class ProtocolCompatTest {
         assertEquals("https://github.com/baytale/baychat/releases/download/v1.1.5/BayChat-v1.1.5.apk", enterpriseRel.fallbackUrl)
         assertEquals(5, enterpriseRel.minSupportedCode)
         assertTrue(enterpriseRel.forceUpdate)
+    }
+
+    @Test
+    fun testPickupNearbyOwnerTokenAndBlockedPeerJsonCompatibility() {
+        val pickupCreateRaw = """
+            {
+              "code": "491820",
+              "ownerToken": "pm_secret_99",
+              "expiresAt": 1790000000000,
+              "files": [
+                {
+                  "fileId": "f_0011223344556677",
+                  "name": "report.pdf",
+                  "size": 204800,
+                  "mime": "application/pdf"
+                }
+              ]
+            }
+        """.trimIndent()
+        val pickupCreate = json.decodeFromString(PickupCreateResponse.serializer(), pickupCreateRaw)
+        assertEquals("491820", pickupCreate.code)
+        assertEquals("pm_secret_99", pickupCreate.ownerToken)
+        assertEquals(204800L, pickupCreate.files.first().size)
+
+        val pickupInfoRaw = """
+            {
+              "code": "491820",
+              "files": [
+                {
+                  "fileId": "f_0011223344556677",
+                  "name": "report.pdf",
+                  "size": 204800,
+                  "mime": "application/pdf",
+                  "ready": true
+                }
+              ],
+              "expiresAt": 1790000000000,
+              "burnAfterRead": false,
+              "downloads": 1,
+              "hasPassword": true
+            }
+        """.trimIndent()
+        val pickupInfo = json.decodeFromString(PickupInfo.serializer(), pickupInfoRaw)
+        assertTrue(pickupInfo.hasPassword)
+        assertEquals(1, pickupInfo.downloads)
+        assertEquals("report.pdf", pickupInfo.fileName)
+
+        val nearbyRaw = """
+            {
+              "devices": [
+                {
+                  "clientId": "web_01",
+                  "name": "MacBook Chrome",
+                  "avatar": "preset:rocket",
+                  "device": "web"
+                }
+              ],
+              "invites": [
+                {
+                  "inviteId": "inv_77",
+                  "fromClientId": "web_01",
+                  "fromName": "MacBook Chrome",
+                  "fromAvatar": "preset:rocket",
+                  "roomCode": "812345",
+                  "expiresAt": 1780000060000
+                }
+              ]
+            }
+        """.trimIndent()
+        val nearby = json.decodeFromString(NearbyHeartbeatResponse.serializer(), nearbyRaw)
+        assertEquals(1, nearby.devices.size)
+        assertEquals("web_01", nearby.devices.first().clientId)
+        assertEquals("812345", nearby.invites.first().roomCode)
+
+        val roomRaw = """
+            {
+              "code": "design-lab",
+              "mode": "fixed",
+              "ownerToken": "own_xyz",
+              "isOwner": true
+            }
+        """.trimIndent()
+        val roomSummary = json.decodeFromString(RoomSummary.serializer(), roomRaw)
+        assertEquals("own_xyz", roomSummary.ownerToken)
+        assertTrue(roomSummary.isOwner)
+        assertFalse(roomSummary.allowRandom)
+
+        // 旧版持久化 SavedFixedRoom / RecentRoom 缺省新字段向后兼容
+        val oldSaved = json.decodeFromString(SavedFixedRoom.serializer(), """{"code":"studio","hasPassword":false}""")
+        assertEquals("", oldSaved.ownerToken)
+        assertEquals("", oldSaved.alias)
+
+        val oldRecent = json.decodeFromString(RecentRoom.serializer(), """{"code":"123456","mode":"ephemeral"}""")
+        assertEquals("", oldRecent.ownerToken)
+
+        val blocked = BlockedPeer(clientId = "c_bad_1", name = "恶意成员", blockedAt = 1780000005000L)
+        val encodedBlocked = json.encodeToString(BlockedPeer.serializer(), blocked)
+        val decodedBlocked = json.decodeFromString(BlockedPeer.serializer(), encodedBlocked)
+        assertEquals(blocked, decodedBlocked)
+
+        val keyHex = TransferResumeUtils.computeResumeKeyFromBytes("sample.bin", byteArrayOf(1, 2, 3, 4))
+        assertEquals(64, keyHex.length)
+        assertEquals("resume_${keyHex.take(24)}.part", TransferResumeUtils.partFileNameForKey(keyHex))
     }
 }

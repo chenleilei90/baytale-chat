@@ -24,13 +24,16 @@ const (
 )
 
 var (
-	roomCodeRegex = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{2,23}$`)
+	roomCodeRegex     = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{2,23}$`)
+	sixDigitCodeRegex = regexp.MustCompile(`^\d{6}$`)
 
 	ErrInvalidRoomCode    = errors.New("房间码需为 3~24 位字母、数字、短横线或下划线")
+	ErrCodeReserved       = errors.New("6 位纯数字为临时房间口令，常驻房间请使用含字母的口令")
 	ErrRoomExists         = errors.New("该房间码已被占用，请更换一个")
 	ErrRoomNotFound       = errors.New("房间不存在，请检查房间码是否正确")
 	ErrRoomExpired        = errors.New("该一次性房间已结束并销毁，请向对方获取新房间码或新建房间")
 	ErrWrongPassword      = errors.New("房间密码错误")
+	ErrNotOwner           = errors.New("仅房主可执行此管理操作")
 	ErrRoomFull           = errors.New("房间人数已满")
 	ErrInvalidMaxFileSize = errors.New("附件大小上限设置无效")
 	ErrNoPublicRoom       = errors.New("当前暂无可随机进入的免密公开房间，不妨先建一间等伙伴来串门")
@@ -71,17 +74,18 @@ func (s *RoomStats) TouchActivity(now time.Time) {
 
 // FixedRoomRecord 表示持久化在磁盘上的固定房间元数据
 type FixedRoomRecord struct {
-	Code          string    `json:"code"`
-	Mode          string    `json:"mode"`
-	PasswordHash  string    `json:"passwordHash,omitempty"`
-	MaxPeers      int       `json:"maxPeers"`
-	RetentionDays int       `json:"retentionDays"`           // 服务器聊天缓存保留天数（0~7）
-	MaxFileSizeMB *int      `json:"maxFileSizeMB,omitempty"` // 单文件附件上限（MB），0 表示不限制，nil 兼容旧版数据
-	AllowRandom   *bool     `json:"allowRandom,omitempty"`   // 允许陌生人随机串门（仅免密房有效，默认 true）
-	Topic         string    `json:"topic,omitempty"`         // 可选公开房间主题标签
-	Stats         RoomStats `json:"stats,omitempty"`         // 基地成长与连续火花统计
-	CreatedAt     int64     `json:"createdAt"`
-	LastActiveAt  int64     `json:"lastActiveAt"`
+	Code           string    `json:"code"`
+	Mode           string    `json:"mode"`
+	PasswordHash   string    `json:"passwordHash,omitempty"`
+	OwnerTokenHash string    `json:"ownerTokenHash,omitempty"` // 房主令牌 SHA-256 哈希
+	MaxPeers       int       `json:"maxPeers"`
+	RetentionDays  int       `json:"retentionDays"`           // 服务器聊天缓存保留天数（0~7）
+	MaxFileSizeMB  *int      `json:"maxFileSizeMB,omitempty"` // 单文件附件上限（MB），0 表示不限制，nil 兼容旧版数据
+	AllowRandom    *bool     `json:"allowRandom,omitempty"`   // 允许陌生人随机串门（仅免密房有效，默认 true）
+	Topic          string    `json:"topic,omitempty"`         // 可选公开房间主题标签
+	Stats          RoomStats `json:"stats,omitempty"`         // 基地成长与连续火花统计
+	CreatedAt      int64     `json:"createdAt"`
+	LastActiveAt   int64     `json:"lastActiveAt"`
 }
 
 // ValidateMaxFileSizeMB 校验房间单附件大小上限（0 表示不限制，或 1 ~ MaxConfigurableFileSizeMB MB）
@@ -106,6 +110,40 @@ func ValidateCode(code string) error {
 		return ErrInvalidRoomCode
 	}
 	return nil
+}
+
+// IsReservedSixDigitCode 判断房间码是否为保留给临时房间的 6 位纯数字
+func IsReservedSixDigitCode(code string) bool {
+	return sixDigitCodeRegex.MatchString(code)
+}
+
+// GenerateOwnerToken 生成 32 位随机十六进制房主令牌
+func GenerateOwnerToken() string {
+	return randomHex(16)
+}
+
+// HashOwnerToken 对房主令牌计算 SHA-256 十六进制摘要（服务端仅保存哈希）
+func HashOwnerToken(token string) string {
+	clean := strings.TrimSpace(token)
+	if clean == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(clean))
+	return hex.EncodeToString(sum[:])
+}
+
+// VerifyOwnerToken 使用常量时间比较校验房主令牌
+func VerifyOwnerToken(storedHash, candidate string) bool {
+	if storedHash == "" {
+		return false
+	}
+	clean := strings.TrimSpace(candidate)
+	if clean == "" {
+		return false
+	}
+	sum := sha256.Sum256([]byte(clean))
+	expected := hex.EncodeToString(sum[:])
+	return subtle.ConstantTimeCompare([]byte(storedHash), []byte(expected)) == 1
 }
 
 // HashPassword 使用随机盐对房间密码进行 SHA-256 哈希

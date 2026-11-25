@@ -10,11 +10,15 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"baychat/server/internal/config"
+	"baychat/server/internal/nearby"
+	"baychat/server/internal/pickup"
+	"baychat/server/internal/ratelimit"
 	"baychat/server/internal/room"
 	"baychat/server/internal/static"
 	"baychat/server/internal/turn"
@@ -28,6 +32,52 @@ func main() {
 		log.Fatalf("初始化房间服务失败: %v", err)
 	}
 	defer hub.Close()
+
+	reportStore, err := room.NewReportStore(cfg.DataDir)
+	if err != nil {
+		log.Fatalf("初始化举报存储失败: %v", err)
+	}
+
+	pickupStore, err := pickup.NewStore(pickup.Config{
+		DataDir:     cfg.DataDir,
+		MaxFileMB:   cfg.PickupMaxFileMB,
+		MaxTotalMB:  cfg.PickupMaxTotalMB,
+		DiskQuotaMB: cfg.PickupDiskQuotaMB,
+	})
+	if err != nil {
+		log.Fatalf("初始化取件码存储失败: %v", err)
+	}
+	defer pickupStore.Close()
+
+	nearbySvc := nearby.NewService(hub)
+	defer nearbySvc.Close()
+
+	limiter := ratelimit.New(map[string]ratelimit.Rule{
+		"POST /api/rooms":             {Capacity: 30, Window: 10 * time.Minute},
+		"GET /api/rooms/{code}":       {Capacity: 120, Window: time.Minute},
+		"POST /api/rooms/{code}/verify": {Capacity: 30, Window: time.Minute},
+		"POST /api/pickups":           {Capacity: 10, Window: 10 * time.Minute},
+		"GET /api/pickups/{code}":     {Capacity: 40, Window: time.Minute},
+		"POST /api/nearby/heartbeat":  {Capacity: 40, Window: time.Minute},
+		"POST /api/nearby/invite":     {Capacity: 20, Window: time.Minute},
+		"POST /api/report":            {Capacity: 10, Window: time.Hour},
+	})
+
+	// 定期清理限流器的空闲令牌桶
+	stopLimiterSweep := make(chan struct{})
+	defer close(stopLimiterSweep)
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopLimiterSweep:
+				return
+			case <-ticker.C:
+				limiter.PurgeIdle(2 * time.Hour)
+			}
+		}
+	}()
 
 	mux := http.NewServeMux()
 
@@ -52,6 +102,8 @@ func main() {
 			"historyMaxFileBytes":  cfg.HistoryMaxFileBytes,
 			"maxAttachmentMB":      cfg.MaxAttachmentMB,
 			"defaultRoomMaxFileMB": cfg.DefaultRoomMaxFileMB,
+			"pickupMaxFileMB":      cfg.PickupMaxFileMB,
+			"pickupMaxTotalMB":     cfg.PickupMaxTotalMB,
 			"hasTurn":              hasTurn,
 			"iceServers":           iceServers,
 		})
@@ -59,6 +111,9 @@ func main() {
 
 	// 创建房间（支持 fixed 固定不变 / ephemeral 每次聊完就变）
 	mux.HandleFunc("POST /api/rooms", func(w http.ResponseWriter, r *http.Request) {
+		if !allowRate(limiter, "POST /api/rooms", w, r) {
+			return
+		}
 		var req room.CreateRoomRequest
 		if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "INVALID_JSON", "请求体 JSON 格式错误")
@@ -97,6 +152,9 @@ func main() {
 
 	// 查询房间元信息
 	mux.HandleFunc("GET /api/rooms/{code}", func(w http.ResponseWriter, r *http.Request) {
+		if !allowRate(limiter, "GET /api/rooms/{code}", w, r) {
+			return
+		}
 		summary, err := hub.GetRoomInfo(r.PathValue("code"))
 		if err != nil {
 			writeRoomError(w, err)
@@ -107,6 +165,9 @@ func main() {
 
 	// 校验房间密码
 	mux.HandleFunc("POST /api/rooms/{code}/verify", func(w http.ResponseWriter, r *http.Request) {
+		if !allowRate(limiter, "POST /api/rooms/{code}/verify", w, r) {
+			return
+		}
 		var body struct {
 			Password string `json:"password"`
 		}
@@ -121,9 +182,10 @@ func main() {
 
 	// 销毁房间（同时立即清空服务器缓存聊天记录）
 	mux.HandleFunc("DELETE /api/rooms/{code}", func(w http.ResponseWriter, r *http.Request) {
+		ownerToken := extractOwnerToken(r)
 		password := extractPassword(r)
 		actor := extractActorName(r)
-		if err := hub.DeleteRoom(r.PathValue("code"), password, actor); err != nil {
+		if err := hub.DeleteRoom(r.PathValue("code"), ownerToken, password, actor); err != nil {
 			writeRoomError(w, err)
 			return
 		}
@@ -145,8 +207,9 @@ func main() {
 
 	// 立即删除房间全部服务器缓存聊天记录与图片
 	mux.HandleFunc("DELETE /api/rooms/{code}/history", func(w http.ResponseWriter, r *http.Request) {
+		ownerToken := extractOwnerToken(r)
 		actor := extractActorName(r)
-		meta, err := hub.ClearHistory(r.PathValue("code"), extractPassword(r), actor)
+		meta, err := hub.ClearHistory(r.PathValue("code"), ownerToken, extractPassword(r), actor)
 		if err != nil {
 			writeRoomError(w, err)
 			return
@@ -172,7 +235,11 @@ func main() {
 		if password == "" {
 			password = extractPassword(r)
 		}
-		meta, cleared, err := hub.UpdateRetention(r.PathValue("code"), password, body.RetentionDays, body.ActorName)
+		actor := body.ActorName
+		if actor == "" {
+			actor = extractActorName(r)
+		}
+		meta, cleared, err := hub.UpdateRetention(r.PathValue("code"), extractOwnerToken(r), password, body.RetentionDays, actor)
 		if err != nil {
 			writeRoomError(w, err)
 			return
@@ -199,9 +266,14 @@ func main() {
 		if password == "" {
 			password = extractPassword(r)
 		}
+		actor := body.ActorName
+		if actor == "" {
+			actor = extractActorName(r)
+		}
+		ownerToken := extractOwnerToken(r)
 		resp := map[string]any{}
 		if body.MaxFileSizeMB != nil {
-			updatedMB, err := hub.UpdateMaxFileSize(r.PathValue("code"), password, *body.MaxFileSizeMB, body.ActorName)
+			updatedMB, err := hub.UpdateMaxFileSize(r.PathValue("code"), ownerToken, password, *body.MaxFileSizeMB, actor)
 			if err != nil {
 				writeRoomError(w, err)
 				return
@@ -209,7 +281,7 @@ func main() {
 			resp["maxFileSizeMB"] = updatedMB
 		}
 		if body.AllowRandom != nil {
-			updatedAllow, err := hub.UpdateAllowRandom(r.PathValue("code"), password, *body.AllowRandom, body.ActorName)
+			updatedAllow, err := hub.UpdateAllowRandom(r.PathValue("code"), ownerToken, password, *body.AllowRandom, actor)
 			if err != nil {
 				writeRoomError(w, err)
 				return
@@ -217,6 +289,29 @@ func main() {
 			resp["allowRandom"] = updatedAllow
 		}
 		writeJSON(w, http.StatusOK, resp)
+	})
+
+	// 房主修改房间密码与主题（设置密码后强制关闭 allowRandom 并广播）
+	mux.HandleFunc("PUT /api/rooms/{code}/profile", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Password  *string `json:"password"`
+			Topic     *string `json:"topic"`
+			ActorName string  `json:"actorName"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 16*1024)).Decode(&body); err != nil || (body.Password == nil && body.Topic == nil) {
+			writeError(w, http.StatusBadRequest, "INVALID_JSON", "请提供有效的房间资料参数")
+			return
+		}
+		actor := body.ActorName
+		if actor == "" {
+			actor = extractActorName(r)
+		}
+		summary, err := hub.UpdateRoomProfile(r.PathValue("code"), extractOwnerToken(r), extractPassword(r), body.Password, body.Topic, actor)
+		if err != nil {
+			writeRoomError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, summary)
 	})
 
 	// 上传聊天图片/截图到房间服务器缓存（受限于房间缓存开关与单图体积上限）
@@ -302,10 +397,167 @@ func main() {
 		http.ServeContent(w, r, meta.FileName, modTime, f)
 	})
 
+	// 违规举报接口（追加写入 reports.jsonl，不存明文 IP）
+	mux.HandleFunc("POST /api/report", func(w http.ResponseWriter, r *http.Request) {
+		if !allowRate(limiter, "POST /api/report", w, r) {
+			return
+		}
+		var req room.ReportRequest
+		if err := json.NewDecoder(io.LimitReader(r.Body, 32*1024)).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_JSON", "请求体 JSON 格式错误")
+			return
+		}
+		if err := reportStore.Append(req, ratelimit.ClientIP(r), time.Now()); err != nil {
+			writeRoomError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	// ================= 取件码离线投递接口 =================
+
+	// 创建取件码
+	mux.HandleFunc("POST /api/pickups", func(w http.ResponseWriter, r *http.Request) {
+		if !allowRate(limiter, "POST /api/pickups", w, r) {
+			return
+		}
+		var req pickup.CreateRequest
+		if err := json.NewDecoder(io.LimitReader(r.Body, 128*1024)).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_JSON", "请求体 JSON 格式错误")
+			return
+		}
+		resp, err := pickupStore.Create(req)
+		if err != nil {
+			writePickupError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, resp)
+	})
+
+	// 查询取件码内单文件已上传字节数（断点续传）
+	mux.HandleFunc("HEAD /api/pickups/{code}/files/{fileId}", func(w http.ResponseWriter, r *http.Request) {
+		uploaded, err := pickupStore.GetUploadedBytes(r.PathValue("code"), r.PathValue("fileId"), extractOwnerToken(r))
+		if err != nil {
+			writePickupError(w, err)
+			return
+		}
+		w.Header().Set("X-Uploaded-Bytes", strconv.FormatInt(uploaded, 10))
+		w.WriteHeader(http.StatusOK)
+	})
+
+	// 上传或断点续传取件码文件流
+	mux.HandleFunc("PUT /api/pickups/{code}/files/{fileId}", func(w http.ResponseWriter, r *http.Request) {
+		var offset int64
+		if rawOffset := strings.TrimSpace(r.Header.Get("X-Upload-Offset")); rawOffset != "" {
+			parsed, err := strconv.ParseInt(rawOffset, 10, 64)
+			if err != nil || parsed < 0 {
+				writeError(w, http.StatusBadRequest, "INVALID_OFFSET", "X-Upload-Offset 格式无效")
+				return
+			}
+			offset = parsed
+		}
+		if err := pickupStore.UploadFile(r.PathValue("code"), r.PathValue("fileId"), extractOwnerToken(r), offset, r.Body); err != nil {
+			writePickupError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	// 查询取件码元信息（取件码不存在时额外消耗令牌防枚举）
+	mux.HandleFunc("GET /api/pickups/{code}", func(w http.ResponseWriter, r *http.Request) {
+		if !allowRate(limiter, "GET /api/pickups/{code}", w, r) {
+			return
+		}
+		info, err := pickupStore.GetInfo(r.PathValue("code"), extractPickupPassword(r))
+		if err != nil {
+			if errors.Is(err, pickup.ErrPickupNotFound) {
+				limiter.Penalize("GET /api/pickups/{code}", ratelimit.ClientIP(r), 4)
+			}
+			writePickupError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, info)
+	})
+
+	// 下载取件码文件（支持 Range、强制 attachment、防嗅探与沙盒 CSP）
+	mux.HandleFunc("GET /api/pickups/{code}/files/{fileId}", func(w http.ResponseWriter, r *http.Request) {
+		if err := pickupStore.ServeFileDownload(w, r, r.PathValue("code"), r.PathValue("fileId"), extractPickupPassword(r)); err != nil {
+			writePickupError(w, err)
+		}
+	})
+
+	// 创建者主动撤销删除取件码
+	mux.HandleFunc("DELETE /api/pickups/{code}", func(w http.ResponseWriter, r *http.Request) {
+		if err := pickupStore.Delete(r.PathValue("code"), extractOwnerToken(r)); err != nil {
+			writePickupError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	// ================= 附近设备（同 IP）发现与邀请接口 =================
+
+	mux.HandleFunc("POST /api/nearby/heartbeat", func(w http.ResponseWriter, r *http.Request) {
+		if !allowRate(limiter, "POST /api/nearby/heartbeat", w, r) {
+			return
+		}
+		var req nearby.HeartbeatRequest
+		if err := json.NewDecoder(io.LimitReader(r.Body, 128*1024)).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_JSON", "请求体 JSON 格式错误")
+			return
+		}
+		resp, err := nearbySvc.Heartbeat(req, ratelimit.ClientIP(r))
+		if err != nil {
+			writeNearbyError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, resp)
+	})
+
+	mux.HandleFunc("POST /api/nearby/invite", func(w http.ResponseWriter, r *http.Request) {
+		if !allowRate(limiter, "POST /api/nearby/invite", w, r) {
+			return
+		}
+		var req nearby.InviteRequest
+		if err := json.NewDecoder(io.LimitReader(r.Body, 128*1024)).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_JSON", "请求体 JSON 格式错误")
+			return
+		}
+		resp, err := nearbySvc.CreateInvite(req, ratelimit.ClientIP(r))
+		if err != nil {
+			writeNearbyError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, resp)
+	})
+
+	mux.HandleFunc("POST /api/nearby/invite/{inviteId}/respond", func(w http.ResponseWriter, r *http.Request) {
+		var req nearby.RespondRequest
+		if err := json.NewDecoder(io.LimitReader(r.Body, 16*1024)).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_JSON", "请求体 JSON 格式错误")
+			return
+		}
+		resp, err := nearbySvc.RespondInvite(r.PathValue("inviteId"), req)
+		if err != nil {
+			writeNearbyError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, resp)
+	})
+
+	mux.HandleFunc("GET /api/nearby/invite/{inviteId}", func(w http.ResponseWriter, r *http.Request) {
+		status, err := nearbySvc.GetInviteStatus(r.PathValue("inviteId"))
+		if err != nil {
+			writeNearbyError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": status})
+	})
+
 	// WebSocket 信令与实时房间同步
 	mux.HandleFunc("/ws", hub.ServeWS)
 
-	// 静态前端资源与 SPA 路由回退
+	// 静态前端资源与 SPA 路由回退（含 /p/{code}、/r/{code}）
 	mux.Handle("/", static.Handler(cfg.StaticDir))
 
 	handler := withCORS(cfg, mux)
@@ -333,8 +585,27 @@ func main() {
 	}
 }
 
+func allowRate(limiter *ratelimit.Limiter, route string, w http.ResponseWriter, r *http.Request) bool {
+	if limiter.Allow(route, ratelimit.ClientIP(r)) {
+		return true
+	}
+	writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", "请求过于频繁，请稍后再试")
+	return false
+}
+
 func extractPassword(r *http.Request) string {
 	if pw := r.Header.Get("X-Room-Password"); pw != "" {
+		return pw
+	}
+	return r.URL.Query().Get("password")
+}
+
+func extractOwnerToken(r *http.Request) string {
+	return strings.TrimSpace(r.Header.Get("X-Owner-Token"))
+}
+
+func extractPickupPassword(r *http.Request) string {
+	if pw := r.Header.Get("X-Pickup-Password"); pw != "" {
 		return pw
 	}
 	return r.URL.Query().Get("password")
@@ -358,8 +629,9 @@ func withCORS(cfg *config.Config, next http.Handler) http.Handler {
 			if cfg.AllowedOrigin == "" || strings.EqualFold(origin, cfg.AllowedOrigin) {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Set("Vary", "Origin")
-				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Room-Password, X-Actor-Name, X-File-Name")
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, HEAD, DELETE, OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Room-Password, X-Owner-Token, X-Pickup-Password, X-Upload-Offset, X-Actor-Name, X-File-Name")
+				w.Header().Set("Access-Control-Expose-Headers", "X-Uploaded-Bytes")
 			}
 		}
 		if r.Method == http.MethodOptions {
@@ -385,18 +657,24 @@ func writeError(w http.ResponseWriter, status int, code, msg string) {
 
 func writeRoomError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, room.ErrCodeReserved):
+		writeError(w, http.StatusBadRequest, "CODE_RESERVED", err.Error())
 	case errors.Is(err, room.ErrInvalidRoomCode):
 		writeError(w, http.StatusBadRequest, "INVALID_ROOM_CODE", err.Error())
 	case errors.Is(err, room.ErrInvalidRetentionDays):
 		writeError(w, http.StatusBadRequest, "INVALID_RETENTION_DAYS", err.Error())
 	case errors.Is(err, room.ErrInvalidMaxFileSize):
 		writeError(w, http.StatusBadRequest, "INVALID_MAX_FILE_SIZE", err.Error())
+	case errors.Is(err, room.ErrInvalidReport):
+		writeError(w, http.StatusBadRequest, "INVALID_REPORT", err.Error())
 	case errors.Is(err, room.ErrRoomExists):
 		writeError(w, http.StatusConflict, "ROOM_EXISTS", err.Error())
 	case errors.Is(err, room.ErrRoomNotFound):
 		writeError(w, http.StatusNotFound, "ROOM_NOT_FOUND", err.Error())
 	case errors.Is(err, room.ErrRoomExpired):
 		writeError(w, http.StatusGone, "ROOM_EXPIRED", err.Error())
+	case errors.Is(err, room.ErrNotOwner):
+		writeError(w, http.StatusForbidden, "NOT_OWNER", err.Error())
 	case errors.Is(err, room.ErrWrongPassword):
 		writeError(w, http.StatusForbidden, "WRONG_PASSWORD", err.Error())
 	case errors.Is(err, room.ErrRoomFull):
@@ -409,6 +687,50 @@ func writeRoomError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "MEDIA_NOT_FOUND", err.Error())
 	case errors.Is(err, room.ErrUnsupportedMediaType):
 		writeError(w, http.StatusUnsupportedMediaType, "UNSUPPORTED_MEDIA_TYPE", err.Error())
+	default:
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
+	}
+}
+
+func writePickupError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, pickup.ErrPickupNotFound), errors.Is(err, pickup.ErrFileNotFound):
+		writeError(w, http.StatusNotFound, "PICKUP_NOT_FOUND", err.Error())
+	case errors.Is(err, pickup.ErrPickupExpired):
+		writeError(w, http.StatusGone, "PICKUP_EXPIRED", err.Error())
+	case errors.Is(err, pickup.ErrPickupPasswordRequired):
+		writeError(w, http.StatusForbidden, "PICKUP_PASSWORD_REQUIRED", err.Error())
+	case errors.Is(err, pickup.ErrWrongPassword):
+		writeError(w, http.StatusForbidden, "WRONG_PASSWORD", err.Error())
+	case errors.Is(err, pickup.ErrNotOwner):
+		writeError(w, http.StatusForbidden, "NOT_OWNER", err.Error())
+	case errors.Is(err, pickup.ErrFileTooLarge):
+		writeError(w, http.StatusRequestEntityTooLarge, "FILE_TOO_LARGE", err.Error())
+	case errors.Is(err, pickup.ErrQuotaExceeded):
+		writeError(w, http.StatusInsufficientStorage, "QUOTA_EXCEEDED", err.Error())
+	case errors.Is(err, pickup.ErrFileNotReady):
+		writeError(w, http.StatusConflict, "FILE_NOT_READY", err.Error())
+	case errors.Is(err, pickup.ErrSizeMismatch):
+		writeError(w, http.StatusBadRequest, "SIZE_MISMATCH", err.Error())
+	default:
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
+	}
+}
+
+func writeNearbyError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, nearby.ErrDeviceOffline):
+		writeError(w, http.StatusConflict, "DEVICE_OFFLINE", err.Error())
+	case errors.Is(err, nearby.ErrCellularBlocked):
+		writeError(w, http.StatusBadRequest, "CELLULAR_BLOCKED", err.Error())
+	case errors.Is(err, nearby.ErrInviteNotFound):
+		writeError(w, http.StatusNotFound, "INVITE_NOT_FOUND", err.Error())
+	case errors.Is(err, nearby.ErrInviteExpired):
+		writeError(w, http.StatusGone, "INVITE_EXPIRED", err.Error())
+	case errors.Is(err, nearby.ErrInviteNotTarget):
+		writeError(w, http.StatusForbidden, "FORBIDDEN", err.Error())
+	case errors.Is(err, nearby.ErrInviteAlreadyDone):
+		writeError(w, http.StatusConflict, "INVITE_ALREADY_HANDLED", err.Error())
 	default:
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
 	}

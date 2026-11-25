@@ -36,10 +36,12 @@ interface MessageListProps {
     transferId: string,
     mode: 'memory' | 'disk' | 'resume',
     fileName: string,
-    fileSize: number
+    fileSize: number,
+    resumeKey?: string
   ) => void;
   onRejectFile: (peerId: string, transferId: string) => void;
   onCancelTransfer: (peerId: string, transferId: string) => void;
+  onRequestResume?: (peerId: string, transfer: FileTransferInfo) => void;
   onPreviewImage: (src: string, fileName?: string, caption?: string) => void;
 }
 
@@ -55,6 +57,7 @@ export const MessageList: React.FC<MessageListProps> = ({
   onAcceptFile,
   onRejectFile,
   onCancelTransfer,
+  onRequestResume,
   onPreviewImage,
 }) => {
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -124,6 +127,11 @@ export const MessageList: React.FC<MessageListProps> = ({
                 {item.isSecret && (
                   <span style={{ color: 'var(--accent)', fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: 2 }}>
                     <EyeOff size={11} /> 密信
+                  </span>
+                )}
+                {item.isClipSync && (
+                  <span className="pill pill-accent" style={{ height: 18, padding: '0 6px', fontSize: 10.5 }}>
+                    📋 剪贴板同步
                   </span>
                 )}
                 {item.fromCache && (
@@ -240,6 +248,7 @@ export const MessageList: React.FC<MessageListProps> = ({
                     onAccept={onAcceptFile}
                     onReject={onRejectFile}
                     onCancel={onCancelTransfer}
+                    onRequestResume={onRequestResume}
                   />
                 )}
               </div>
@@ -348,6 +357,14 @@ const PolaroidImageCard: React.FC<{
 
 const VoiceNoteCard: React.FC<{ item: ChatItem }> = ({ item }) => {
   const src = item.audioUrl || item.transfer?.objectUrl;
+  const [playError, setPlayError] = useState(false);
+  const mimeLower = (item.transfer?.mimeType || '').toLowerCase();
+  const fallbackExt =
+    mimeLower.includes('mp4') || mimeLower.includes('m4a') || mimeLower.includes('aac')
+      ? 'm4a'
+      : mimeLower.includes('ogg')
+        ? 'ogg'
+        : 'webm';
   return (
     <div className="voice-bubble-card">
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 6 }}>
@@ -368,7 +385,7 @@ const VoiceNoteCard: React.FC<{ item: ChatItem }> = ({ item }) => {
             style={{ width: 24, height: 24 }}
             title="保存语音文件"
             onClick={() =>
-              triggerBlobDownload(src, item.transfer?.fileName || `voice-${item.timestamp}.webm`)
+              triggerBlobDownload(src, item.transfer?.fileName || `voice-${item.timestamp}.${fallbackExt}`)
             }
           >
             <Download size={12} />
@@ -376,7 +393,20 @@ const VoiceNoteCard: React.FC<{ item: ChatItem }> = ({ item }) => {
         )}
       </div>
       {src ? (
-        <audio controls preload="metadata" src={src} style={{ width: 250, maxWidth: '68vw', height: 36 }} />
+        <>
+          <audio
+            controls
+            preload="metadata"
+            src={src}
+            onError={() => setPlayError(true)}
+            style={{ width: 250, maxWidth: '68vw', height: 36 }}
+          />
+          {playError && (
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+              当前浏览器无法内联解码此音频格式，可点击右上角保存后播放
+            </div>
+          )}
+        </>
       ) : (
         <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>正在接收语音消息...</div>
       )}
@@ -396,11 +426,13 @@ const DopamineFileCard: React.FC<{
     transferId: string,
     mode: 'memory' | 'disk' | 'resume',
     fileName: string,
-    fileSize: number
+    fileSize: number,
+    resumeKey?: string
   ) => void;
   onReject: (peerId: string, transferId: string) => void;
   onCancel: (peerId: string, transferId: string) => void;
-}> = ({ transfer, canDirectDisk, onAccept, onReject, onCancel }) => {
+  onRequestResume?: (peerId: string, transfer: FileTransferInfo) => void;
+}> = ({ transfer, canDirectDisk, onAccept, onReject, onCancel, onRequestResume }) => {
   const rawPct =
     transfer.fileSize > 0
       ? Math.min(100, (transfer.transferredBytes / transfer.fileSize) * 100)
@@ -477,7 +509,8 @@ const DopamineFileCard: React.FC<{
                     transfer.transferId,
                     'resume',
                     transfer.fileName,
-                    transfer.fileSize
+                    transfer.fileSize,
+                    transfer.resumeKey
                   )
                 }
               >
@@ -494,7 +527,8 @@ const DopamineFileCard: React.FC<{
                     transfer.transferId,
                     'disk',
                     transfer.fileName,
-                    transfer.fileSize
+                    transfer.fileSize,
+                    transfer.resumeKey
                   )
                 }
                 title="边收边直接写入电脑硬盘，传几十 GB 也不占内存"
@@ -512,7 +546,8 @@ const DopamineFileCard: React.FC<{
                     transfer.transferId,
                     'resume',
                     transfer.fileName,
-                    transfer.fileSize
+                    transfer.fileSize,
+                    transfer.resumeKey
                   )
                 }
                 title="选择硬盘里上次中断未下完的半成品文件，从断点接着传"
@@ -529,7 +564,8 @@ const DopamineFileCard: React.FC<{
                   transfer.transferId,
                   'memory',
                   transfer.fileName,
-                  transfer.fileSize
+                  transfer.fileSize,
+                  transfer.resumeKey
                 )
               }
               title={isLargeFile ? '超大文件不建议内存接收，容易爆浏览器内存，建议点「直写硬盘」' : '先收到浏览器内存再保存'}
@@ -607,14 +643,42 @@ const DopamineFileCard: React.FC<{
           </span>
         )}
         {transfer.status === 'cancelled' && (
-          <span className="pill pill-neutral">
-            <XCircle size={12} /> 已取消
-          </span>
+          <>
+            <span className="pill pill-neutral">
+              <XCircle size={12} /> 已取消
+            </span>
+            {transfer.direction === 'receive' &&
+              transfer.resumeKey &&
+              transfer.targetPeerId &&
+              onRequestResume && (
+                <button
+                  type="button"
+                  className="btn btn-soft btn-sm"
+                  onClick={() => onRequestResume(transfer.targetPeerId!, transfer)}
+                >
+                  <HardDriveDownload size={13} /> 请求对方续传
+                </button>
+              )}
+          </>
         )}
         {transfer.status === 'error' && (
-          <span className="pill" style={{ background: 'rgba(244,63,94,0.14)', color: '#e11d48' }}>
-            <XCircle size={12} /> {transfer.errorMessage || '传输异常'}
-          </span>
+          <>
+            <span className="pill" style={{ background: 'rgba(244,63,94,0.14)', color: '#e11d48' }}>
+              <XCircle size={12} /> {transfer.errorMessage || '传输异常'}
+            </span>
+            {transfer.direction === 'receive' &&
+              transfer.resumeKey &&
+              transfer.targetPeerId &&
+              onRequestResume && (
+                <button
+                  type="button"
+                  className="btn btn-soft btn-sm"
+                  onClick={() => onRequestResume(transfer.targetPeerId!, transfer)}
+                >
+                  <HardDriveDownload size={13} /> 请求对方续传
+                </button>
+              )}
+          </>
         )}
       </div>
     </div>

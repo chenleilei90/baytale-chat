@@ -1,4 +1,11 @@
-import type { RecentRoom, SavedFixedRoom, ThemeMode, UserProfile } from '../types';
+import type {
+  BlockedPeer,
+  MyPickupRecord,
+  RecentRoom,
+  SavedFixedRoom,
+  ThemeMode,
+  UserProfile,
+} from '../types';
 import { generateRandomName, pickRandomPresetAvatar } from './avatar';
 
 const KEY_PROFILE = 'baychat_profile_v1';
@@ -7,6 +14,8 @@ const KEY_SAVED_ROOMS = 'baychat_fixed_rooms_v1';
 const KEY_RECENT_ROOMS = 'baychat_recent_rooms_v1';
 const KEY_PREFS = 'baychat_prefs_v1';
 const KEY_TAB_PEER_ID = 'baychat_tab_peer_id_v1';
+const KEY_BLOCKED_PEERS = 'baychat_blocked_peers_v1';
+const KEY_MY_PICKUPS = 'baychat_my_pickups_v1';
 
 // 为每个浏览器标签页分配独立 peerId（存在 sessionStorage），
 // 既保证 F5 刷新后身份连续，又彻底解决同一电脑开两个标签页进同房间互相顶号重连的 Bug！
@@ -27,6 +36,7 @@ export interface UserPrefs {
   autoAcceptMaxMB: number; // 自动接收阈值（MB），可按需调整（默认 50MB）
   imageSendMode: 'original' | 'compressed'; // 图片发送画质：原图无损 或 智能轻巧压缩
   soundEnabled: boolean; // 新消息提示音
+  nearbyDiscoverable: boolean; // 大厅是否允许附近同 Wi-Fi 设备发现自己
 }
 
 const DEFAULT_PREFS: UserPrefs = {
@@ -34,6 +44,7 @@ const DEFAULT_PREFS: UserPrefs = {
   autoAcceptMaxMB: 50,
   imageSendMode: 'original',
   soundEnabled: true,
+  nearbyDiscoverable: true,
 };
 
 function randomClientId(): string {
@@ -195,4 +206,80 @@ export function clearRecentRooms(): RecentRoom[] {
     // 忽略异常
   }
   return [];
+}
+
+// 读取持久化屏蔽成员列表（按 clientId 标识）
+export function loadBlockedPeers(): BlockedPeer[] {
+  try {
+    const raw = localStorage.getItem(KEY_BLOCKED_PEERS);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return (parsed as BlockedPeer[]).filter((b) => Boolean(b?.clientId));
+  } catch {
+    return [];
+  }
+}
+
+export function addBlockedPeer(peer: BlockedPeer): BlockedPeer[] {
+  const list = loadBlockedPeers().filter((b) => b.clientId !== peer.clientId);
+  const next = [peer, ...list].slice(0, 200);
+  try {
+    localStorage.setItem(KEY_BLOCKED_PEERS, JSON.stringify(next));
+  } catch {
+    // 忽略异常
+  }
+  return next;
+}
+
+export function removeBlockedPeer(clientId: string): BlockedPeer[] {
+  const next = loadBlockedPeers().filter((b) => b.clientId !== clientId);
+  try {
+    localStorage.setItem(KEY_BLOCKED_PEERS, JSON.stringify(next));
+  } catch {
+    // 忽略异常
+  }
+  return next;
+}
+
+export function isClientIdBlocked(clientId?: string): boolean {
+  if (!clientId) return false;
+  return loadBlockedPeers().some((b) => b.clientId === clientId);
+}
+
+// 读取本地保存的「我发出的取件码」记录（自动过滤已过期项）
+export function loadMyPickups(): MyPickupRecord[] {
+  try {
+    const raw = localStorage.getItem(KEY_MY_PICKUPS);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const now = Date.now();
+    return (parsed as MyPickupRecord[])
+      .filter((p) => Boolean(p?.code) && p.expiresAt > now)
+      .sort((a, b) => b.createdAt - a.createdAt);
+  } catch {
+    return [];
+  }
+}
+
+export function upsertMyPickup(record: MyPickupRecord): MyPickupRecord[] {
+  const list = loadMyPickups().filter((p) => p.code !== record.code);
+  const next = [record, ...list].slice(0, 30);
+  try {
+    localStorage.setItem(KEY_MY_PICKUPS, JSON.stringify(next));
+  } catch {
+    // 忽略异常
+  }
+  return next;
+}
+
+export function removeMyPickup(code: string): MyPickupRecord[] {
+  const next = loadMyPickups().filter((p) => p.code !== code);
+  try {
+    localStorage.setItem(KEY_MY_PICKUPS, JSON.stringify(next));
+  } catch {
+    // 忽略异常
+  }
+  return next;
 }

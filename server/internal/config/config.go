@@ -24,6 +24,10 @@ type Config struct {
 	HistoryMaxFileBytes  int64  // 单个历史附件服务器限时缓存上限（字节），默认 100MB，最高 500MB
 	MaxAttachmentMB      int    // 服务端允许的单附件最高上限（MB），0 表示不限制
 	DefaultRoomMaxFileMB int    // 新建房间默认单附件上限（MB），0 表示不限制，默认 500MB
+	FixedRoomIdleDays    int    // 常驻房间无人在线且不活跃的自动回收天数，默认 60 天
+	PickupMaxFileMB      int    // 取件码单文件大小上限（MB），默认 200MB
+	PickupMaxTotalMB     int    // 单个取件码总大小上限（MB），默认 500MB
+	PickupDiskQuotaMB    int    // 取件码全局磁盘配额（MB），默认 5120MB
 }
 
 // Load 从环境变量加载服务端配置并提供合理默认值
@@ -50,6 +54,10 @@ func Load() *Config {
 		HistoryMaxFileBytes:  int64(clampInt(getEnvInt("HISTORY_MAX_FILE_MB", 100), 1, 500)) * 1024 * 1024,
 		MaxAttachmentMB:      maxAttachmentMB,
 		DefaultRoomMaxFileMB: defaultRoomMaxFileMB,
+		FixedRoomIdleDays:    clampInt(getEnvInt("FIXED_ROOM_IDLE_DAYS", 60), 1, 3650),
+		PickupMaxFileMB:      clampInt(getEnvInt("PICKUP_MAX_FILE_MB", 200), 1, 10240),
+		PickupMaxTotalMB:     clampInt(getEnvInt("PICKUP_MAX_TOTAL_MB", 500), 1, 51200),
+		PickupDiskQuotaMB:    clampInt(getEnvInt("PICKUP_DISK_QUOTA_MB", 5120), 10, 1048576),
 	}
 }
 

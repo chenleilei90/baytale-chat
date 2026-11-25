@@ -2,5 +2,7 @@
 <paths>
     <cache-path name="shared_cache" path="." />
     <files-path name="received_files" path="." />
+    <external-files-path name="external_files" path="." />
+    <external-path name="external_root" path="." />
     <external-path name="downloads" path="Download/" />
 </paths>

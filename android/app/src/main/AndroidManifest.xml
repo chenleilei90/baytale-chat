@@ -13,11 +13,14 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
-    <!-- 相机仅用于主动扫描房间二维码（设为非必需以兼容平板等无相机设备） -->
+    <!-- 语音对讲消息录制（按需在用户长按/点击录音时请求） -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- 相机仅用于主动扫描房间二维码与拍照直发（设为非必需以兼容平板等无相机设备） -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
-    <!-- Android 9 及以下写入公共 Downloads 目录需要；Android 10+ 走 MediaStore 零存储权限 -->
+    <!-- Android 9 及以下写入公共目录需要；Android 10+ 走 MediaStore 零存储权限 -->
     <uses-permission
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />
@@ -27,7 +30,8 @@
 
     <application
         android:name=".BayChatApp"
-        android:allowBackup="true"
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
         android:enableOnBackInvokedCallback="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
@@ -64,7 +68,7 @@
             </intent-filter>
 
             <!-- 深链：点击 chat.baytale.com 房间邀请链接直接唤起原生 App -->
-            <intent-filter>
+            <intent-filter android:autoVerify="true">
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
@@ -74,13 +78,19 @@
                 <data android:pathPrefix="/r/" />
             </intent-filter>
 
-            <!-- 自定义协议唤起：baychat://room/<code > -->
+            <!-- 自定义协议唤起：baychat://room/<code> 与桌面长按快捷方式 baychat://action/* -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="baychat" android:host="room" />
+                <data android:scheme="baychat" android:host="action" />
             </intent-filter>
+
+            <!-- 桌面长按静态快捷方式（快传 / 扫码 / 取件码） -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
         </activity>
 
         <!-- 竖屏锁定的扫码 Activity（替代 ZXing 默认横屏） -->
@@ -102,6 +112,11 @@
             android:name=".service.AppUpdateService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- 后台高优先级来件通知「接收 / 拒绝」快捷操作接收器 -->
+        <receiver
+            android:name=".service.IncomingActionReceiver"
+            android:exported="false" />
 
         <!-- 安全打开本地下载文件的 FileProvider -->
         <provider

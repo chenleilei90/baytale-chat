@@ -17,7 +17,7 @@ import type {
   SignalEnvelope,
   WhiteboardEvent,
 } from '../types';
-import { bytesToHex, IncrementalSHA256 } from './sha256';
+import { bytesToHex, computeFileResumeKey, feedBlobPrefixToSha, IncrementalSHA256 } from './sha256';
 import {
   clearCachedResumeHandle,
   getCachedResumeOffset,
@@ -94,6 +94,8 @@ type ChatPacket =
       isAudio?: boolean;
       isScreenshot?: boolean;
       caption?: string;
+      resumeKey?: string;
+      hashScope?: 'full';
       timestamp: number;
     }
   | {
@@ -110,10 +112,37 @@ type ChatPacket =
       transferId: string;
     }
   | {
+      kind: 'file-done';
+      type?: 'file-done';
+      transferId: string;
+      sha256Full: string;
+      hashScope: 'full';
+    }
+  | {
       kind: 'file-ack';
       transferId: string;
       verified: boolean;
       sha256: string;
+    }
+  | {
+      kind: 'room-moved';
+      type?: 'room-moved';
+      code: string;
+      password?: string;
+    }
+  | {
+      kind: 'resume-request';
+      type?: 'resume-request';
+      resumeKey: string;
+      fileName: string;
+      size: number;
+      offset: number;
+    }
+  | {
+      kind: 'resume-unavailable';
+      type?: 'resume-unavailable';
+      resumeKey: string;
+      fileName: string;
     };
 
 interface OutgoingTransfer {
@@ -134,6 +163,11 @@ interface IncomingTransfer {
   timestamp: number;
   accepted: boolean;
   cancelled: boolean;
+  resumeKey?: string;
+  hashScope?: 'full';
+  expectedFullSha?: string;
+  prefixPromise?: Promise<void>;
+  prefixError?: string;
   sha: IncrementalSHA256;
   chunks: BlobPart[];
   diskStream?: DiskWriteStream | null;
@@ -191,6 +225,20 @@ export interface MeshCallbacks {
   onFileOffer: (peerId: string, info: FileTransferInfo, msgId: string, caption?: string, timestamp?: number) => void;
   onTransferUpdate: (info: FileTransferInfo) => void;
   shouldAutoAccept: (info: FileTransferInfo) => boolean;
+  onRoomMoved?: (peerId: string, code: string, password?: string) => void;
+  onResumeUnavailable?: (peerId: string, resumeKey: string, fileName: string) => void;
+  onOutgoingResend?: (peerId: string, info: FileTransferInfo) => void;
+}
+
+interface RetainedFileEntry {
+  file: File | Blob;
+  fileName: string;
+  mimeType: string;
+  isImage: boolean;
+  isAudio?: boolean;
+  isScreenshot?: boolean;
+  caption?: string;
+  resumeKey: string;
 }
 
 export class WebRTCMeshManager {
@@ -198,6 +246,11 @@ export class WebRTCMeshManager {
   private iceServers: RTCIceServer[];
   private callbacks: MeshCallbacks;
   private sessions = new Map<string, PeerSession>();
+  private sentFilesByResumeKey = new Map<string, RetainedFileEntry>();
+  private pendingResumeRequests = new Map<
+    string,
+    { peerId: string; diskStream: DiskWriteStream | null }
+  >();
   private nextStreamId = 1;
   private localMicStream: MediaStream | null = null;
   private localMicMuted = false;
@@ -515,6 +568,13 @@ export class WebRTCMeshManager {
   destroyAll(): void {
     this.localMicStream = null;
     this.localScreenStream = null;
+    this.sentFilesByResumeKey.clear();
+    for (const req of this.pendingResumeRequests.values()) {
+      if (req.diskStream) {
+        void req.diskStream.close().catch(() => {});
+      }
+    }
+    this.pendingResumeRequests.clear();
     for (const peerId of Array.from(this.sessions.keys())) {
       this.removePeer(peerId);
     }
@@ -729,8 +789,53 @@ export class WebRTCMeshManager {
     return sent;
   }
 
-  // 向房间所有已连接 P2P 节点发起文件或图片传输
-  sendFileToAll(
+  // 广播房间更换口令迁移通知（临时房换码时通知在线伙伴自动随行）
+  broadcastRoomMoved(code: string, password?: string): number {
+    const pkt: ChatPacket = {
+      kind: 'room-moved',
+      type: 'room-moved',
+      code,
+      password: password || undefined,
+    };
+    let sent = 0;
+    for (const session of this.sessions.values()) {
+      if (this.sendChatPacket(session, pkt)) sent++;
+    }
+    return sent;
+  }
+
+  // 向原发送方主动发起断点续传重发请求
+  sendResumeRequest(
+    peerId: string,
+    resumeKey: string,
+    fileName: string,
+    size: number,
+    offset: number,
+    diskStream?: DiskWriteStream | null
+  ): boolean {
+    const session = this.sessions.get(peerId);
+    if (!session || !session.status.dataReady) {
+      return false;
+    }
+    if (diskStream) {
+      this.pendingResumeRequests.set(resumeKey, { peerId, diskStream });
+    }
+    const ok = this.sendChatPacket(session, {
+      kind: 'resume-request',
+      type: 'resume-request',
+      resumeKey,
+      fileName,
+      size,
+      offset,
+    });
+    if (!ok && diskStream) {
+      this.pendingResumeRequests.delete(resumeKey);
+    }
+    return ok;
+  }
+
+  // 向房间所有已连接 P2P 节点发起文件或图片传输（自动计算跨端一致 resumeKey 并保留文件引用支持断点重发）
+  async sendFileToAll(
     file: File | Blob,
     options: {
       transferIdPrefix: string;
@@ -742,60 +847,116 @@ export class WebRTCMeshManager {
       caption?: string;
       timestamp: number;
     }
-  ): FileTransferInfo[] {
-    const created: FileTransferInfo[] = [];
-    for (const session of this.sessions.values()) {
-      if (!session.status.dataReady) continue;
-
-      const streamId = this.nextStreamId++;
-      const transferId = `${options.transferIdPrefix}_${session.peerId}`;
-      const info: FileTransferInfo = {
-        transferId,
-        streamId,
+  ): Promise<FileTransferInfo[]> {
+    let resumeKey = '';
+    try {
+      resumeKey = await computeFileResumeKey(file, options.fileName);
+    } catch {
+      resumeKey = '';
+    }
+    if (resumeKey) {
+      this.retainSentFile(resumeKey, {
+        file,
         fileName: options.fileName,
-        fileSize: file.size,
         mimeType: options.mimeType || 'application/octet-stream',
         isImage: options.isImage,
         isAudio: options.isAudio,
         isScreenshot: options.isScreenshot,
-        direction: 'send',
-        targetPeerId: session.peerId,
-        status: 'waiting_accept',
-        transferredBytes: 0,
-        speedBps: 0,
-        etaSeconds: 0,
-      };
-
-      session.outgoing.set(transferId, {
-        transferId,
-        streamId,
-        file,
-        info,
-        cancelled: false,
-        started: false,
-      });
-
-      this.sendChatPacket(session, {
-        kind: 'file-offer',
-        msgId: options.transferIdPrefix,
-        transferId,
-        streamId,
-        fileName: info.fileName,
-        fileSize: info.fileSize,
-        mimeType: info.mimeType,
-        isImage: info.isImage,
-        isAudio: info.isAudio,
-        isScreenshot: info.isScreenshot,
         caption: options.caption,
-        timestamp: options.timestamp,
+        resumeKey,
       });
+    }
 
+    const created: FileTransferInfo[] = [];
+    for (const session of this.sessions.values()) {
+      if (!session.status.dataReady) continue;
+
+      const info = this.createAndSendOffer(session, file, {
+        ...options,
+        resumeKey: resumeKey || undefined,
+      });
       created.push({ ...info });
     }
     return created;
   }
 
-  // 接收方同意接收文件（支持传入流式写盘句柄与断点续传偏移量）
+  private retainSentFile(resumeKey: string, entry: RetainedFileEntry): void {
+    if (this.sentFilesByResumeKey.has(resumeKey)) {
+      this.sentFilesByResumeKey.delete(resumeKey);
+    }
+    this.sentFilesByResumeKey.set(resumeKey, entry);
+    if (this.sentFilesByResumeKey.size > 30) {
+      const oldest = this.sentFilesByResumeKey.keys().next().value;
+      if (oldest) this.sentFilesByResumeKey.delete(oldest);
+    }
+  }
+
+  private createAndSendOffer(
+    session: PeerSession,
+    file: File | Blob,
+    options: {
+      transferIdPrefix: string;
+      fileName: string;
+      mimeType: string;
+      isImage: boolean;
+      isAudio?: boolean;
+      isScreenshot?: boolean;
+      caption?: string;
+      resumeKey?: string;
+      timestamp: number;
+    }
+  ): FileTransferInfo {
+    const streamId = this.nextStreamId++;
+    const transferId = `${options.transferIdPrefix}_${session.peerId}`;
+    const info: FileTransferInfo = {
+      transferId,
+      streamId,
+      fileName: options.fileName,
+      fileSize: file.size,
+      mimeType: options.mimeType || 'application/octet-stream',
+      isImage: options.isImage,
+      isAudio: options.isAudio,
+      isScreenshot: options.isScreenshot,
+      direction: 'send',
+      targetPeerId: session.peerId,
+      status: 'waiting_accept',
+      transferredBytes: 0,
+      speedBps: 0,
+      etaSeconds: 0,
+      resumeKey: options.resumeKey,
+      hashScope: 'full',
+    };
+
+    session.outgoing.set(transferId, {
+      transferId,
+      streamId,
+      file,
+      info,
+      cancelled: false,
+      started: false,
+    });
+
+    this.sendChatPacket(session, {
+      kind: 'file-offer',
+      msgId: options.transferIdPrefix,
+      transferId,
+      streamId,
+      fileName: info.fileName,
+      fileSize: info.fileSize,
+      mimeType: info.mimeType,
+      isImage: info.isImage,
+      isAudio: info.isAudio,
+      isScreenshot: info.isScreenshot,
+      caption: options.caption,
+      resumeKey: options.resumeKey,
+      hashScope: 'full',
+      timestamp: options.timestamp,
+    });
+
+    return info;
+  }
+
+  // 接收方同意接收文件（支持传入流式写盘句柄与断点续传偏移量，hashScope=='full' 时预先补算前缀哈希）
   acceptIncomingTransfer(
     peerId: string,
     transferId: string,
@@ -822,25 +983,52 @@ export class WebRTCMeshManager {
     inc.info.resumedFromBytes = resumeOffset > 0 ? resumeOffset : undefined;
     this.callbacks.onTransferUpdate({ ...inc.info });
 
-    const ok = this.sendChatPacket(session, {
-      kind: 'file-accept',
-      transferId,
-      offset: resumeOffset > 0 ? resumeOffset : undefined,
-    });
-    if (!ok) {
-      inc.cancelled = true;
-      if (inc.diskStream) {
-        void inc.diskStream.close().catch(() => {});
-        inc.diskStream = null;
+    const sendAccept = () => {
+      if (inc.cancelled) return false;
+      const ok = this.sendChatPacket(session, {
+        kind: 'file-accept',
+        transferId,
+        offset: resumeOffset > 0 ? resumeOffset : undefined,
+      });
+      if (!ok) {
+        inc.cancelled = true;
+        if (inc.diskStream) {
+          void inc.diskStream.close().catch(() => {});
+          inc.diskStream = null;
+        }
+        inc.info.status = 'error';
+        inc.info.errorMessage = '数据通道已断开，无法开始接收';
+        this.callbacks.onTransferUpdate({ ...inc.info });
+        session.incomingById.delete(transferId);
+        session.incomingByStream.delete(inc.streamId);
+        return false;
       }
-      inc.info.status = 'error';
-      inc.info.errorMessage = '数据通道已断开，无法开始接收';
-      this.callbacks.onTransferUpdate({ ...inc.info });
-      session.incomingById.delete(transferId);
-      session.incomingByStream.delete(inc.streamId);
-      return false;
+      return true;
+    };
+
+    // 若对端支持全量哈希且从断点续传，先将 [0, resumeOffset) 喂给增量 SHA-256，再发出 file-accept
+    if (resumeOffset > 0 && inc.hashScope === 'full' && diskStream?.existingFile) {
+      inc.prefixPromise = feedBlobPrefixToSha(diskStream.existingFile, resumeOffset, inc.sha)
+        .then(() => {
+          sendAccept();
+        })
+        .catch((err) => {
+          inc.prefixError = err instanceof Error ? err.message : '读取断点前缀失败';
+          inc.cancelled = true;
+          if (inc.diskStream) {
+            void inc.diskStream.close().catch(() => {});
+            inc.diskStream = null;
+          }
+          inc.info.status = 'error';
+          inc.info.errorMessage = inc.prefixError;
+          this.callbacks.onTransferUpdate({ ...inc.info });
+          session.incomingById.delete(transferId);
+          session.incomingByStream.delete(inc.streamId);
+        });
+      return true;
     }
-    return true;
+
+    return sendAccept();
   }
 
   // 接收方拒绝文件
@@ -949,136 +1137,235 @@ export class WebRTCMeshManager {
   }
 
   private handleChatPacket(session: PeerSession, raw: string): void {
-    let pkt: ChatPacket;
+    let rawObj: Record<string, unknown>;
     try {
-      pkt = JSON.parse(raw) as ChatPacket;
+      rawObj = JSON.parse(raw) as Record<string, unknown>;
     } catch {
       return;
     }
+    const pktKind = (rawObj.kind || rawObj.type) as string;
+    const pkt = rawObj as unknown as ChatPacket;
 
-    switch (pkt.kind) {
+    switch (pktKind) {
       case 'text':
         this.callbacks.onTextMessage(session.peerId, {
-          id: pkt.id,
-          text: pkt.text,
-          replyTo: pkt.replyTo,
-          timestamp: pkt.timestamp,
+          id: (pkt as Extract<ChatPacket, { kind: 'text' }>).id,
+          text: (pkt as Extract<ChatPacket, { kind: 'text' }>).text,
+          replyTo: (pkt as Extract<ChatPacket, { kind: 'text' }>).replyTo,
+          timestamp: (pkt as Extract<ChatPacket, { kind: 'text' }>).timestamp,
         });
         break;
 
       case 'recall':
-        this.callbacks.onRecallMessage?.(session.peerId, pkt.msgId);
+        this.callbacks.onRecallMessage?.(
+          session.peerId,
+          (pkt as Extract<ChatPacket, { kind: 'recall' }>).msgId
+        );
         break;
 
       case 'typing':
-        this.callbacks.onTyping(session.peerId, pkt.isTyping);
+        this.callbacks.onTyping(
+          session.peerId,
+          (pkt as Extract<ChatPacket, { kind: 'typing' }>).isTyping
+        );
         break;
 
       case 'fx':
-        this.callbacks.onFunEffect?.(session.peerId, pkt.fxType);
+        this.callbacks.onFunEffect?.(
+          session.peerId,
+          (pkt as Extract<ChatPacket, { kind: 'fx' }>).fxType
+        );
         break;
 
-      case 'reaction':
-        this.callbacks.onReaction?.(session.peerId, pkt.msgId, pkt.emoji);
+      case 'reaction': {
+        const r = pkt as Extract<ChatPacket, { kind: 'reaction' }>;
+        this.callbacks.onReaction?.(session.peerId, r.msgId, r.emoji);
         break;
+      }
 
-      case 'clip-sync':
-        this.callbacks.onClipboardSync?.(session.peerId, pkt.text, pkt.updatedAt);
+      case 'clip-sync': {
+        const c = pkt as Extract<ChatPacket, { kind: 'clip-sync' }>;
+        this.callbacks.onClipboardSync?.(session.peerId, c.text, c.updatedAt);
         break;
+      }
 
-      case 'media-state':
-        this.callbacks.onPeerMediaState?.(session.peerId, pkt.state);
-        if (!pkt.state.screenOn && session.remoteScreenStream) {
+      case 'room-moved': {
+        const rm = pkt as Extract<ChatPacket, { kind: 'room-moved' }>;
+        if (rm.code) {
+          this.callbacks.onRoomMoved?.(session.peerId, rm.code, rm.password);
+        }
+        break;
+      }
+
+      case 'resume-request': {
+        const rr = pkt as Extract<ChatPacket, { kind: 'resume-request' }>;
+        const retained = rr.resumeKey ? this.sentFilesByResumeKey.get(rr.resumeKey) : undefined;
+        if (retained && retained.file.size === rr.size) {
+          const idPrefix = `file_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+          const info = this.createAndSendOffer(session, retained.file, {
+            transferIdPrefix: idPrefix,
+            fileName: retained.fileName,
+            mimeType: retained.mimeType,
+            isImage: retained.isImage,
+            isAudio: retained.isAudio,
+            isScreenshot: retained.isScreenshot,
+            caption: retained.caption,
+            resumeKey: retained.resumeKey,
+            timestamp: Date.now(),
+          });
+          this.callbacks.onOutgoingResend?.(session.peerId, { ...info });
+        } else {
+          this.sendChatPacket(session, {
+            kind: 'resume-unavailable',
+            type: 'resume-unavailable',
+            resumeKey: rr.resumeKey || '',
+            fileName: rr.fileName || '',
+          });
+        }
+        break;
+      }
+
+      case 'resume-unavailable': {
+        const ru = pkt as Extract<ChatPacket, { kind: 'resume-unavailable' }>;
+        if (ru.resumeKey) {
+          const pending = this.pendingResumeRequests.get(ru.resumeKey);
+          if (pending?.diskStream) {
+            void pending.diskStream.close().catch(() => {});
+          }
+          this.pendingResumeRequests.delete(ru.resumeKey);
+        }
+        this.callbacks.onResumeUnavailable?.(session.peerId, ru.resumeKey || '', ru.fileName || '');
+        break;
+      }
+
+      case 'media-state': {
+        const ms = pkt as Extract<ChatPacket, { kind: 'media-state' }>;
+        this.callbacks.onPeerMediaState?.(session.peerId, ms.state);
+        if (!ms.state.screenOn && session.remoteScreenStream) {
           session.remoteScreenStream = null;
           this.callbacks.onRemoteScreenStream?.(session.peerId, null);
         }
-        if (!pkt.state.micOn && session.remoteAudioStream) {
+        if (!ms.state.micOn && session.remoteAudioStream) {
           session.remoteAudioStream = null;
           this.callbacks.onRemoteAudioStream?.(session.peerId, null);
         }
         break;
+      }
 
       case 'mood':
-        this.callbacks.onPeerMood?.(session.peerId, pkt.mood);
+        this.callbacks.onPeerMood?.(
+          session.peerId,
+          (pkt as Extract<ChatPacket, { kind: 'mood' }>).mood
+        );
         break;
 
-      case 'prop':
-        this.callbacks.onPropThrow?.(session.peerId, pkt.propType, pkt.targetPeerId, pkt.targetName);
+      case 'prop': {
+        const pr = pkt as Extract<ChatPacket, { kind: 'prop' }>;
+        this.callbacks.onPropThrow?.(session.peerId, pr.propType, pr.targetPeerId, pr.targetName);
         break;
+      }
 
       case 'pomodoro':
-        this.callbacks.onPomodoroSync?.(session.peerId, pkt.state);
+        this.callbacks.onPomodoroSync?.(
+          session.peerId,
+          (pkt as Extract<ChatPacket, { kind: 'pomodoro' }>).state
+        );
         break;
 
       case 'wb':
-        this.callbacks.onWhiteboardEvent?.(session.peerId, pkt.event);
+        this.callbacks.onWhiteboardEvent?.(
+          session.peerId,
+          (pkt as Extract<ChatPacket, { kind: 'wb' }>).event
+        );
         break;
 
       case 'file-offer': {
+        const fo = pkt as Extract<ChatPacket, { kind: 'file-offer' }>;
         const info: FileTransferInfo = {
-          transferId: pkt.transferId,
-          streamId: pkt.streamId,
-          fileName: pkt.fileName,
-          fileSize: pkt.fileSize,
-          mimeType: pkt.mimeType,
-          isImage: pkt.isImage,
-          isAudio: pkt.isAudio,
-          isScreenshot: pkt.isScreenshot,
+          transferId: fo.transferId,
+          streamId: fo.streamId,
+          fileName: fo.fileName,
+          fileSize: fo.fileSize,
+          mimeType: fo.mimeType,
+          isImage: fo.isImage,
+          isAudio: fo.isAudio,
+          isScreenshot: fo.isScreenshot,
           direction: 'receive',
           targetPeerId: session.peerId,
           status: 'offering',
           transferredBytes: 0,
           speedBps: 0,
           etaSeconds: 0,
+          resumeKey: fo.resumeKey,
+          hashScope: fo.hashScope,
         };
         const inc: IncomingTransfer = {
-          transferId: pkt.transferId,
-          streamId: pkt.streamId,
+          transferId: fo.transferId,
+          streamId: fo.streamId,
           peerId: session.peerId,
           info,
-          caption: pkt.caption,
-          timestamp: pkt.timestamp,
+          caption: fo.caption,
+          timestamp: fo.timestamp,
           accepted: false,
           cancelled: false,
+          resumeKey: fo.resumeKey,
+          hashScope: fo.hashScope,
           sha: new IncrementalSHA256(),
           chunks: [],
           startedAt: 0,
           lastProgressAt: 0,
           lastProgressBytes: 0,
         };
-        session.incomingById.set(pkt.transferId, inc);
-        session.incomingByStream.set(pkt.streamId, inc);
-        this.callbacks.onFileOffer(session.peerId, { ...info }, pkt.msgId || `tr_${pkt.transferId}`, pkt.caption, pkt.timestamp);
+        session.incomingById.set(fo.transferId, inc);
+        session.incomingByStream.set(fo.streamId, inc);
+        this.callbacks.onFileOffer(
+          session.peerId,
+          { ...info },
+          fo.msgId || `tr_${fo.transferId}`,
+          fo.caption,
+          fo.timestamp
+        );
+
+        // 若本 offer 对应本端主动发出的 resume-request，自动复用续传句柄并立即开始续传
+        const pendingResume = fo.resumeKey ? this.pendingResumeRequests.get(fo.resumeKey) : undefined;
+        if (pendingResume && pendingResume.peerId === session.peerId) {
+          this.pendingResumeRequests.delete(fo.resumeKey!);
+          this.acceptIncomingTransfer(session.peerId, fo.transferId, pendingResume.diskStream);
+          break;
+        }
 
         // 异步探测本地是否已有此大文件的未完成断点句柄，供 UI 显示「一键断点续传」按钮
         if (!info.isImage && !info.isAudio) {
-          void getCachedResumeOffset(info.fileName, info.fileSize).then((resumeBytes) => {
-            if (resumeBytes > 0 && !inc.accepted && !inc.cancelled) {
-              inc.info.canResumeBytes = resumeBytes;
-              this.callbacks.onTransferUpdate({ ...inc.info });
+          void getCachedResumeOffset(info.fileName, info.fileSize, info.resumeKey).then(
+            (resumeBytes) => {
+              if (resumeBytes > 0 && !inc.accepted && !inc.cancelled) {
+                inc.info.canResumeBytes = resumeBytes;
+                this.callbacks.onTransferUpdate({ ...inc.info });
+              }
             }
-          });
+          );
         }
 
         // 图片/截图或符合自动接收阈值的小文件直接开始流式接收
         if (this.callbacks.shouldAutoAccept(info)) {
-          this.acceptIncomingTransfer(session.peerId, pkt.transferId, null);
+          this.acceptIncomingTransfer(session.peerId, fo.transferId, null);
         }
         break;
       }
 
       case 'file-accept': {
-        const out = session.outgoing.get(pkt.transferId);
+        const fa = pkt as Extract<ChatPacket, { kind: 'file-accept' }>;
+        const out = session.outgoing.get(fa.transferId);
         if (!out) {
           // 发送方已丢失任务上下文（如刷新过页面），立刻通知对端中止，避免接收方卡在 0% 死等
-          this.sendChatPacket(session, { kind: 'file-cancel', transferId: pkt.transferId });
+          this.sendChatPacket(session, { kind: 'file-cancel', transferId: fa.transferId });
           break;
         }
         if (!out.started && !out.cancelled) {
           out.started = true;
           const startOffset =
-            typeof pkt.offset === 'number' && pkt.offset > 0 && pkt.offset < out.info.fileSize
-              ? Math.floor(pkt.offset)
+            typeof fa.offset === 'number' && fa.offset > 0 && fa.offset < out.info.fileSize
+              ? Math.floor(fa.offset)
               : 0;
           void this.pumpOutgoingFile(session, out, startOffset);
         }
@@ -1086,25 +1373,27 @@ export class WebRTCMeshManager {
       }
 
       case 'file-reject': {
-        const out = session.outgoing.get(pkt.transferId);
+        const fr = pkt as Extract<ChatPacket, { kind: 'file-reject' }>;
+        const out = session.outgoing.get(fr.transferId);
         if (out) {
           out.cancelled = true;
           out.info.status = 'rejected';
           this.callbacks.onTransferUpdate({ ...out.info });
-          session.outgoing.delete(pkt.transferId);
+          session.outgoing.delete(fr.transferId);
         }
         break;
       }
 
       case 'file-cancel': {
-        const out = session.outgoing.get(pkt.transferId);
+        const fc = pkt as Extract<ChatPacket, { kind: 'file-cancel' }>;
+        const out = session.outgoing.get(fc.transferId);
         if (out) {
           out.cancelled = true;
           out.info.status = 'cancelled';
           this.callbacks.onTransferUpdate({ ...out.info });
-          session.outgoing.delete(pkt.transferId);
+          session.outgoing.delete(fc.transferId);
         }
-        const inc = session.incomingById.get(pkt.transferId);
+        const inc = session.incomingById.get(fc.transferId);
         if (inc) {
           inc.cancelled = true;
           if (inc.diskStream) {
@@ -1112,22 +1401,33 @@ export class WebRTCMeshManager {
           }
           inc.info.status = 'cancelled';
           this.callbacks.onTransferUpdate({ ...inc.info });
-          session.incomingById.delete(pkt.transferId);
+          session.incomingById.delete(fc.transferId);
           session.incomingByStream.delete(inc.streamId);
         }
         break;
       }
 
+      case 'file-done': {
+        const fd = pkt as Extract<ChatPacket, { kind: 'file-done' }>;
+        const inc = session.incomingById.get(fd.transferId);
+        if (inc) {
+          inc.expectedFullSha = fd.sha256Full;
+          if (fd.hashScope) inc.hashScope = fd.hashScope;
+        }
+        break;
+      }
+
       case 'file-ack': {
-        const out = session.outgoing.get(pkt.transferId);
+        const fk = pkt as Extract<ChatPacket, { kind: 'file-ack' }>;
+        const out = session.outgoing.get(fk.transferId);
         if (out) {
           out.info.status = 'completed';
-          out.info.verified = pkt.verified;
-          out.info.sha256 = pkt.sha256;
+          out.info.verified = fk.verified;
+          out.info.sha256 = fk.sha256;
           out.info.transferredBytes = out.info.fileSize;
           out.info.etaSeconds = 0;
           this.callbacks.onTransferUpdate({ ...out.info });
-          session.outgoing.delete(pkt.transferId);
+          session.outgoing.delete(fk.transferId);
         }
         break;
       }
@@ -1164,6 +1464,12 @@ export class WebRTCMeshManager {
     this.callbacks.onTransferUpdate({ ...out.info });
 
     try {
+      // 断点续传时先流式读取本地 [0, startOffset) 喂入摘要，确保哈希始终覆盖完整文件
+      if (startOffset > 0) {
+        await feedBlobPrefixToSha(out.file, startOffset, sha);
+        if (out.cancelled) return;
+      }
+
       while (offset < totalSize) {
         if (out.cancelled) return;
         if (ch.readyState !== 'open') {
@@ -1220,7 +1526,16 @@ export class WebRTCMeshManager {
       if (out.cancelled || ch.readyState !== 'open') return;
       ch.send(eofFrame);
 
-      out.info.sha256 = bytesToHex(digest);
+      const fullHex = bytesToHex(digest);
+      this.sendChatPacket(session, {
+        kind: 'file-done',
+        type: 'file-done',
+        transferId: out.transferId,
+        sha256Full: fullHex,
+        hashScope: 'full',
+      });
+
+      out.info.sha256 = fullHex;
       out.info.transferredBytes = totalSize;
       out.info.etaSeconds = 0;
       this.callbacks.onTransferUpdate({ ...out.info });
@@ -1243,10 +1558,17 @@ export class WebRTCMeshManager {
     const inc = session.incomingByStream.get(streamId);
     if (!inc || inc.cancelled) return;
 
+    if (inc.prefixPromise) {
+      await inc.prefixPromise;
+      inc.prefixPromise = undefined;
+      if (inc.cancelled) return;
+    }
+
     // EOF 尾帧：结束写入并比对 SHA-256
     if (chunkIndex === EOF_CHUNK_INDEX) {
-      const expectedHex =
+      const eofHex =
         buffer.byteLength >= 40 ? bytesToHex(new Uint8Array(buffer, 8, 32)) : '';
+      const expectedHex = inc.expectedFullSha || eofHex;
       const actualHex = inc.sha.digestHex();
       const verified = Boolean(expectedHex) && expectedHex === actualHex;
 
@@ -1254,9 +1576,12 @@ export class WebRTCMeshManager {
         if (inc.diskStream) {
           await inc.diskStream.close();
           inc.diskStream = null;
-          clearCachedResumeHandle(inc.info.fileName, inc.info.fileSize);
+          clearCachedResumeHandle(inc.info.fileName, inc.info.fileSize, inc.info.resumeKey);
         } else {
-          const blob = new Blob(inc.chunks, { type: inc.info.mimeType });
+          const blobMime = inc.info.isAudio
+            ? normalizeAudioBlobMime(inc.info.mimeType, inc.info.fileName)
+            : inc.info.mimeType;
+          const blob = new Blob(inc.chunks, { type: blobMime });
           inc.chunks = [];
           inc.info.objectUrl = URL.createObjectURL(blob);
         }
@@ -1397,4 +1722,19 @@ function waitBufferedLow(channel: RTCDataChannel): Promise<void> {
     channel.addEventListener('close', finish);
     channel.addEventListener('error', finish);
   });
+}
+
+// 规范化音频 Blob MIME，确保 Android/iOS 发来的 .m4a (audio/m4a 或 octet-stream) 能在浏览器内联播放
+function normalizeAudioBlobMime(mimeType: string, fileName: string): string {
+  const lower = (mimeType || '').split(';')[0].trim().toLowerCase();
+  if (lower === 'audio/m4a' || lower === 'audio/x-m4a' || lower === 'audio/aac') {
+    return 'audio/mp4';
+  }
+  if (
+    (!lower || lower === 'application/octet-stream') &&
+    fileName.toLowerCase().endsWith('.m4a')
+  ) {
+    return 'audio/mp4';
+  }
+  return mimeType || 'audio/webm';
 }
