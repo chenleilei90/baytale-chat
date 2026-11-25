@@ -72,17 +72,44 @@ jobs:
         working-directory: android
         run: gradle assembleDebug assembleRelease bundleRelease --stacktrace
 
-      - name: Verify APK V1/V2/V3 signatures with apksigner
+      - name: Ensure V1+V2+V3 full signing and verify with apksigner
         working-directory: android
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
-          OUT=$("$APKSIGNER" verify --verbose --print-certs app/build/outputs/apk/release/app-release.apk)
+          ZIPALIGN="$ANDROID_HOME/build-tools/35.0.0/zipalign"
+          APK="app/build/outputs/apk/release/app-release.apk"
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            export CLEAN_STORE_PASS=$(printf '%s' "$STORE_PASSWORD" | tr -d '\r\n')
+            export CLEAN_KEY_ALIAS=$(printf '%s' "$KEY_ALIAS" | tr -d '\r\n')
+            export CLEAN_KEY_PASS=$(printf '%s' "$KEY_PASSWORD" | tr -d '\r\n')
+            # AGP 8 在 minSdk>=24 时会跳过 V1 签名；使用官方 apksigner 强制补齐 V1+V2+V3 三联签名
+            "$APKSIGNER" sign \
+              --ks app/baychat-release.jks \
+              --ks-key-alias "$CLEAN_KEY_ALIAS" \
+              --ks-pass env:CLEAN_STORE_PASS \
+              --key-pass env:CLEAN_KEY_PASS \
+              --v1-signing-enabled true \
+              --v2-signing-enabled true \
+              --v3-signing-enabled true \
+              --v4-signing-enabled false \
+              --out "${APK}.signed" \
+              "$APK"
+            mv "${APK}.signed" "$APK"
+          fi
+          "$ZIPALIGN" -c -p 4 "$APK"
+          OUT=$("$APKSIGNER" verify --verbose --print-certs --min-sdk-version 21 "$APK")
           echo "$OUT"
           echo "$OUT" | grep -q "Verified using v1 scheme (JAR signing): true"
           echo "$OUT" | grep -q "Verified using v2 scheme (APK Signature Scheme v2): true"
           echo "$OUT" | grep -q "Verified using v3 scheme (APK Signature Scheme v3): true"
+          "$APKSIGNER" verify --verbose "$APK"
           echo "=== META-INF V1 signature files ==="
-          unzip -l app/build/outputs/apk/release/app-release.apk | grep -E "META-INF/.*\.(MF|SF|RSA|DSA|EC)"
+          unzip -l "$APK" | grep -E "META-INF/.*\.(MF|SF|RSA|DSA|EC)"
 
       - name: Summarize build artifacts
         working-directory: android
