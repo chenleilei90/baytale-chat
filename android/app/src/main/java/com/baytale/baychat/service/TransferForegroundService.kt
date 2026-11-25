@@ -38,7 +38,7 @@ class TransferForegroundService : Service() {
             ACTION_UPDATE -> {
                 acquireLocks()
                 val title = intent.getStringExtra(EXTRA_TITLE) ?: "湾聊 P2P 通道保持中"
-                val text = intent.getStringExtra(EXTRA_TEXT) ?: "正在维持后台高速直连通道"
+                val text = intent.getStringExtra(EXTRA_TEXT) ?: "正在维持后台直连通道"
                 val progress = intent.getIntExtra(EXTRA_PROGRESS, -1)
                 val notification = buildNotification(title, text, progress)
                 val started = runCatching {

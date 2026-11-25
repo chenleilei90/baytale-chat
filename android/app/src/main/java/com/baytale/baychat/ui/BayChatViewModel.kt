@@ -546,7 +546,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         if (_uiState.value.activeRoom != null) {
             showToast("已收到系统分享内容，可直接在房间内一键发出")
         } else {
-            showToast("已收到系统分享内容，创建或加入房间后即可秒传")
+            showToast("已收到系统分享内容，创建或加入房间后即可发送")
         }
     }
 
@@ -854,7 +854,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                 recordRecentRoom(target.code, target.mode, false, "")
                 enterRoomInternal(target.code, "", target)
                 val topicSuffix = if (target.topic.isNotBlank()) " · ${target.topic}" else ""
-                showToast("🎲 已空降免密房间 #${target.code}$topicSuffix")
+                showToast("已进入公开房间 #${target.code}$topicSuffix")
             } catch (e: ApiException) {
                 if (e.errorCode == "NO_PUBLIC_ROOM") {
                     val hint = if (excludeCurrent) "暂无其他免密公开房可切换" else e.message
@@ -1108,7 +1108,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         dir.listFiles()?.forEach { it.deleteRecursively() }
     }
 
-    // 企业级 OTA 自动检查更新
+    // 自动检查应用更新
     fun checkForAppUpdate(manual: Boolean = false, bypassThrottle: Boolean = false) {
         val currentOta = AppUpdateCenter.state.value
         if (currentOta.status == OtaUpdateStatus.CHECKING) return
@@ -1116,7 +1116,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         if (currentOta.status == OtaUpdateStatus.DOWNLOADING || currentOta.status == OtaUpdateStatus.VERIFYING) {
             if (manual) {
                 _uiState.update { it.copy(showUpdateDialog = true) }
-                showToast("新版本正在后台高速更新中...")
+                showToast("新版本正在后台下载中...")
             }
             return
         }
@@ -1191,7 +1191,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
             }
             if (manual || isForce) {
                 _uiState.update { it.copy(showUpdateDialog = true) }
-                if (manual) showToast("🎉 v${rel.versionName} 已在本地就绪，0 秒一键安装")
+                if (manual) showToast("v${rel.versionName} 安装包已就绪，可立即安装")
             }
             return
         }
@@ -1229,7 +1229,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         } else {
             _uiState.update { it.copy(showUpdateDialog = true) }
             if (manual) {
-                showToast("🚀 发现新版本 v${rel.versionName}")
+                showToast("发现新版本 v${rel.versionName}")
             }
         }
     }
@@ -1742,7 +1742,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         TransferForegroundService.updateStatus(
             appContext,
             title = "湾聊房间 #$code",
-            text = "正在维持 P2P 闪传通道...",
+            text = "正在维持 P2P 直连通道...",
         )
 
         val selfProfile = PeerProfile(
@@ -1851,7 +1851,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                 }
 
                 override fun onResumeUnavailable(peerId: String, resumeKey: String, fileName: String, reason: String) {
-                    showToast("⚠️ 「$fileName」无法续传：$reason")
+                    showToast("「$fileName」无法续传：$reason")
                 }
 
                 override fun onRecallMessage(peerId: String, msgId: String) {
@@ -1902,7 +1902,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                     val itemId = if (info.isImage || info.isAudio) msgId else "tr_${info.transferId}"
                     val limitMB = effectiveMaxFileMB()
                     if (limitMB > 0 && info.fileSize > limitMB.toLong() * 1024L * 1024L) {
-                        showToast("⚠️ 收到超大附件「${info.fileName}」，请手动确认接收或婉拒")
+                        showToast("收到较大附件「${info.fileName}」，请手动确认接收或婉拒")
                     }
                     if (!info.isImage && !info.isAudio && info.fileSize > 0L) {
                         val partName = WebRtcMeshManager.resumePartFileName(info.fileName, info.fileSize, info.resumeKey)
@@ -2039,15 +2039,15 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                                     playSoundIfEnabled { playTransferDone() }
                                     signaling?.recordActivity("file", info.fileSize)
                                     showToast(
-                                        if (info.verified) "✅ ${info.fileName} 已直传完成且 SHA-256 校验通过"
-                                        else "📦 ${info.fileName} 发送完成"
+                                        if (info.verified) "${info.fileName} 已直传完成且 SHA-256 校验通过"
+                                        else "${info.fileName} 发送完成"
                                     )
                                 }
                             } else {
                                 playSoundIfEnabled { playTransferDone() }
                                 showToast(
-                                    if (info.verified) "✅ 已保存至 ${info.savedDisplayPath ?: "下载目录"}（SHA-256 校验通过）"
-                                    else "📦 已保存至 ${info.savedDisplayPath ?: "下载目录"}"
+                                    if (info.verified) "已保存至 ${info.savedDisplayPath ?: "下载目录"}（SHA-256 校验通过）"
+                                    else "已保存至 ${info.savedDisplayPath ?: "下载目录"}"
                                 )
                             }
                         }
@@ -2130,7 +2130,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                     // B8：WebSocket 抖动重连时不强制 reset 已建立且 dataReady 的 P2P 连接
                     newMesh.ensurePeer(profile.peerId, forceReset = false)
                     if (!alreadyPresent) {
-                        appendSystemMessage("✨ ${profile.name} 加入了房间")
+                        appendSystemMessage("${profile.name} 加入了房间")
                     }
                     refreshForegroundBanner()
                 }
@@ -2160,7 +2160,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                         )
                     }
                     newMesh.removePeer(peerId)
-                    if (leftName != null) appendSystemMessage("👋 $leftName 离开了房间")
+                    if (leftName != null) appendSystemMessage("$leftName 离开了房间")
                     refreshForegroundBanner()
                 }
 
@@ -2199,18 +2199,18 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                         r.copy(roomInfo = r.roomInfo?.copy(retentionDays = days))
                     }
                     val desc = if (days == 0) "阅后即焚（零缓存）" else "最后聊天后保留 ${days} 天"
-                    appendSystemMessage("⏱ ${env.actorName ?: "伙伴"} 将保鲜期设为：$desc")
+                    appendSystemMessage("${env.actorName ?: "伙伴"} 将保鲜期设为：$desc")
                 }
 
                 override fun onRoomSettingsUpdated(env: SignalEnvelope) {
                     env.maxFileSizeMB?.let { mb ->
                         updateRoom { r -> r.copy(roomInfo = r.roomInfo?.copy(maxFileSizeMB = mb)) }
-                        appendSystemMessage("📦 ${env.actorName ?: "伙伴"} 将附件上限调为：${FormatUtils.formatLimitMB(mb)}")
+                        appendSystemMessage("${env.actorName ?: "伙伴"} 将附件上限调为：${FormatUtils.formatLimitMB(mb)}")
                     }
                     env.allowRandom?.let { allow ->
                         updateRoom { r -> r.copy(roomInfo = r.roomInfo?.copy(allowRandom = allow)) }
                         val stateDesc = if (allow) "已开启（允许陌生人随机串门）" else "已关闭（仅凭口令进入）"
-                        appendSystemMessage("🌐 ${env.actorName ?: "伙伴"} 修改随机串门状态：$stateDesc")
+                        appendSystemMessage("${env.actorName ?: "伙伴"} 修改随机串门状态：$stateDesc")
                     }
                     env.topic?.let { topic ->
                         updateRoom { r -> r.copy(roomInfo = r.roomInfo?.copy(topic = topic)) }
@@ -2235,7 +2235,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                                     senderName = "系统",
                                     isSelf = false,
                                     timestamp = System.currentTimeMillis(),
-                                    text = "🧹 ${env.actorName ?: "伙伴"} 已清空服务器聊天缓存",
+                                    text = "${env.actorName ?: "伙伴"} 已清空服务器聊天缓存",
                                 )
                             )
                         )
@@ -2494,7 +2494,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
             for (uri in uris) {
                 val meta = withContext(Dispatchers.IO) { MediaDownloadHelper.queryUriMeta(appContext, uri) }
                 if (limitMB > 0 && meta.fileSize > limitMB.toLong() * 1024L * 1024L) {
-                    showToast("⚠️「${meta.fileName}」超出当前附件上限 ${FormatUtils.formatLimitMB(limitMB)}")
+                    showToast("「${meta.fileName}」超出当前附件上限 ${FormatUtils.formatLimitMB(limitMB)}")
                     continue
                 }
 
@@ -2690,7 +2690,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                     )
                     _uiState.update { it.copy(transferRecords = store.addTransferRecord(rec)) }
                     playSoundIfEnabled { playTransferDone() }
-                    showToast("☁️「$metaFileName」已上传至房间缓存，刷新或换设备随时可下")
+                    showToast("「$metaFileName」已上传至房间缓存，刷新或换设备随时可下")
                 }
             }.onFailure { err ->
                 updateRoom { r ->
@@ -3340,7 +3340,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                 val updated = store.upsertMyPickup(rec)
                 _uiState.update { it.copy(myPickups = updated, pickupBusy = false, pickupProgress = null) }
                 playSoundIfEnabled { playTransferDone() }
-                showToast("🎁 已生成取件码 ${resp.code}")
+                showToast("已生成取件码 ${resp.code}")
             }.onFailure { err ->
                 _uiState.update {
                     it.copy(
@@ -3449,7 +3449,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                 }
                 _uiState.update { it.copy(pickupBusy = false, pickupProgress = null) }
                 playSoundIfEnabled { playTransferDone() }
-                showToast("✅ 已取件保存至 $lastSavedPath")
+                showToast("已取件保存至 $lastSavedPath")
             }.onFailure { err ->
                 _uiState.update {
                     it.copy(
@@ -3585,7 +3585,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         IncomingNotificationHelper.cancelOfferNotification(appContext, transferId)
         val ok = mesh?.acceptIncomingTransfer(peerId, transferId, resumeIfAvailable) == true
         if (!ok) {
-            showToast("⚠️ 发送方已离线或传输已失效，请让对方重新发送")
+            showToast("发送方已离线或传输已失效，请让对方重新发送")
         }
     }
 
@@ -3705,7 +3705,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                 )
                 _uiState.update { it.copy(transferRecords = store.addTransferRecord(rec)) }
                 playSoundIfEnabled { playTransferDone() }
-                showToast("✅ 已下载历史附件至 ${saved.displayPath}")
+                showToast("已下载历史附件至 ${saved.displayPath}")
             } catch (err: Exception) {
                 updateRoom { r ->
                     r.copy(
@@ -3740,9 +3740,9 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         }
         val preview = when (item.kind) {
             ChatKind.TEXT, ChatKind.CLIP -> item.text.orEmpty().take(60)
-            ChatKind.IMAGE -> "🖼️ [图片] ${item.caption ?: item.transfer?.fileName.orEmpty()}"
-            ChatKind.AUDIO -> "🎙️ [语音]"
-            ChatKind.FILE -> "📦 [文件] ${item.transfer?.fileName.orEmpty()}"
+            ChatKind.IMAGE -> "[图片] ${item.caption ?: item.transfer?.fileName.orEmpty()}"
+            ChatKind.AUDIO -> "[语音]"
+            ChatKind.FILE -> "[文件] ${item.transfer?.fileName.orEmpty()}"
             ChatKind.SYSTEM -> return
             else -> return
         }.trim()
@@ -3900,7 +3900,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     fun rotateEphemeralCode() {
         val room = requireRoomOwner() ?: return
         if (!room.isEphemeral) {
-            showToast("仅临时闪传房支持更换口令")
+            showToast("仅临时房间支持更换口令")
             return
         }
         viewModelScope.launch {

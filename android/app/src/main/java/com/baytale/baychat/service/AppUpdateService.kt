@@ -42,7 +42,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
-// 企业级 OTA 自动更新状态机枚举
+// 应用自动更新状态机枚举
 enum class OtaUpdateStatus {
     IDLE,
     CHECKING,
@@ -105,7 +105,7 @@ object AppUpdateCenter {
     }
 }
 
-// 企业级 OTA 后台自动更新前台服务：
+// 应用后台自动更新前台服务：
 // 1. 持有 PARTIAL_WAKE_LOCK（30 分钟超时保护）+ 高性能 WifiLock 防止锁屏或切后台断网
 // 2. 通知栏实时显示下载百分比、已下/总大小、实时网速以及「暂停 / 继续」快捷控制按钮
 // 3. 下载完成并全文件 SHA-256 校验通过后释放锁，发出高优先级可点击完成通知；主动更新时立刻拉起系统安装器
@@ -573,7 +573,7 @@ class AppUpdateService : Service() {
             verifying -> "正在校验安装包 SHA-256 完整性，请稍候"
             totalBytes > 0L -> "已下载 ${FormatUtils.formatBytes(downloadedBytes)} / ${FormatUtils.formatBytes(totalBytes)}"
             downloadedBytes > 0L -> "已下载 ${FormatUtils.formatBytes(downloadedBytes)}"
-            else -> "正在连接高速更新节点..."
+            else -> "正在连接更新节点..."
         }
 
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
