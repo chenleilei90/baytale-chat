@@ -68,6 +68,18 @@ jobs:
         working-directory: android
         run: gradle assembleDebug assembleRelease bundleRelease --stacktrace
 
+      - name: Verify APK V1/V2/V3 signatures with apksigner
+        working-directory: android
+        run: |
+          APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          OUT=$("$APKSIGNER" verify --verbose --print-certs app/build/outputs/apk/release/app-release.apk)
+          echo "$OUT"
+          echo "$OUT" | grep -q "Verified using v1 scheme (JAR signing): true"
+          echo "$OUT" | grep -q "Verified using v2 scheme (APK Signature Scheme v2): true"
+          echo "$OUT" | grep -q "Verified using v3 scheme (APK Signature Scheme v3): true"
+          echo "=== META-INF V1 signature files ==="
+          unzip -l app/build/outputs/apk/release/app-release.apk | grep -E "META-INF/.*\.(MF|SF|RSA|DSA|EC)"
+
       - name: Summarize build artifacts
         working-directory: android
         run: |

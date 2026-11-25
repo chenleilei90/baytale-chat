@@ -23,8 +23,8 @@ android {
         applicationId = "com.baytale.baychat"
         minSdk = 26
         targetSdk = 35
-        versionCode = 5
-        versionName = "1.1.2"
+        versionCode = 6
+        versionName = "1.1.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "DEFAULT_SERVER_URL", "\"https://chat.baytale.com\"")
@@ -35,12 +35,22 @@ android {
     }
 
     signingConfigs {
+        getByName("debug") {
+            // 调试包同样开启 V1+V2+V3，避免国产机型或浏览器安装器提示缺少签名文件
+            enableV1Signing = true
+            enableV2Signing = true
+            enableV3Signing = true
+        }
         if (keystoreProps.containsKey("storeFile")) {
             create("release") {
                 storeFile = file(keystoreProps.getProperty("storeFile"))
                 storePassword = keystoreProps.getProperty("storePassword")
                 keyAlias = keystoreProps.getProperty("keyAlias")
                 keyPassword = keystoreProps.getProperty("keyPassword")
+                // 同时启用 V1 (META-INF/*.RSA) + V2 + V3 签名，兼容全版本 Android、国产定制系统与 Google Play
+                enableV1Signing = true
+                enableV2Signing = true
+                enableV3Signing = true
             }
         }
     }
