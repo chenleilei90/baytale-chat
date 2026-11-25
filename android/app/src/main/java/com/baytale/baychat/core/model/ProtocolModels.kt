@@ -117,6 +117,10 @@ data class AppReleaseInfo(
     val sha256: String = "",
     val sizeBytes: Long = 0L,
     val releaseNotes: String = "",
+    // 企业级 OTA 扩展字段（均带默认值，完全向后兼容旧版 version.json）
+    val fallbackUrl: String = "",
+    val minSupportedCode: Int = 0,
+    val forceUpdate: Boolean = false,
 )
 
 @Serializable

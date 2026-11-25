@@ -128,5 +128,28 @@ class ProtocolCompatTest {
         val rel = json.decodeFromString(AppReleaseInfo.serializer(), relJson)
         assertEquals(3, rel.versionCode)
         assertEquals("1.1.0", rel.versionName)
+        // 验证旧版 version.json 缺少企业级 OTA 新字段时的向后兼容默认值
+        assertEquals("", rel.fallbackUrl)
+        assertEquals(0, rel.minSupportedCode)
+        assertEquals(false, rel.forceUpdate)
+
+        val enterpriseRelJson = """
+            {
+              "versionCode": 8,
+              "versionName": "1.1.5",
+              "apkUrl": "https://chat.baytale.com/apk/BayChat-v1.1.5.apk",
+              "fallbackUrl": "https://github.com/baytale/baychat/releases/download/v1.1.5/BayChat-v1.1.5.apk",
+              "sha256": "deadbeef",
+              "sizeBytes": 48000000,
+              "releaseNotes": "企业级 OTA 自动更新",
+              "minSupportedCode": 5,
+              "forceUpdate": true
+            }
+        """.trimIndent()
+        val enterpriseRel = json.decodeFromString(AppReleaseInfo.serializer(), enterpriseRelJson)
+        assertEquals(8, enterpriseRel.versionCode)
+        assertEquals("https://github.com/baytale/baychat/releases/download/v1.1.5/BayChat-v1.1.5.apk", enterpriseRel.fallbackUrl)
+        assertEquals(5, enterpriseRel.minSupportedCode)
+        assertTrue(enterpriseRel.forceUpdate)
     }
 }

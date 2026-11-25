@@ -19,6 +19,13 @@ data class AppUserPrefs(
     val autoAcceptMaxMB: Int = 50,
     val imageOriginalMode: Boolean = true,
     val serverUrl: String = BuildConfig.DEFAULT_SERVER_URL,
+    // 企业级 OTA 自动更新偏好设置
+    val autoDownloadOnWifi: Boolean = true,
+    val ignoredVersionCode: Int = 0,
+    val lastUpdateCheckAt: Long = 0L,
+    // 原生交互音效与触感反馈开关
+    val soundEnabled: Boolean = true,
+    val hapticEnabled: Boolean = true,
 )
 
 // 本地偏好、传输记录与身份持久化仓库（全部存于应用私有 SharedPreferences，卸载自动清理）
@@ -64,6 +71,11 @@ class AppPrefsStore(context: Context) {
         imageOriginalMode = sp.getBoolean(KEY_IMAGE_ORIGINAL, true),
         serverUrl = sp.getString(KEY_SERVER_URL, BuildConfig.DEFAULT_SERVER_URL)
             ?.takeIf { it.isNotBlank() } ?: BuildConfig.DEFAULT_SERVER_URL,
+        autoDownloadOnWifi = sp.getBoolean(KEY_AUTO_DOWNLOAD_WIFI, true),
+        ignoredVersionCode = sp.getInt(KEY_IGNORED_VERSION_CODE, 0),
+        lastUpdateCheckAt = sp.getLong(KEY_LAST_UPDATE_CHECK_AT, 0L),
+        soundEnabled = sp.getBoolean(KEY_SOUND_ENABLED, true),
+        hapticEnabled = sp.getBoolean(KEY_HAPTIC_ENABLED, true),
     )
 
     fun savePrefs(prefs: AppUserPrefs) {
@@ -72,7 +84,33 @@ class AppPrefsStore(context: Context) {
             .putInt(KEY_AUTO_ACCEPT_MB, prefs.autoAcceptMaxMB)
             .putBoolean(KEY_IMAGE_ORIGINAL, prefs.imageOriginalMode)
             .putString(KEY_SERVER_URL, prefs.serverUrl.trim().trimEnd('/'))
+            .putBoolean(KEY_AUTO_DOWNLOAD_WIFI, prefs.autoDownloadOnWifi)
+            .putInt(KEY_IGNORED_VERSION_CODE, prefs.ignoredVersionCode)
+            .putLong(KEY_LAST_UPDATE_CHECK_AT, prefs.lastUpdateCheckAt)
+            .putBoolean(KEY_SOUND_ENABLED, prefs.soundEnabled)
+            .putBoolean(KEY_HAPTIC_ENABLED, prefs.hapticEnabled)
             .apply()
+    }
+
+    // OTA 与交互反馈独立快捷持久化方法，避免局部更新误覆盖其他字段
+    fun setAutoDownloadOnWifi(enabled: Boolean) {
+        sp.edit().putBoolean(KEY_AUTO_DOWNLOAD_WIFI, enabled).apply()
+    }
+
+    fun setIgnoredVersionCode(versionCode: Int) {
+        sp.edit().putInt(KEY_IGNORED_VERSION_CODE, versionCode).apply()
+    }
+
+    fun setLastUpdateCheckAt(timestampMs: Long) {
+        sp.edit().putLong(KEY_LAST_UPDATE_CHECK_AT, timestampMs).apply()
+    }
+
+    fun setSoundEnabled(enabled: Boolean) {
+        sp.edit().putBoolean(KEY_SOUND_ENABLED, enabled).apply()
+    }
+
+    fun setHapticEnabled(enabled: Boolean) {
+        sp.edit().putBoolean(KEY_HAPTIC_ENABLED, enabled).apply()
     }
 
     fun loadSavedRooms(): List<SavedFixedRoom> {
@@ -184,5 +222,10 @@ class AppPrefsStore(context: Context) {
         private const val KEY_RECENT_ROOMS = "recent_rooms_v1"
         private const val KEY_TRANSFER_RECORDS = "transfer_records_v1"
         private const val KEY_PARTIAL_META = "partial_meta_v1"
+        private const val KEY_AUTO_DOWNLOAD_WIFI = "ota_auto_download_wifi_v1"
+        private const val KEY_IGNORED_VERSION_CODE = "ota_ignored_version_code_v1"
+        private const val KEY_LAST_UPDATE_CHECK_AT = "ota_last_update_check_at_v1"
+        private const val KEY_SOUND_ENABLED = "ui_sound_enabled_v1"
+        private const val KEY_HAPTIC_ENABLED = "ui_haptic_enabled_v1"
     }
 }

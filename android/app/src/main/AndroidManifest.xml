@@ -97,6 +97,12 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
+        <!-- 企业级 OTA 应用自动更新前台服务：支持断点续传、切后台保活与通知栏暂停/继续 -->
+        <service
+            android:name=".service.AppUpdateService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
         <!-- 安全打开本地下载文件的 FileProvider -->
         <provider
             android:name="androidx.core.content.FileProvider"

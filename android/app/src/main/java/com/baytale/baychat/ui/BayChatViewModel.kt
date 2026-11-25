@@ -37,10 +37,16 @@ import com.baytale.baychat.core.network.SignalingClient
 import com.baytale.baychat.core.storage.AppPrefsStore
 import com.baytale.baychat.core.storage.AppUserPrefs
 import com.baytale.baychat.core.storage.MediaDownloadHelper
+import com.baytale.baychat.core.util.BaySoundPlayer
 import com.baytale.baychat.core.util.FormatUtils
 import com.baytale.baychat.core.webrtc.MeshCallbacks
 import com.baytale.baychat.core.webrtc.OutgoingFileSource
 import com.baytale.baychat.core.webrtc.WebRtcMeshManager
+import com.baytale.baychat.service.AppUpdateCenter
+import com.baytale.baychat.service.AppUpdateService
+import com.baytale.baychat.service.OtaUiEvent
+import com.baytale.baychat.service.OtaUpdateState
+import com.baytale.baychat.service.OtaUpdateStatus
 import com.baytale.baychat.service.TransferForegroundService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -53,6 +59,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 
 data class ActiveRoomSession(
     val roomCode: String,
@@ -87,16 +94,16 @@ data class BayChatUiState(
     val recentRooms: List<RecentRoom> = emptyList(),
     val publicRooms: List<RoomSummary> = emptyList(),
     val publicRoomsLoading: Boolean = false,
+    val publicRoomsLastRefreshedAt: Long = 0L,
     val randomJoining: Boolean = false,
     val transferRecords: List<TransferRecord> = emptyList(),
     val partialTransfers: List<PartialResumeItem> = emptyList(),
-    val availableUpdate: AppReleaseInfo? = null,
-    val updateChecking: Boolean = false,
-    val updateDownloading: Boolean = false,
-    val updateProgress: Float = 0f,
+    val otaState: OtaUpdateState = AppUpdateCenter.state.value,
+    val showUpdateDialog: Boolean = false,
     val blockedPeerIds: Set<String> = emptySet(),
     val lobbyBusy: Boolean = false,
     val lobbyError: String? = null,
+    val lobbyNeedPassword: Boolean = false,
     val pendingJoinCode: String? = null,
     val pendingShare: PendingExternalShare = PendingExternalShare(),
     val activeRoom: ActiveRoomSession? = null,
@@ -110,6 +117,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     private val store = AppPrefsStore(appContext)
     private val api = BayChatApi(serverUrlProvider = { _uiState.value.prefs.serverUrl })
     private val updateManager = AppUpdateManager(appContext, api.okHttpClient)
+    private val soundPlayer = BaySoundPlayer(appContext)
 
     private val _uiState = MutableStateFlow(
         BayChatUiState(
@@ -128,13 +136,54 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     private var signaling: SignalingClient? = null
     private var mesh: WebRtcMeshManager? = null
     private val recordedTransfers = mutableSetOf<String>()
+    private var awaitingInstallPermission: Boolean = false
 
     init {
         refreshTransferCenter()
+        observeOtaUpdateCenter()
         if (_uiState.value.privacyAccepted) {
             refreshServerConfig()
             refreshPublicRooms()
-            checkForAppUpdate(manual = false)
+            // 冷启动自动静默检查一次更新（Wi-Fi 自动后台预下载，移动网络仅温和弹窗）
+            checkForAppUpdate(manual = false, bypassThrottle = true)
+        }
+    }
+
+    private fun observeOtaUpdateCenter() {
+        viewModelScope.launch {
+            var lastStatus = AppUpdateCenter.state.value.status
+            AppUpdateCenter.state.collect { ota ->
+                if (ota.status == OtaUpdateStatus.READY_TO_INSTALL && lastStatus != OtaUpdateStatus.READY_TO_INSTALL) {
+                    // OTA 更新包下载并校验就绪时播放清脆三和弦提示
+                    playSoundIfEnabled { playTransferDone() }
+                }
+                lastStatus = ota.status
+                _uiState.update { st ->
+                    val forcePopup = ota.isForceUpdate &&
+                        ota.release != null &&
+                        ota.status != OtaUpdateStatus.IDLE &&
+                        ota.status != OtaUpdateStatus.CHECKING
+                    st.copy(
+                        otaState = ota,
+                        showUpdateDialog = if (forcePopup) true else st.showUpdateDialog,
+                    )
+                }
+            }
+        }
+        viewModelScope.launch {
+            AppUpdateCenter.events.collect { event ->
+                when (event) {
+                    is OtaUiEvent.Toast -> showToast(event.message)
+                    is OtaUiEvent.InstallerLaunched -> {
+                        awaitingInstallPermission = false
+                        showToast("安装包已就绪，请按系统提示完成覆盖升级")
+                    }
+                    is OtaUiEvent.NeedInstallPermission -> {
+                        awaitingInstallPermission = true
+                        showToast("请先开启「允许安装未知应用」权限，返回后将自动继续安装")
+                    }
+                }
+            }
         }
     }
 
@@ -143,7 +192,32 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         _uiState.update { it.copy(privacyAccepted = true) }
         refreshServerConfig()
         refreshPublicRooms()
-        checkForAppUpdate(manual = false)
+        checkForAppUpdate(manual = false, bypassThrottle = true)
+    }
+
+    // 切回前台回调：若刚授权完「安装未知应用」则自动续拉系统安装器；否则间隔 ≥ 10 分钟才静默复查更新
+    fun onAppForegrounded() {
+        if (!_uiState.value.privacyAccepted) return
+        val ota = AppUpdateCenter.state.value
+        if (awaitingInstallPermission &&
+            ota.status == OtaUpdateStatus.READY_TO_INSTALL &&
+            AppUpdateManager.canInstallPackages(appContext)
+        ) {
+            awaitingInstallPermission = false
+            installReadyAppUpdate()
+            return
+        }
+        if (ota.status == OtaUpdateStatus.CHECKING ||
+            ota.status == OtaUpdateStatus.DOWNLOADING ||
+            ota.status == OtaUpdateStatus.VERIFYING ||
+            ota.status == OtaUpdateStatus.READY_TO_INSTALL
+        ) {
+            return
+        }
+        val elapsed = System.currentTimeMillis() - _uiState.value.prefs.lastUpdateCheckAt
+        if (elapsed >= FOREGROUND_UPDATE_CHECK_INTERVAL_MS) {
+            checkForAppUpdate(manual = false, bypassThrottle = false)
+        }
     }
 
     fun refreshServerConfig() {
@@ -168,7 +242,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun clearLobbyError() {
-        _uiState.update { it.copy(lobbyError = null) }
+        _uiState.update { it.copy(lobbyError = null, lobbyNeedPassword = false) }
     }
 
     fun consumePendingJoinCode() {
@@ -336,18 +410,67 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    // 刷新发现广场中的免密公开房间列表
-    fun refreshPublicRooms() {
+    // 刷新发现广场中的免密公开房间列表（silent=true 时后台静默更新不闪烁，用于 15 秒 SWR 策略）
+    fun refreshPublicRooms(silent: Boolean = false) {
         viewModelScope.launch {
-            _uiState.update { it.copy(publicRoomsLoading = true) }
+            if (!silent) {
+                _uiState.update { it.copy(publicRoomsLoading = true) }
+            }
             runCatching { api.fetchPublicRooms() }
                 .onSuccess { resp ->
-                    _uiState.update { it.copy(publicRooms = resp.rooms, publicRoomsLoading = false) }
+                    _uiState.update {
+                        it.copy(
+                            publicRooms = resp.rooms,
+                            publicRoomsLoading = false,
+                            publicRoomsLastRefreshedAt = System.currentTimeMillis(),
+                        )
+                    }
                 }
                 .onFailure {
                     _uiState.update { it.copy(publicRoomsLoading = false) }
                 }
         }
+    }
+
+    // 15 秒 SWR 静默刷新：有缓存立即展示不闪烁，距上次刷新超过 15 秒才在后台自动静默拉取
+    fun refreshPublicRoomsIfStale(staleMs: Long = DISCOVER_SWR_STALE_MS) {
+        val current = _uiState.value
+        val elapsed = System.currentTimeMillis() - current.publicRoomsLastRefreshedAt
+        if (current.publicRooms.isEmpty() || elapsed >= staleMs) {
+            refreshPublicRooms(silent = current.publicRooms.isNotEmpty())
+        }
+    }
+
+    // 下拉刷新「快传」首页：同步拉取服务器配置、活跃公开房数量与节流版 OTA 检查
+    fun refreshLobbyOverview() {
+        refreshServerConfig()
+        refreshPublicRooms(silent = _uiState.value.publicRooms.isNotEmpty())
+        checkForAppUpdate(manual = false, bypassThrottle = false)
+    }
+
+    // 开关清脆提示音（开启时试播一声轻柔提示音便于即时感知）
+    fun setSoundEnabled(enabled: Boolean) {
+        store.setSoundEnabled(enabled)
+        _uiState.update { it.copy(prefs = it.prefs.copy(soundEnabled = enabled)) }
+        if (enabled) {
+            runCatching { soundPlayer.playRefreshTick() }
+        }
+    }
+
+    // 开关细腻触感震动反馈
+    fun setHapticEnabled(enabled: Boolean) {
+        store.setHapticEnabled(enabled)
+        _uiState.update { it.copy(prefs = it.prefs.copy(hapticEnabled = enabled)) }
+    }
+
+    // 供页面下拉刷新完成时安全触发极轻柔提示音
+    fun playRefreshSound() {
+        playSoundIfEnabled { playRefreshTick() }
+    }
+
+    private fun playSoundIfEnabled(action: BaySoundPlayer.() -> Unit) {
+        if (!_uiState.value.prefs.soundEnabled) return
+        runCatching { soundPlayer.action() }
     }
 
     // 随机进入一间免密公开房间（支持 excludeCurrent=true 实现房内「🎲 换一间」）
@@ -447,50 +570,240 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         showToast("已清空传输记录列表（本地已保存文件不受影响）")
     }
 
-    // 应用内自动检查更新（对接 chat.baytale.com/apk/version.json）
-    fun checkForAppUpdate(manual: Boolean = false) {
-        if (_uiState.value.updateChecking) return
-        _uiState.update { it.copy(updateChecking = true) }
+    // 企业级 OTA 自动检查更新（对接 chat.baytale.com/apk/version.json，支持强制升级、本地秒命中、Wi-Fi 静默预下载与移动网络防偷跑）
+    fun checkForAppUpdate(manual: Boolean = false, bypassThrottle: Boolean = false) {
+        val currentOta = AppUpdateCenter.state.value
+        if (currentOta.status == OtaUpdateStatus.CHECKING) return
+
+        // 若正在下载或校验中，不打断现有任务；手动检查时展开进度弹窗供用户查看
+        if (currentOta.status == OtaUpdateStatus.DOWNLOADING || currentOta.status == OtaUpdateStatus.VERIFYING) {
+            if (manual) {
+                _uiState.update { it.copy(showUpdateDialog = true) }
+                showToast("新版本正在后台高速更新中...")
+            }
+            return
+        }
+
+        val now = System.currentTimeMillis()
+        if (!manual && !bypassThrottle) {
+            if (currentOta.status == OtaUpdateStatus.READY_TO_INSTALL) return
+            if (now - _uiState.value.prefs.lastUpdateCheckAt < FOREGROUND_UPDATE_CHECK_INTERVAL_MS) return
+        }
+
+        // 记录本次检查时间戳，用于切回前台 10 分钟节流
+        store.setLastUpdateCheckAt(now)
+        _uiState.update { it.copy(prefs = it.prefs.copy(lastUpdateCheckAt = now)) }
+
+        val previousOta = currentOta
+        AppUpdateCenter.updateState {
+            it.copy(status = OtaUpdateStatus.CHECKING, errorMessage = null)
+        }
+
         viewModelScope.launch {
             runCatching { api.fetchLatestRelease() }
                 .onSuccess { rel ->
                     if (rel.versionCode > BuildConfig.VERSION_CODE) {
-                        _uiState.update { it.copy(availableUpdate = rel, updateChecking = false) }
-                        if (manual) showToast("🚀 发现新版本 v${rel.versionName}，点击即可直连升级")
+                        handleDiscoveredRelease(rel = rel, manual = manual)
                     } else {
-                        _uiState.update { it.copy(availableUpdate = null, updateChecking = false) }
+                        AppUpdateCenter.updateState { OtaUpdateState(status = OtaUpdateStatus.IDLE) }
                         if (manual) showToast("当前已是最新版本 v${BuildConfig.VERSION_NAME}")
                     }
                 }
                 .onFailure {
-                    _uiState.update { it.copy(updateChecking = false) }
+                    // 网络失败时恢复之前已探测到的可用/暂停/就绪状态，不丢进度
+                    val restored = if (previousOta.release != null &&
+                        previousOta.status != OtaUpdateStatus.IDLE &&
+                        previousOta.status != OtaUpdateStatus.CHECKING
+                    ) {
+                        previousOta
+                    } else {
+                        OtaUpdateState(status = OtaUpdateStatus.IDLE)
+                    }
+                    AppUpdateCenter.updateState { restored }
                     if (manual) showToast("检查更新失败，请检查网络连接")
                 }
         }
     }
 
-    fun downloadAndInstallUpdate() {
-        val release = _uiState.value.availableUpdate ?: return
-        if (_uiState.value.updateDownloading) return
-        _uiState.update { it.copy(updateDownloading = true, updateProgress = 0f) }
-        viewModelScope.launch {
-            val outcome = updateManager.downloadAndInstall(release) { done, total ->
-                val pct = if (total > 0L) (done.toFloat() / total.toFloat()).coerceIn(0f, 1f) else 0f
-                _uiState.update { it.copy(updateProgress = pct) }
+    private suspend fun handleDiscoveredRelease(rel: AppReleaseInfo, manual: Boolean) {
+        val isForce = rel.forceUpdate || (rel.minSupportedCode > 0 && BuildConfig.VERSION_CODE < rel.minSupportedCode)
+        var currentPrefs = _uiState.value.prefs
+
+        // 手动点击「检查更新」时自动解除对该版本的忽略标记，允许用户主动升级
+        if (manual && currentPrefs.ignoredVersionCode == rel.versionCode) {
+            store.setIgnoredVersionCode(0)
+            currentPrefs = currentPrefs.copy(ignoredVersionCode = 0)
+            _uiState.update { it.copy(prefs = currentPrefs) }
+        }
+
+        val isIgnored = !manual && !isForce && currentPrefs.ignoredVersionCode == rel.versionCode
+
+        // 扫描本地 filesDir/updates/（同时自动垃圾回收非目标版本旧文件）
+        val inspection = updateManager.inspectLocalRelease(rel)
+        val readyApk = inspection.readyApkFile
+        if (readyApk != null) {
+            val size = readyApk.length()
+            AppUpdateCenter.updateState {
+                OtaUpdateState(
+                    status = OtaUpdateStatus.READY_TO_INSTALL,
+                    release = rel,
+                    downloadedBytes = size,
+                    totalBytes = size,
+                    speedBytesPerSec = 0L,
+                    errorMessage = null,
+                    apkFilePath = readyApk.absolutePath,
+                    isSilentBackground = false,
+                    isForceUpdate = isForce,
+                )
             }
-            _uiState.update { it.copy(updateDownloading = false) }
-            when (outcome) {
-                is AppUpdateManager.UpdateInstallOutcome.InstallerLaunched -> {
-                    showToast("安装包已就绪，请按系统提示完成覆盖升级")
-                }
-                is AppUpdateManager.UpdateInstallOutcome.NeedInstallPermission -> {
-                    showToast("请先开启「允许安装未知应用」权限，返回后再点一次「立即更新」")
-                }
-                is AppUpdateManager.UpdateInstallOutcome.Error -> {
-                    showToast("更新失败：${outcome.message}")
-                }
+            if (manual || isForce) {
+                _uiState.update { it.copy(showUpdateDialog = true) }
+                if (manual) showToast("🎉 v${rel.versionName} 已在本地就绪，0 秒一键安装")
+            }
+            return
+        }
+
+        // 本地尚未完整就绪：写入 AVAILABLE（若存在 .part 断点则立即带上已下进度）
+        AppUpdateCenter.updateState {
+            OtaUpdateState(
+                status = OtaUpdateStatus.AVAILABLE,
+                release = rel,
+                downloadedBytes = inspection.partialBytes,
+                totalBytes = rel.sizeBytes.coerceAtLeast(inspection.partialBytes),
+                speedBytesPerSec = 0L,
+                errorMessage = null,
+                apkFilePath = null,
+                isSilentBackground = false,
+                isForceUpdate = isForce,
+            )
+        }
+
+        if (isIgnored) {
+            // 用户已忽略此版本：不自动弹窗，也不静默预下载
+            return
+        }
+
+        // 未计费 Wi-Fi 且开启了自动后台预下载：自动拉起前台服务静默断点下载；移动网络绝不偷跑流量
+        val canSilentWifiDownload = !manual &&
+            currentPrefs.autoDownloadOnWifi &&
+            AppUpdateManager.isUnmeteredWifi(appContext)
+
+        if (canSilentWifiDownload) {
+            val started = AppUpdateService.startDownload(
+                context = appContext,
+                release = rel,
+                silent = !isForce,
+                forceUpdate = isForce,
+            )
+            if (isForce || !started) {
+                _uiState.update { it.copy(showUpdateDialog = true) }
+            }
+        } else {
+            // 移动网络 / 关闭了 Wi-Fi 自动下载 / 用户手动检查：展示优雅更新提示弹窗由用户确认
+            _uiState.update { it.copy(showUpdateDialog = true) }
+            if (manual) {
+                showToast("🚀 发现新版本 v${rel.versionName}")
             }
         }
+    }
+
+    // 启动或从断点恢复后台下载（若本地已校验就绪则直接一键安装）
+    fun startOrResumeAppUpdate(silent: Boolean = false) {
+        val ota = AppUpdateCenter.state.value
+        val release = ota.release ?: return
+        if (ota.status == OtaUpdateStatus.READY_TO_INSTALL && !ota.apkFilePath.isNullOrBlank()) {
+            installReadyAppUpdate()
+            return
+        }
+        if (_uiState.value.prefs.ignoredVersionCode == release.versionCode) {
+            store.setIgnoredVersionCode(0)
+            _uiState.update { it.copy(prefs = it.prefs.copy(ignoredVersionCode = 0)) }
+        }
+        val started = AppUpdateService.startDownload(
+            context = appContext,
+            release = release,
+            silent = silent,
+            forceUpdate = ota.isForceUpdate,
+        )
+        if (!started) {
+            showToast("启动后台更新服务失败，请稍后重试")
+        }
+    }
+
+    // 暂停当前更新下载并完整保留 .part 断点文件
+    fun pauseAppUpdate() {
+        AppUpdateService.pauseDownload(appContext)
+        showToast("已暂停更新，本地断点已安全保留")
+    }
+
+    // 一键拉起系统包安装器（通过 FileProvider 覆盖升级；兼容进程被回收后从完成通知冷启动安装）
+    fun installReadyAppUpdate() {
+        val ota = AppUpdateCenter.state.value
+        val apkFile = ota.apkFilePath?.let { File(it) }
+            ?: AppUpdateManager.updatesDir(appContext)
+                .listFiles()
+                ?.filter { it.isFile && it.name.endsWith(".apk") && it.length() > 0L }
+                ?.maxByOrNull { it.lastModified() }
+        if (apkFile == null || !apkFile.exists()) {
+            if (ota.release != null) {
+                showToast("本地安装包已失效，正在重新获取...")
+                startOrResumeAppUpdate(silent = false)
+            } else {
+                checkForAppUpdate(manual = true)
+            }
+            return
+        }
+        when (val outcome = AppUpdateManager.launchInstaller(appContext, apkFile)) {
+            is AppUpdateManager.UpdateInstallOutcome.InstallerLaunched -> {
+                awaitingInstallPermission = false
+                showToast("正在拉起系统安装器，请按提示完成覆盖升级")
+            }
+            is AppUpdateManager.UpdateInstallOutcome.NeedInstallPermission -> {
+                awaitingInstallPermission = true
+                showToast("请先开启「允许安装未知应用」权限，返回后将自动继续安装")
+            }
+            is AppUpdateManager.UpdateInstallOutcome.Error -> {
+                showToast("更新失败：${outcome.message}")
+            }
+        }
+    }
+
+    // 忽略当前版本：不再自动弹窗或静默下载，但手动「检查更新」仍可发现并升级
+    fun ignoreCurrentUpdate() {
+        val ota = AppUpdateCenter.state.value
+        if (ota.isForceUpdate) {
+            showToast("当前版本过低，需先升级至最新版本后方可继续使用")
+            return
+        }
+        val release = ota.release ?: return
+        store.setIgnoredVersionCode(release.versionCode)
+        _uiState.update {
+            it.copy(
+                prefs = it.prefs.copy(ignoredVersionCode = release.versionCode),
+                showUpdateDialog = false,
+            )
+        }
+        showToast("已忽略 v${release.versionName}，手动点「检查更新」仍可随时升级")
+    }
+
+    fun openUpdateDialog() {
+        if (AppUpdateCenter.state.value.release != null) {
+            _uiState.update { it.copy(showUpdateDialog = true) }
+        }
+    }
+
+    fun dismissUpdateDialog() {
+        if (AppUpdateCenter.state.value.isForceUpdate) return
+        _uiState.update { it.copy(showUpdateDialog = false) }
+    }
+
+    fun setAutoDownloadOnWifi(enabled: Boolean) {
+        store.setAutoDownloadOnWifi(enabled)
+        _uiState.update { it.copy(prefs = it.prefs.copy(autoDownloadOnWifi = enabled)) }
+        showToast(
+            if (enabled) "已开启 Wi-Fi 自动后台下载更新（移动网络不消耗流量）"
+            else "已关闭 Wi-Fi 自动后台下载更新"
+        )
     }
 
     // 房内安全护栏：本地屏蔽该成员消息 / 记录举报反馈（满足应用商店 UGC 合规要求）
@@ -502,6 +815,115 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
 
     fun reportPeer(peerName: String) {
         showToast("已提交对「$peerName」的违规反馈，建议屏蔽对方或点击「换一间」离开")
+    }
+
+    // 单入口智能直达台：留空秒开新房；输入口令/链接时「已存在直接加入，不存在则自动以此号创建并进入」
+    fun enterOrCreateRoom(
+        rawInput: String,
+        mode: RoomMode,
+        password: String,
+        privatePairOnly: Boolean,
+        retentionDays: Int,
+        maxFileSizeMB: Int,
+        saveFixedFavorite: Boolean,
+        allowRandom: Boolean = true,
+        topic: String = "",
+    ) {
+        val code = FormatUtils.extractRoomCode(rawInput)
+        if (code.isBlank()) {
+            // 留空直接秒开房间（按当前高级设置，默认临时闪传房）
+            createAndEnterRoom(
+                mode = mode,
+                customCode = "",
+                password = password,
+                privatePairOnly = privatePairOnly,
+                retentionDays = retentionDays,
+                maxFileSizeMB = maxFileSizeMB,
+                saveFixedFavorite = saveFixedFavorite,
+                allowRandom = allowRandom,
+                topic = topic,
+            )
+            return
+        }
+        if (_uiState.value.lobbyBusy) return
+        _uiState.update { it.copy(lobbyBusy = true, lobbyError = null) }
+
+        viewModelScope.launch {
+            try {
+                val cleanPwd = password.trim()
+                val existing = try {
+                    api.fetchRoomInfo(code)
+                } catch (e: ApiException) {
+                    if (e.errorCode == "ROOM_NOT_FOUND") null else throw e
+                }
+
+                if (existing != null) {
+                    // 房间已存在：直接验证并进入
+                    if (existing.hasPassword) {
+                        if (cleanPwd.isBlank()) {
+                            _uiState.update {
+                                it.copy(
+                                    lobbyError = "房间 #$code 设有暗号密码，请输入密码后进入",
+                                    lobbyNeedPassword = true,
+                                    pendingJoinCode = code,
+                                )
+                            }
+                            return@launch
+                        }
+                        api.verifyRoomPassword(code, cleanPwd)
+                    }
+                    if (existing.mode == RoomMode.FIXED.wireValue) {
+                        val saved = store.upsertSavedRoom(
+                            SavedFixedRoom(code = existing.code, hasPassword = existing.hasPassword, password = cleanPwd)
+                        )
+                        _uiState.update { it.copy(savedRooms = saved) }
+                    }
+                    recordRecentRoom(existing.code, existing.mode, existing.hasPassword, cleanPwd)
+                    enterRoomInternal(existing.code, cleanPwd, existing)
+                } else {
+                    // 房间不存在：自动以此口令创建常驻房间并直接进入
+                    val maxPeers = if (privatePairOnly) 2 else _uiState.value.serverConfig.maxRoomPeers.coerceAtLeast(2)
+                    val summary = api.createRoom(
+                        CreateRoomRequest(
+                            mode = RoomMode.FIXED.wireValue,
+                            code = code,
+                            password = cleanPwd.takeIf { it.isNotBlank() },
+                            allowRandom = if (cleanPwd.isBlank()) allowRandom else false,
+                            topic = topic.trim().takeIf { it.isNotBlank() },
+                            maxPeers = maxPeers,
+                            retentionDays = retentionDays,
+                            maxFileSizeMB = maxFileSizeMB,
+                        )
+                    )
+                    if (saveFixedFavorite) {
+                        val saved = store.upsertSavedRoom(
+                            SavedFixedRoom(
+                                code = summary.code,
+                                hasPassword = summary.hasPassword,
+                                password = cleanPwd,
+                            )
+                        )
+                        _uiState.update { it.copy(savedRooms = saved) }
+                    }
+                    recordRecentRoom(summary.code, summary.mode, summary.hasPassword, cleanPwd)
+                    enterRoomInternal(summary.code, cleanPwd, summary)
+                    showToast("✨ 未找到 #$code，已为你自动创建专属房间并进入")
+                }
+            } catch (e: ApiException) {
+                val needPwd = e.errorCode == "WRONG_PASSWORD"
+                _uiState.update {
+                    it.copy(
+                        lobbyError = e.message,
+                        lobbyNeedPassword = needPwd || it.lobbyNeedPassword,
+                        pendingJoinCode = code,
+                    )
+                }
+            } catch (e: Exception) {
+                _uiState.update { it.copy(lobbyError = e.message ?: "无法连接到服务器") }
+            } finally {
+                _uiState.update { it.copy(lobbyBusy = false) }
+            }
+        }
     }
 
     // 通过房间码/邀请链接/扫码结果加入房间
@@ -523,6 +945,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                         _uiState.update {
                             it.copy(
                                 lobbyError = "房间 #$code 设有暗号密码，请输入密码后进入",
+                                lobbyNeedPassword = true,
                                 pendingJoinCode = code,
                             )
                         }
@@ -543,7 +966,13 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                     removeRecentRoom(code)
                     showToast("房间 #$code 已销毁或过期，已从最近记录移除")
                 }
-                _uiState.update { it.copy(lobbyError = e.message, pendingJoinCode = code) }
+                _uiState.update {
+                    it.copy(
+                        lobbyError = e.message,
+                        lobbyNeedPassword = e.errorCode == "WRONG_PASSWORD" || it.lobbyNeedPassword,
+                        pendingJoinCode = code,
+                    )
+                }
             } catch (e: Exception) {
                 _uiState.update { it.copy(lobbyError = e.message ?: "无法连接到服务器") }
             } finally {
@@ -567,6 +996,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         _uiState.update {
             it.copy(
                 lobbyError = null,
+                lobbyNeedPassword = false,
                 pendingJoinCode = null,
                 roomMinimized = false,
                 activeRoom = ActiveRoomSession(
@@ -615,7 +1045,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                     timestamp: Long,
                 ) {
                     val sender = _uiState.value.activeRoom?.peers?.get(peerId)
-                    appendMessageIfAbsent(
+                    val inserted = appendMessageIfAbsent(
                         ChatItem(
                             id = id,
                             kind = ChatKind.TEXT,
@@ -628,6 +1058,9 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                             replyTo = replyTo,
                         )
                     )
+                    if (inserted && peerId !in _uiState.value.blockedPeerIds) {
+                        playSoundIfEnabled { playMessageIn() }
+                    }
                 }
 
                 override fun onRecallMessage(peerId: String, msgId: String) {
@@ -677,7 +1110,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                             )
                         )
                     }
-                    appendMessageIfAbsent(
+                    val inserted = appendMessageIfAbsent(
                         ChatItem(
                             id = itemId,
                             kind = kind,
@@ -690,6 +1123,9 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                             transfer = info.copy(targetPeerName = sender?.name),
                         )
                     )
+                    if (inserted && peerId !in _uiState.value.blockedPeerIds) {
+                        playSoundIfEnabled { playMessageIn() }
+                    }
                 }
 
                 override fun onTransferUpdate(info: FileTransferInfo) {
@@ -743,6 +1179,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                         refreshTransferCenter()
 
                         if (!info.isImage && !info.isAudio) {
+                            playSoundIfEnabled { playTransferDone() }
                             if (info.direction == TransferDirection.SEND) {
                                 val baseKey = info.transferId.substringBeforeLast('_')
                                 if (recordedTransfers.add(baseKey)) {
@@ -780,6 +1217,8 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         )
         mesh = newMesh
 
+        // 避免弱网 WebSocket 自动重连时重复播报进房提示音（使用原子标记保证线程安全）
+        val joinSoundPlayed = AtomicBoolean(false)
         val newSig = SignalingClient(
             wsUrl = api.buildWebSocketUrl(),
             roomCode = code,
@@ -792,6 +1231,9 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                 }
 
                 override fun onJoined(env: SignalEnvelope) {
+                    if (joinSoundPlayed.compareAndSet(false, true)) {
+                        playSoundIfEnabled { playRoomJoin() }
+                    }
                     val peerMap = env.peers.orEmpty().associateBy { it.peerId }
                     updateRoom { r ->
                         r.copy(
@@ -1207,6 +1649,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                             savedDisplayPath = "房间云端限时缓存",
                         )
                         _uiState.update { it.copy(transferRecords = store.addTransferRecord(rec)) }
+                        playSoundIfEnabled { playTransferDone() }
                         showToast("☁️「${meta.fileName}」已上传至房间缓存，刷新或换设备随时可下")
                     }.onFailure { err ->
                         updateRoom { r ->
@@ -1429,6 +1872,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                     localPath = saved.previewFilePath,
                 )
                 _uiState.update { it.copy(transferRecords = store.addTransferRecord(rec)) }
+                playSoundIfEnabled { playTransferDone() }
                 showToast("✅ 已下载历史附件至 ${saved.displayPath}")
             }.onFailure { err ->
                 runCatching { tmpFile.delete() }
@@ -1694,7 +2138,10 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                 )
             }
         }
-        appendMessageIfAbsent(item)
+        val inserted = appendMessageIfAbsent(item)
+        if (inserted && !fromCache && !isSelf && cm.senderId !in _uiState.value.blockedPeerIds) {
+            playSoundIfEnabled { playMessageIn() }
+        }
     }
 
     private fun applyMessageRecalled(msgId: String, actorPeerId: String?, actorName: String?) {
@@ -1732,11 +2179,18 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    private fun appendMessageIfAbsent(item: ChatItem) {
+    private fun appendMessageIfAbsent(item: ChatItem): Boolean {
+        var inserted = false
         updateRoom { r ->
-            if (r.messages.any { it.id == item.id }) r
-            else r.copy(messages = r.messages + item)
+            if (r.messages.any { it.id == item.id }) {
+                inserted = false
+                r
+            } else {
+                inserted = true
+                r.copy(messages = r.messages + item)
+            }
         }
+        return inserted
     }
 
     private fun appendSystemMessage(text: String) {
@@ -1772,6 +2226,14 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
 
     override fun onCleared() {
         tearDownSession(stopService = true)
+        runCatching { soundPlayer.release() }
         super.onCleared()
+    }
+
+    companion object {
+        // 切回前台自动静默复查更新的最小时间间隔（10 分钟）
+        private const val FOREGROUND_UPDATE_CHECK_INTERVAL_MS = 10L * 60L * 1000L
+        // 发现页 15 秒 SWR 静默刷新过期阈值
+        private const val DISCOVER_SWR_STALE_MS = 15_000L
     }
 }

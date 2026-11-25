@@ -13,6 +13,11 @@ import {
   AlertCircle,
   Wand2,
   Clock,
+  SlidersHorizontal,
+  ChevronDown,
+  ChevronUp,
+  Globe,
+  X,
 } from 'lucide-react';
 import type {
   RecentRoom,
@@ -88,11 +93,12 @@ export const Lobby: React.FC<LobbyProps> = ({
   onClearRecentRooms,
   onToast,
 }) => {
-  const [tab, setTab] = useState<'create' | 'join'>(initialJoinCode ? 'join' : 'create');
+  const [roomInput, setRoomInput] = useState(initialJoinCode || '');
+  const [roomPassword, setRoomPassword] = useState('');
+  const [needPassword, setNeedPassword] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   const [mode, setMode] = useState<RoomMode>('ephemeral');
-  const [customCode, setCustomCode] = useState('');
-  const [createPassword, setCreatePassword] = useState('');
   const [allowRandom, setAllowRandom] = useState(true); // 默认允许陌生人随机串门（有密码时自动失效）
   const [privatePairOnly, setPrivatePairOnly] = useState(false);
   const [retentionDays, setRetentionDays] = useState(1);
@@ -100,8 +106,9 @@ export const Lobby: React.FC<LobbyProps> = ({
     serverConfig?.defaultRoomMaxFileMB ?? 500
   );
   const [saveToFavorites, setSaveToFavorites] = useState(true);
-  const [creating, setCreating] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
   const [randomJoining, setRandomJoining] = useState(false);
+  const [errorText, setErrorText] = useState(initialNotice || '');
 
   useEffect(() => {
     if (serverConfig && typeof serverConfig.defaultRoomMaxFileMB === 'number') {
@@ -109,17 +116,10 @@ export const Lobby: React.FC<LobbyProps> = ({
     }
   }, [serverConfig?.defaultRoomMaxFileMB]);
 
-  const [joinInput, setJoinInput] = useState(initialJoinCode || '');
-  const [joinPassword, setJoinPassword] = useState('');
-  const [needPassword, setNeedPassword] = useState(false);
-  const [joining, setJoining] = useState(false);
-  const [errorText, setErrorText] = useState(initialNotice || '');
-
   useEffect(() => {
     if (initialJoinCode) {
-      setTab('join');
-      setJoinInput(initialJoinCode);
-      void probeJoinRoom(initialJoinCode);
+      setRoomInput(initialJoinCode);
+      void probeRoomInput(initialJoinCode);
     }
   }, [initialJoinCode]);
 
@@ -127,15 +127,23 @@ export const Lobby: React.FC<LobbyProps> = ({
     if (initialNotice) setErrorText(initialNotice);
   }, [initialNotice]);
 
-  const probeJoinRoom = async (raw: string) => {
+  const probeRoomInput = async (raw: string) => {
     const code = extractRoomCodeInput(raw);
-    if (!code) return;
+    if (!code) {
+      setNeedPassword(false);
+      return;
+    }
     try {
       const info = await fetchRoomInfo(code);
       setNeedPassword(info.hasPassword);
       setErrorText('');
     } catch (err) {
-      if (err instanceof ApiError) setErrorText(err.message);
+      if (err instanceof ApiError && err.errorCode === 'ROOM_NOT_FOUND') {
+        setNeedPassword(false);
+        setErrorText('');
+      } else if (err instanceof ApiError) {
+        setErrorText(err.message);
+      }
     }
   };
 
@@ -146,32 +154,73 @@ export const Lobby: React.FC<LobbyProps> = ({
     else if (nextMode === 'fixed' && retentionDays === 1) setRetentionDays(3);
   };
 
-  const handleCreateSubmit = async (e: React.FormEvent) => {
+  // 单入口智能直达：留空一键开房；填口令/链接时「已存在直接进，不存在自动以此号建常驻房并进」
+  const handleUnifiedSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorText('');
-    setCreating(true);
+    const code = extractRoomCodeInput(roomInput);
+    const cleanPwd = roomPassword.trim();
+    const maxLimit = serverConfig?.maxRoomPeers || 6;
+
+    setSubmitting(true);
     try {
-      const maxLimit = serverConfig?.maxRoomPeers || 6;
-      const cleanPwd = createPassword.trim();
-      const summary = await createRoom({
-        mode,
-        code: mode === 'fixed' ? customCode.trim() : undefined,
-        password: cleanPwd || undefined,
-        allowRandom: cleanPwd ? false : allowRandom,
-        maxPeers: privatePairOnly ? 2 : maxLimit,
-        retentionDays,
-        maxFileSizeMB,
-      });
-      onEnterRoom(
-        summary.code,
-        cleanPwd,
-        summary.mode,
-        mode === 'fixed' && saveToFavorites
-      );
+      if (!code) {
+        // 留空：零配置秒开新房
+        const summary = await createRoom({
+          mode,
+          password: cleanPwd || undefined,
+          allowRandom: cleanPwd ? false : allowRandom,
+          maxPeers: privatePairOnly ? 2 : maxLimit,
+          retentionDays,
+          maxFileSizeMB,
+        });
+        onEnterRoom(summary.code, cleanPwd, summary.mode, mode === 'fixed' && saveToFavorites);
+        return;
+      }
+
+      // 输入了口令/链接：先探测是否已存在
+      let existing = null;
+      try {
+        existing = await fetchRoomInfo(code);
+      } catch (err) {
+        if (err instanceof ApiError && err.errorCode === 'ROOM_NOT_FOUND') {
+          existing = null;
+        } else {
+          throw err;
+        }
+      }
+
+      if (existing) {
+        if (existing.hasPassword) {
+          if (!cleanPwd) {
+            setNeedPassword(true);
+            setErrorText(`房间 #${code} 设有访问暗号，请输入密码后进入`);
+            return;
+          }
+          await verifyRoomPassword(code, cleanPwd);
+        }
+        onEnterRoom(existing.code, cleanPwd, existing.mode, existing.mode === 'fixed');
+      } else {
+        // 不存在则自动以此号创建常驻房间并进入
+        const summary = await createRoom({
+          mode: 'fixed',
+          code,
+          password: cleanPwd || undefined,
+          allowRandom: cleanPwd ? false : allowRandom,
+          maxPeers: privatePairOnly ? 2 : maxLimit,
+          retentionDays,
+          maxFileSizeMB,
+        });
+        onToast(`✨ 未找到 #${code}，已为你自动创建专属房间并进入`);
+        onEnterRoom(summary.code, cleanPwd, summary.mode, saveToFavorites);
+      }
     } catch (err) {
-      setErrorText(err instanceof Error ? err.message : '创建房间失败');
+      if (err instanceof ApiError && err.errorCode === 'WRONG_PASSWORD') {
+        setNeedPassword(true);
+      }
+      setErrorText(err instanceof Error ? err.message : '进入房间失败');
     } finally {
-      setCreating(false);
+      setSubmitting(false);
     }
   };
 
@@ -189,44 +238,12 @@ export const Lobby: React.FC<LobbyProps> = ({
     }
   };
 
-  const handleJoinSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setErrorText('');
-    const code = extractRoomCodeInput(joinInput);
-    if (!code) {
-      setErrorText('请输入房间口令或粘贴邀请链接');
-      return;
-    }
-
-    setJoining(true);
-    try {
-      const info = await fetchRoomInfo(code);
-      if (info.hasPassword) {
-        if (!joinPassword.trim()) {
-          setNeedPassword(true);
-          setErrorText('该房间设有访问口令，请输入密码');
-          return;
-        }
-        await verifyRoomPassword(code, joinPassword.trim());
-      }
-      onEnterRoom(code, joinPassword.trim(), info.mode, info.mode === 'fixed');
-    } catch (err) {
-      if (err instanceof ApiError && err.errorCode === 'WRONG_PASSWORD') {
-        setNeedPassword(true);
-      }
-      setErrorText(err instanceof Error ? err.message : '加入房间失败');
-    } finally {
-      setJoining(false);
-    }
-  };
-
   const handleQuickEnterSaved = async (item: SavedFixedRoom) => {
     setErrorText('');
     try {
       const info = await fetchRoomInfo(item.code);
       if (info.hasPassword && !item.password) {
-        setTab('join');
-        setJoinInput(item.code);
+        setRoomInput(item.code);
         setNeedPassword(true);
         setErrorText('请输入该常驻房间的密码');
         return;
@@ -236,8 +253,7 @@ export const Lobby: React.FC<LobbyProps> = ({
       }
       onEnterRoom(item.code, item.password || '', 'fixed', true);
     } catch (err) {
-      setTab('join');
-      setJoinInput(item.code);
+      setRoomInput(item.code);
       if (err instanceof ApiError && err.errorCode === 'WRONG_PASSWORD') {
         setNeedPassword(true);
       }
@@ -250,8 +266,7 @@ export const Lobby: React.FC<LobbyProps> = ({
     try {
       const info = await fetchRoomInfo(item.code);
       if (info.hasPassword && !item.password) {
-        setTab('join');
-        setJoinInput(item.code);
+        setRoomInput(item.code);
         setNeedPassword(true);
         setErrorText('请输入该房间的访问密码');
         return;
@@ -269,8 +284,7 @@ export const Lobby: React.FC<LobbyProps> = ({
         onToast(`临时房间 #${item.code} 已销毁或过期，已从最近记录移除`);
         return;
       }
-      setTab('join');
-      setJoinInput(item.code);
+      setRoomInput(item.code);
       if (err instanceof ApiError && err.errorCode === 'WRONG_PASSWORD') {
         setNeedPassword(true);
       }
@@ -282,13 +296,17 @@ export const Lobby: React.FC<LobbyProps> = ({
     try {
       const text = await navigator.clipboard.readText();
       if (text) {
-        setJoinInput(text.trim());
-        void probeJoinRoom(text);
+        setRoomInput(text.trim());
+        void probeRoomInput(text);
       }
     } catch {
       onToast('请直接在输入框内按 Ctrl+V 粘贴');
     }
   };
+
+  const hasInputCode = roomInput.trim().length > 0;
+  const hasPasswordInput = roomPassword.trim().length > 0;
+  const summaryTag = `${mode === 'fixed' || hasInputCode ? '常驻' : '临时'}·${retentionDays === 0 ? '即焚' : `${retentionDays}天`}·${maxFileSizeMB === 0 ? '不限' : maxFileSizeMB >= 1024 ? `${(maxFileSizeMB / 1024).toFixed(0)}GB` : `${maxFileSizeMB}MB`}`;
 
   const domainDisplay = serverConfig?.domain || window.location.host;
 
@@ -337,7 +355,7 @@ export const Lobby: React.FC<LobbyProps> = ({
 
       {/* 主体多巴胺双栏 Bento 舞台 */}
       <main className="bento-scroll">
-        <div className="bento-stage">
+        <div className="bento-stage" style={{ alignItems: 'start' }}>
           {/* 左主卡：声波引力头图 + 房间发射台 */}
           <section className="glass-bento">
             <div className="sonic-hero">
@@ -359,330 +377,329 @@ export const Lobby: React.FC<LobbyProps> = ({
               </div>
             </div>
 
-            <div className="segmented full" style={{ marginBottom: 18 }}>
-              <button
-                type="button"
-                className={`seg-item ${tab === 'create' ? 'active' : ''}`}
-                onClick={() => {
-                  setTab('create');
-                  setErrorText('');
-                }}
-              >
-                ✨ 创建新房间
-              </button>
-              <button
-                type="button"
-                className={`seg-item ${tab === 'join' ? 'active' : ''}`}
-                onClick={() => {
-                  setTab('join');
-                  setErrorText('');
-                }}
-              >
-                🚀 输入口令加入
-              </button>
-            </div>
-
-            {tab === 'create' ? (
-              <form
-                onSubmit={handleCreateSubmit}
-                style={{ display: 'flex', flexDirection: 'column', gap: 16 }}
-              >
-                <div className="candy-mode-grid">
-                  <button
-                    type="button"
-                    className={`candy-card ${mode === 'ephemeral' ? 'selected' : ''}`}
-                    onClick={() => handleModeChange('ephemeral')}
-                  >
-                    <div
-                      className="candy-badge-icon"
-                      style={{ background: 'linear-gradient(135deg, #ff5487, #ff965a)' }}
-                    >
-                      <Flame size={19} />
-                    </div>
-                    <div style={{ fontSize: 15, fontWeight: 800 }}>闪传盲盒房 · 聊完就变</div>
-                    <div style={{ fontSize: 12, color: 'var(--text-sub)', lineHeight: 1.45 }}>
-                      生成 6 位随机口令，人走茶凉自动销毁作废，下次开启全新口令
-                    </div>
-                  </button>
-
-                  <button
-                    type="button"
-                    className={`candy-card ${mode === 'fixed' ? 'selected' : ''}`}
-                    onClick={() => handleModeChange('fixed')}
-                  >
-                    <div
-                      className="candy-badge-icon"
-                      style={{ background: 'linear-gradient(135deg, #8b5cf6, #06b6d4)' }}
-                    >
-                      <Pin size={19} />
-                    </div>
-                    <div style={{ fontSize: 15, fontWeight: 800 }}>专属秘密基地 · 长期不变</div>
-                    <div style={{ fontSize: 12, color: 'var(--text-sub)', lineHeight: 1.45 }}>
-                      自定义专属房间号，退出后依然保留，手机电脑随时丝滑重连
-                    </div>
-                  </button>
+            <form
+              onSubmit={handleUnifiedSubmit}
+              style={{ display: 'flex', flexDirection: 'column', gap: 14 }}
+            >
+              {/* 单入口超级输入框：留空一键开房，填口令有就进/无就建 */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <div className="lobby-field-head">
+                  <span>⚡ 快速直达口令 / 基地号 / 邀请链接</span>
+                  <span style={{ color: 'var(--accent)', fontWeight: 700 }}>
+                    {hasInputCode ? '有就进 · 无就自动建房' : '留空点按钮 0.5 秒开房'}
+                  </span>
                 </div>
-
-                {mode === 'fixed' && (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5, fontWeight: 700, color: 'var(--text-sub)' }}>
-                      <span>定制基地房间号</span>
-                      <span style={{ color: 'var(--text-muted)', fontWeight: 500 }}>留空则随机生成</span>
-                    </div>
-                    <div className="input-group">
-                      <input
-                        className="field-input with-suffix mono"
-                        value={customCode}
-                        maxLength={24}
-                        onChange={(e) => setCustomCode(e.target.value)}
-                        placeholder="如 my-desk、sweet-888"
-                      />
-                      <div className="input-suffix">
-                        <button
-                          type="button"
-                          className="btn btn-soft btn-sm"
-                          onClick={() =>
-                            setCustomCode(`bay-${Math.floor(1000 + Math.random() * 9000)}`)
-                          }
-                        >
-                          <Dices size={13} /> 随机号
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                  <div className="lobby-field-head">
-                    <span>服务器消息保鲜期（最长 7 天）</span>
-                    <span style={{ color: 'var(--accent)', fontWeight: 600 }}>
-                      {retentionDays === 0
-                        ? '🔥 服务器零留存'
-                        : `最后聊天起 ${retentionDays} 天后自动清空`}
-                    </span>
-                  </div>
-                  <div className="segmented full seg-mobile-grid">
-                    {RETENTION_STEPS.map((st) => {
-                      const active = retentionDays === st.days;
-                      const cls = active
-                        ? st.days === 0
-                          ? 'seg-item danger-active'
-                          : 'seg-item active'
-                        : 'seg-item';
-                      return (
-                        <button
-                          key={st.days}
-                          type="button"
-                          className={cls}
-                          onClick={() => setRetentionDays(st.days)}
-                        >
-                          {st.label}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                  <div className="lobby-field-head">
-                    <span>单附件传输大小上限（进房后随时可调）</span>
-                    <span style={{ color: 'var(--accent)', fontWeight: 600 }}>
-                      {maxFileSizeMB === 0
-                        ? '♾️ 不限制（支持 GB 级流式直传）'
-                        : `单文件 ≤ ${maxFileSizeMB >= 1024 ? `${(maxFileSizeMB / 1024).toFixed(maxFileSizeMB % 1024 === 0 ? 0 : 1)} GB` : `${maxFileSizeMB} MB`}`}
-                    </span>
-                  </div>
-                  <div className="segmented full seg-mobile-grid">
-                    {FILE_LIMIT_PRESETS.filter((p) => {
-                      const cap = serverConfig?.maxAttachmentMB || 0;
-                      if (cap <= 0) return true;
-                      return p.mb > 0 && p.mb <= cap;
-                    }).map((p) => (
-                      <button
-                        key={p.mb}
-                        type="button"
-                        className={`seg-item ${maxFileSizeMB === p.mb ? 'active' : ''}`}
-                        onClick={() => setMaxFileSizeMB(p.mb)}
-                      >
-                        {p.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="lobby-two-col">
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                    <span style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--text-sub)' }}>
-                      房间容量
-                    </span>
-                    <div className="segmented full" style={{ height: 44, alignItems: 'center' }}>
-                      <button
-                        type="button"
-                        className={`seg-item ${privatePairOnly ? 'active' : ''}`}
-                        onClick={() => setPrivatePairOnly(true)}
-                      >
-                        1v1 双人私密
-                      </button>
-                      <button
-                        type="button"
-                        className={`seg-item ${!privatePairOnly ? 'active' : ''}`}
-                        onClick={() => setPrivatePairOnly(false)}
-                      >
-                        小队 ({serverConfig?.maxRoomPeers || 6}人)
-                      </button>
-                    </div>
-                  </div>
-
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                    <span style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--text-sub)' }}>
-                      暗号密码（可选）
-                    </span>
-                    <div className="input-group">
-                      <span className="input-prefix-icon">
-                        <Lock size={15} />
-                      </span>
-                      <input
-                        className="field-input with-prefix"
-                        type="password"
-                        value={createPassword}
-                        onChange={(e) => setCreatePassword(e.target.value)}
-                        placeholder={mode === 'fixed' ? '推荐设个小暗号' : '留空免密秒进'}
-                      />
-                    </div>
-                  </div>
-                </div>
-
-                {createPassword.trim() === '' ? (
-                  <Switch
-                    checked={allowRandom}
-                    onChange={setAllowRandom}
-                    label="🌐 允许陌生人随机串门"
-                    description="默认开启；若仅自己跨端传私密文件，点击可关闭防误闯"
+                <div className="input-group">
+                  <input
+                    className="field-input with-suffix mono"
+                    style={{ height: 54, fontSize: 16, fontWeight: 800, letterSpacing: '0.02em', paddingRight: 108 }}
+                    value={roomInput}
+                    onChange={(e) => {
+                      setRoomInput(e.target.value);
+                      setErrorText('');
+                      if (!e.target.value.trim()) setNeedPassword(false);
+                    }}
+                    onBlur={() => void probeRoomInput(roomInput)}
+                    placeholder="留空秒开，或输 849205 / bay-8888"
                   />
-                ) : (
-                  <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: '2px 4px' }}>
-                    🔒 已设置暗号密码，自动关闭随机串门（仅凭密码进入）
+                  <div className="input-suffix" style={{ right: 8, display: 'flex', alignItems: 'center', gap: 4 }}>
+                    {roomInput && (
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-sm"
+                        style={{ padding: '0 6px' }}
+                        onClick={() => {
+                          setRoomInput('');
+                          setNeedPassword(false);
+                          setErrorText('');
+                        }}
+                        title="清空"
+                      >
+                        <X size={14} />
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="btn btn-soft btn-sm"
+                      onClick={() => void handlePasteClipboard()}
+                    >
+                      <ClipboardPaste size={13} /> 粘贴
+                    </button>
                   </div>
-                )}
+                </div>
+              </div>
 
-                {mode === 'fixed' && (
-                  <Switch
-                    checked={saveToFavorites}
-                    onChange={setSaveToFavorites}
-                    label="收藏到右侧「我的秘密基地」"
-                    description="下次打开网页直接一键空降进入房间"
-                  />
-                )}
-
-                {errorText && (
-                  <div className="alert-strip">
-                    <AlertCircle size={15} />
-                    <span>{errorText}</span>
+              {/* 仅当探测到加密房或未展开高级设置但已填密码时展示 */}
+              {(needPassword || (!showAdvanced && hasPasswordInput)) && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <span style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--text-sub)' }}>
+                    输入房间暗号密码
+                  </span>
+                  <div className="input-group">
+                    <span className="input-prefix-icon">
+                      <Lock size={15} />
+                    </span>
+                    <input
+                      className="field-input with-prefix"
+                      type="password"
+                      value={roomPassword}
+                      onChange={(e) => {
+                        setRoomPassword(e.target.value);
+                        setErrorText('');
+                      }}
+                      placeholder="输入对方告知的暗号..."
+                      autoFocus
+                    />
                   </div>
-                )}
+                </div>
+              )}
 
+              {errorText && (
+                <div className="alert-strip">
+                  <AlertCircle size={15} />
+                  <span>{errorText}</span>
+                </div>
+              )}
+
+              {/* 主行动栏：一键秒开/直达 + 随机串门 */}
+              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
                 <button
                   type="submit"
                   className="btn btn-jelly btn-xl"
-                  style={{ width: '100%', marginTop: 4 }}
-                  disabled={creating}
+                  style={{ flex: 1, minWidth: 180 }}
+                  disabled={submitting || randomJoining}
                 >
-                  <Sparkles size={18} />
+                  <Sparkles size={17} />
                   <span>
-                    {creating
-                      ? '正在召唤直连房间...'
-                      : mode === 'fixed'
-                        ? '开启常驻秘密基地'
-                        : '生成闪传口令并出发'}
+                    {submitting
+                      ? '正在直连房间...'
+                      : hasInputCode
+                        ? '直达进入（无则自动建房）'
+                        : mode === 'fixed'
+                          ? '秒开常驻秘密基地'
+                          : '秒开快传房间'}
                   </span>
                   <ArrowRight size={17} />
                 </button>
-              </form>
-            ) : (
-              <form
-                onSubmit={handleJoinSubmit}
-                style={{ display: 'flex', flexDirection: 'column', gap: 16 }}
+                <button
+                  type="button"
+                  className="btn btn-soft btn-xl"
+                  disabled={submitting || randomJoining}
+                  onClick={() => void handleRandomJoin()}
+                  title="只进入无密码且允许串门的活跃房间"
+                >
+                  <Dices size={17} />
+                  <span>{randomJoining ? '匹配中...' : '随机串门'}</span>
+                </button>
+              </div>
+
+              {/* 一行极简控制条：允许串门快捷胶囊 + 高级设置折叠开关 */}
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: 8,
+                  flexWrap: 'wrap',
+                  paddingTop: 2,
+                }}
               >
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                  <span style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--text-sub)' }}>
-                    输入 6 位口令 / 基地号 / 粘贴分享链接
+                <button
+                  type="button"
+                  className={`btn btn-sm ${!hasPasswordInput && allowRandom ? 'btn-soft' : 'btn-glass'}`}
+                  disabled={hasPasswordInput}
+                  onClick={() => {
+                    const next = !allowRandom;
+                    setAllowRandom(next);
+                    onToast(next ? '🌐 已开启陌生人随机串门' : '🔒 已关闭随机串门，仅限口令进入');
+                  }}
+                  title="默认开启，传私密文件时点击即可关闭"
+                >
+                  {!hasPasswordInput && allowRandom ? <Globe size={13} /> : <Lock size={13} />}
+                  <span>
+                    {hasPasswordInput
+                      ? '暗号保护中'
+                      : allowRandom
+                        ? '允许随机串门 ✓'
+                        : '仅限口令进入'}
                   </span>
-                  <div className="input-group">
-                    <input
-                      className="field-input with-suffix mono"
-                      style={{ height: 54, fontSize: 19, fontWeight: 800, letterSpacing: '0.05em' }}
-                      value={joinInput}
-                      onChange={(e) => {
-                        setJoinInput(e.target.value);
-                        setErrorText('');
-                      }}
-                      onBlur={() => void probeJoinRoom(joinInput)}
-                      placeholder="例如 849205 或 my-desk"
-                      autoFocus
-                    />
-                    <div className="input-suffix" style={{ right: 8 }}>
-                      <button
-                        type="button"
-                        className="btn btn-soft btn-sm"
-                        onClick={() => void handlePasteClipboard()}
-                      >
-                        <ClipboardPaste size={13} /> 一键粘贴
-                      </button>
-                    </div>
-                  </div>
-                </div>
+                </button>
 
-                {needPassword && (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                    <span style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--text-sub)' }}>
-                      输入房间暗号密码
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  onClick={() => setShowAdvanced((prev) => !prev)}
+                  style={{ color: showAdvanced ? 'var(--accent)' : 'var(--text-sub)', fontWeight: 700 }}
+                >
+                  <SlidersHorizontal size={13} />
+                  <span>高级设置</span>
+                  {!showAdvanced && (
+                    <span style={{ fontSize: 11.5, color: 'var(--text-muted)', fontWeight: 500 }}>
+                      ({summaryTag})
                     </span>
-                    <div className="input-group">
-                      <span className="input-prefix-icon">
-                        <Lock size={15} />
+                  )}
+                  {showAdvanced ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                </button>
+              </div>
+
+              {/* 高级设置折叠区（默认收起，保持页面极简） */}
+              {showAdvanced && (
+                <div
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 14,
+                    paddingTop: 12,
+                    borderTop: '1px solid var(--line-border)',
+                  }}
+                >
+                  <div className="candy-mode-grid">
+                    <button
+                      type="button"
+                      className={`candy-card ${mode === 'ephemeral' ? 'selected' : ''}`}
+                      onClick={() => handleModeChange('ephemeral')}
+                    >
+                      <div
+                        className="candy-badge-icon"
+                        style={{ background: 'linear-gradient(135deg, #ff5487, #ff965a)' }}
+                      >
+                        <Flame size={17} />
+                      </div>
+                      <div style={{ fontSize: 14, fontWeight: 800 }}>闪传临时房 · 聊完销毁</div>
+                      <div style={{ fontSize: 11.5, color: 'var(--text-sub)', lineHeight: 1.4 }}>
+                        生成 6 位随机口令，离开后自动过期清空
+                      </div>
+                    </button>
+
+                    <button
+                      type="button"
+                      className={`candy-card ${mode === 'fixed' ? 'selected' : ''}`}
+                      onClick={() => handleModeChange('fixed')}
+                    >
+                      <div
+                        className="candy-badge-icon"
+                        style={{ background: 'linear-gradient(135deg, #8b5cf6, #06b6d4)' }}
+                      >
+                        <Pin size={17} />
+                      </div>
+                      <div style={{ fontSize: 14, fontWeight: 800 }}>常驻秘密基地 · 长期保留</div>
+                      <div style={{ fontSize: 11.5, color: 'var(--text-sub)', lineHeight: 1.4 }}>
+                        固定房号，手机电脑随时丝滑重连
+                      </div>
+                    </button>
+                  </div>
+
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    <div className="lobby-field-head">
+                      <span>服务器消息与文件保鲜期（最长 7 天）</span>
+                      <span style={{ color: 'var(--accent)', fontWeight: 600 }}>
+                        {retentionDays === 0
+                          ? '🔥 服务器零留存'
+                          : `活跃起 ${retentionDays} 天后自动清空`}
                       </span>
-                      <input
-                        className="field-input with-prefix"
-                        type="password"
-                        value={joinPassword}
-                        onChange={(e) => setJoinPassword(e.target.value)}
-                        placeholder="输入对方告知的暗号..."
-                        autoFocus
-                      />
+                    </div>
+                    <div className="segmented full seg-mobile-grid">
+                      {RETENTION_STEPS.map((st) => {
+                        const active = retentionDays === st.days;
+                        const cls = active
+                          ? st.days === 0
+                            ? 'seg-item danger-active'
+                            : 'seg-item active'
+                          : 'seg-item';
+                        return (
+                          <button
+                            key={st.days}
+                            type="button"
+                            className={cls}
+                            onClick={() => setRetentionDays(st.days)}
+                          >
+                            {st.label}
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
-                )}
 
-                {errorText && (
-                  <div className="alert-strip">
-                    <AlertCircle size={15} />
-                    <span>{errorText}</span>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    <div className="lobby-field-head">
+                      <span>单附件传输大小上限</span>
+                      <span style={{ color: 'var(--accent)', fontWeight: 600 }}>
+                        {maxFileSizeMB === 0
+                          ? '♾️ 不限制（支持 GB 级流式直传）'
+                          : `单文件 ≤ ${maxFileSizeMB >= 1024 ? `${(maxFileSizeMB / 1024).toFixed(maxFileSizeMB % 1024 === 0 ? 0 : 1)} GB` : `${maxFileSizeMB} MB`}`}
+                      </span>
+                    </div>
+                    <div className="segmented full seg-mobile-grid">
+                      {FILE_LIMIT_PRESETS.filter((p) => {
+                        const cap = serverConfig?.maxAttachmentMB || 0;
+                        if (cap <= 0) return true;
+                        return p.mb > 0 && p.mb <= cap;
+                      }).map((p) => (
+                        <button
+                          key={p.mb}
+                          type="button"
+                          className={`seg-item ${maxFileSizeMB === p.mb ? 'active' : ''}`}
+                          onClick={() => setMaxFileSizeMB(p.mb)}
+                        >
+                          {p.label}
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                )}
 
-                <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-                  <button
-                    type="submit"
-                    className="btn btn-jelly btn-xl"
-                    style={{ flex: 1, minWidth: 160 }}
-                    disabled={joining || randomJoining}
-                  >
-                    <span>{joining ? '正在穿越公网连接...' : '嗖一下进入房间'}</span>
-                    <ArrowRight size={17} />
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-soft btn-xl"
-                    disabled={joining || randomJoining}
-                    onClick={() => void handleRandomJoin()}
-                    title="只进入无密码且允许串门的活跃房间"
-                  >
-                    <Dices size={17} />
-                    <span>{randomJoining ? '匹配中...' : '随机串门'}</span>
-                  </button>
+                  <div className="lobby-two-col">
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                      <span style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--text-sub)' }}>
+                        房间容量
+                      </span>
+                      <div className="segmented full" style={{ height: 44, alignItems: 'center' }}>
+                        <button
+                          type="button"
+                          className={`seg-item ${privatePairOnly ? 'active' : ''}`}
+                          onClick={() => setPrivatePairOnly(true)}
+                        >
+                          1v1 双人私密
+                        </button>
+                        <button
+                          type="button"
+                          className={`seg-item ${!privatePairOnly ? 'active' : ''}`}
+                          onClick={() => setPrivatePairOnly(false)}
+                        >
+                          小队 ({serverConfig?.maxRoomPeers || 6}人)
+                        </button>
+                      </div>
+                    </div>
+
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                      <span style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--text-sub)' }}>
+                        暗号密码（可选）
+                      </span>
+                      <div className="input-group">
+                        <span className="input-prefix-icon">
+                          <Lock size={15} />
+                        </span>
+                        <input
+                          className="field-input with-prefix"
+                          type="password"
+                          value={roomPassword}
+                          onChange={(e) => setRoomPassword(e.target.value)}
+                          placeholder="留空免密；设暗号禁随机"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {(mode === 'fixed' || hasInputCode) && (
+                    <Switch
+                      checked={saveToFavorites}
+                      onChange={setSaveToFavorites}
+                      label="收藏到「我的秘密基地」"
+                      description="下次打开网页直接一键空降进入房间"
+                    />
+                  )}
                 </div>
-              </form>
-            )}
+              )}
+            </form>
           </section>
 
           {/* 右侧 Bento 副栏：百变身份卡 + 秘密基地列表 + 创意玩法标签 */}

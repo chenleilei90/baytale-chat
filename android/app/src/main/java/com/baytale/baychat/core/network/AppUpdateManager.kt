@@ -2,143 +2,139 @@ package com.baytale.baychat.core.network
 
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import androidx.core.content.FileProvider
 import com.baytale.baychat.core.model.AppReleaseInfo
-import com.baytale.baychat.core.util.FormatUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
-import okhttp3.Request
 import java.io.File
-import java.io.FileOutputStream
-import java.security.MessageDigest
 
-// 应用内直连更新引擎：流式下载 APK、SHA-256 校验并拉起系统包安装器覆盖升级
+// Android 平台级 OTA 更新管理器：负责持久化更新目录、未计费 Wi-Fi 检测、FileProvider 安装器拉起与权限引导
 class AppUpdateManager(
     private val context: Context,
-    private val okHttpClient: OkHttpClient,
+    okHttpClient: OkHttpClient,
 ) {
+    private val appContext = context.applicationContext
+    private val downloader = ResumableApkDownloader(okHttpClient = okHttpClient)
+
     sealed class UpdateInstallOutcome {
         data object InstallerLaunched : UpdateInstallOutcome()
         data object NeedInstallPermission : UpdateInstallOutcome()
         data class Error(val message: String) : UpdateInstallOutcome()
     }
 
-    suspend fun downloadAndInstall(
-        release: AppReleaseInfo,
-        onProgress: (downloadedBytes: Long, totalBytes: Long) -> Unit,
-    ): UpdateInstallOutcome = withContext(Dispatchers.IO) {
-        try {
-            val updateDir = File(context.cacheDir, "updates").apply { mkdirs() }
-            val apkFile = File(updateDir, "BayChat-v${release.versionName}.apk")
-            val tmpFile = File(updateDir, "BayChat-v${release.versionName}.apk.tmp")
-
-            // 若本地已下载且 SHA-256 校验通过，直接复用免重复下载
-            val alreadyValid = apkFile.exists() &&
-                release.sha256.isNotBlank() &&
-                computeSha256(apkFile).equals(release.sha256, ignoreCase = true)
-
-            if (!alreadyValid) {
-                if (tmpFile.exists()) tmpFile.delete()
-                val req = Request.Builder()
-                    .url(release.apkUrl)
-                    .header("User-Agent", "BayChat-Android-Updater/1.1")
-                    .get()
-                    .build()
-
-                okHttpClient.newCall(req).execute().use { resp ->
-                    if (!resp.isSuccessful) {
-                        return@withContext UpdateInstallOutcome.Error("安装包下载失败 (HTTP ${resp.code})")
-                    }
-                    val body = resp.body ?: return@withContext UpdateInstallOutcome.Error("服务器未返回安装包数据")
-                    val total = body.contentLength().takeIf { it > 0L } ?: release.sizeBytes
-                    val sha = MessageDigest.getInstance("SHA-256")
-                    var downloaded = 0L
-                    var lastReport = 0L
-
-                    body.byteStream().use { input ->
-                        FileOutputStream(tmpFile).use { output ->
-                            val buf = ByteArray(32 * 1024)
-                            while (true) {
-                                val read = input.read(buf)
-                                if (read <= 0) break
-                                output.write(buf, 0, read)
-                                sha.update(buf, 0, read)
-                                downloaded += read
-                                val now = System.currentTimeMillis()
-                                if (now - lastReport >= 150L || (total > 0 && downloaded >= total)) {
-                                    onProgress(downloaded, total)
-                                    lastReport = now
-                                }
-                            }
-                            output.flush()
-                        }
-                    }
-
-                    if (release.sha256.isNotBlank()) {
-                        val actualHash = FormatUtils.bytesToHex(sha.digest())
-                        if (!actualHash.equals(release.sha256, ignoreCase = true)) {
-                            tmpFile.delete()
-                            return@withContext UpdateInstallOutcome.Error("安装包 SHA-256 完整性校验失败，请重试")
-                        }
-                    }
-
-                    if (apkFile.exists()) apkFile.delete()
-                    if (!tmpFile.renameTo(apkFile)) {
-                        tmpFile.copyTo(apkFile, overwrite = true)
-                        tmpFile.delete()
-                    }
-                }
-            } else {
-                onProgress(apkFile.length(), apkFile.length())
-            }
-
-            withContext(Dispatchers.Main) {
-                launchInstaller(apkFile)
-            }
-        } catch (e: Exception) {
-            UpdateInstallOutcome.Error(e.message ?: "更新下载中断")
+    // 扫描本地是否已存在校验通过的安装包或可续传 .part 断点，同时清理过期旧版垃圾文件
+    suspend fun inspectLocalRelease(release: AppReleaseInfo): ResumableApkDownloader.LocalUpdateInspection =
+        withContext(Dispatchers.IO) {
+            cleanupLegacyCacheUpdates(appContext)
+            ResumableApkDownloader.inspectLocalState(updatesDir(appContext), release)
         }
+
+    // 执行企业级断点续传下载（供 AppUpdateService 后台前台服务调用）
+    suspend fun downloadRelease(
+        release: AppReleaseInfo,
+        shouldPause: () -> Boolean = { false },
+        onVerifying: () -> Unit = {},
+        onProgress: (downloadedBytes: Long, totalBytes: Long, speedBytesPerSec: Long, attempt: Int) -> Unit = { _, _, _, _ -> },
+    ): ResumableApkDownloader.DownloadResult {
+        cleanupLegacyCacheUpdates(appContext)
+        return downloader.download(
+            release = release,
+            updatesDir = updatesDir(appContext),
+            shouldPause = shouldPause,
+            onVerifying = onVerifying,
+            onProgress = onProgress,
+        )
     }
 
-    private fun launchInstaller(apkFile: File): UpdateInstallOutcome {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !context.packageManager.canRequestPackageInstalls()) {
+    // 拉起系统安装器（如未授予「允许安装未知应用」则自动跳转系统授权页）
+    fun launchInstaller(apkFile: File): UpdateInstallOutcome = launchInstaller(appContext, apkFile)
+
+    companion object {
+        private const val UPDATES_DIR_NAME = "updates"
+
+        // 持久化更新目录位于 context.filesDir/updates/（绝不放易被系统回收的 cacheDir）
+        // file_paths.xml 已声明 <files-path name="received_files" path="." />，与 FileProvider 100% 兼容
+        fun updatesDir(context: Context): File =
+            File(context.applicationContext.filesDir, UPDATES_DIR_NAME).apply { mkdirs() }
+
+        // 顺手清理旧版 v1.1.3 遗留在 cacheDir/updates 的安装包缓存，释放存储空间
+        fun cleanupLegacyCacheUpdates(context: Context) {
             runCatching {
-                val permIntent = Intent(
-                    Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                    Uri.parse("package:${context.packageName}")
-                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                context.startActivity(permIntent)
+                val legacyDir = File(context.applicationContext.cacheDir, UPDATES_DIR_NAME)
+                if (legacyDir.exists() && legacyDir.isDirectory) {
+                    legacyDir.listFiles()?.forEach { runCatching { it.delete() } }
+                    legacyDir.delete()
+                }
             }
-            return UpdateInstallOutcome.NeedInstallPermission
         }
 
-        return runCatching {
-            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", apkFile)
-            val installIntent = Intent(Intent.ACTION_VIEW).apply {
+        // 严格检测当前是否处于未计费 Wi-Fi / 有线网络（移动网络与计费热点绝不静默下载偷跑流量）
+        fun isUnmeteredWifi(context: Context): Boolean {
+            val cm = context.applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                ?: return false
+            val activeNetwork = cm.activeNetwork ?: return false
+            val caps = cm.getNetworkCapabilities(activeNetwork) ?: return false
+            val hasInternet = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            val isNotMetered = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
+            val isWifiOrEthernet = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
+            return hasInternet && isNotMetered && isWifiOrEthernet
+        }
+
+        // 检查是否已授予「安装未知应用」权限（Android 8.0+）
+        fun canInstallPackages(context: Context): Boolean {
+            return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.applicationContext.packageManager.canRequestPackageInstalls()
+            } else {
+                true
+            }
+        }
+
+        // 构造通过 FileProvider 授权的系统包安装器 Intent（兼容通知栏 PendingIntent 与前台直接拉起）
+        fun createInstallIntent(context: Context, apkFile: File): Intent {
+            val appCtx = context.applicationContext
+            val uri = FileProvider.getUriForFile(appCtx, "${appCtx.packageName}.fileprovider", apkFile)
+            return Intent(Intent.ACTION_VIEW).apply {
                 setDataAndType(uri, "application/vnd.android.package-archive")
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            context.startActivity(installIntent)
-            UpdateInstallOutcome.InstallerLaunched
-        }.getOrElse {
-            UpdateInstallOutcome.Error("拉起系统安装器失败：${it.message}")
         }
-    }
 
-    private fun computeSha256(file: File): String {
-        val md = MessageDigest.getInstance("SHA-256")
-        file.inputStream().use { input ->
-            val buf = ByteArray(32 * 1024)
-            while (true) {
-                val read = input.read(buf)
-                if (read <= 0) break
-                md.update(buf, 0, read)
+        // 构造跳转到「安装未知应用」系统设置页的 Intent
+        fun createUnknownSourcesSettingsIntent(context: Context): Intent {
+            val appCtx = context.applicationContext
+            return Intent(
+                Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                Uri.parse("package:${appCtx.packageName}")
+            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+
+        // 安全拉起系统包安装器覆盖升级
+        fun launchInstaller(context: Context, apkFile: File): UpdateInstallOutcome {
+            val appCtx = context.applicationContext
+            if (!apkFile.exists() || !apkFile.isFile || apkFile.length() <= 0L) {
+                return UpdateInstallOutcome.Error("本地安装包不存在或已被移除，请重新下载")
+            }
+
+            if (!canInstallPackages(appCtx)) {
+                runCatching {
+                    appCtx.startActivity(createUnknownSourcesSettingsIntent(appCtx))
+                }
+                return UpdateInstallOutcome.NeedInstallPermission
+            }
+
+            return runCatching {
+                appCtx.startActivity(createInstallIntent(appCtx, apkFile))
+                UpdateInstallOutcome.InstallerLaunched
+            }.getOrElse {
+                UpdateInstallOutcome.Error("拉起系统安装器失败：${it.message}")
             }
         }
-        return FormatUtils.bytesToHex(md.digest())
     }
 }
