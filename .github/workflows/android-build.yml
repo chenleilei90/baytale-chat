@@ -48,14 +48,18 @@ jobs:
         run: |
           if [ -n "$KEYSTORE_BASE64" ]; then
             printf '%s' "$KEYSTORE_BASE64" | tr -d '[:space:]' | base64 -d > app/baychat-release.jks
+            CLEAN_STORE_PASS=$(printf '%s' "$STORE_PASSWORD" | tr -d '\r\n')
+            CLEAN_KEY_ALIAS=$(printf '%s' "$KEY_ALIAS" | tr -d '\r\n')
+            CLEAN_KEY_PASS=$(printf '%s' "$KEY_PASSWORD" | tr -d '\r\n')
             cat > keystore.properties << EOF
           storeFile=baychat-release.jks
-          storePassword=$STORE_PASSWORD
-          keyAlias=$KEY_ALIAS
-          keyPassword=$KEY_PASSWORD
+          storePassword=$CLEAN_STORE_PASS
+          keyAlias=$CLEAN_KEY_ALIAS
+          keyPassword=$CLEAN_KEY_PASS
           EOF
-            echo "Release signing configured from secrets."
-            keytool -list -keystore app/baychat-release.jks -storepass "$STORE_PASSWORD" | grep -E "Alias|SHA-256|SHA256" || true
+            echo "Release signing configured from secrets. keystore_bytes=$(wc -c < app/baychat-release.jks)"
+            # 立即验证密钥库、密码与别名，出错时 1 秒快速失败，不必等 Gradle 编译完
+            keytool -list -v -keystore app/baychat-release.jks -alias "$CLEAN_KEY_ALIAS" -storepass "$CLEAN_STORE_PASS" | grep -E "Alias name|Entry type|Owner:|Valid from|SHA256:|SHA-256:"
           else
             echo "No release keystore secrets set; building release with fallback debug signing for direct testing."
           fi
