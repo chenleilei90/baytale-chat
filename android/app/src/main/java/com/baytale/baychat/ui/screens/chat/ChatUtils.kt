@@ -13,6 +13,9 @@ import com.baytale.baychat.core.model.LinkTransportType
 import com.baytale.baychat.ui.ActiveRoomSession
 import com.baytale.baychat.ui.theme.BayTheme
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Date
 import java.util.Locale
 
 // ============================================================================
@@ -134,12 +137,16 @@ internal fun buildAuthedImageRequest(
     context: Context,
     model: Any,
     headers: Map<String, String>,
+    retryNonce: Int = 0,
 ): ImageRequest {
     return ImageRequest.Builder(context)
         .data(model)
         .apply {
             headers.forEach { (key, value) ->
                 addHeader(key, value)
+            }
+            if (retryNonce > 0) {
+                setParameter("retry_nonce", retryNonce)
             }
         }
         .crossfade(true)
@@ -162,4 +169,63 @@ internal fun formatDurationMs(ms: Long): String {
 internal fun formatRetentionBadge(days: Int): String = when {
     days <= 0 -> "阅后即焚"
     else -> "${days}天保留"
+}
+
+/**
+ * 判断两个时间戳是否属于同一自然日。
+ */
+internal fun isSameCalendarDay(ts1: Long, ts2: Long): Boolean {
+    val c1 = Calendar.getInstance().apply { timeInMillis = ts1 }
+    val c2 = Calendar.getInstance().apply { timeInMillis = ts2 }
+    return c1.get(Calendar.YEAR) == c2.get(Calendar.YEAR) &&
+        c1.get(Calendar.DAY_OF_YEAR) == c2.get(Calendar.DAY_OF_YEAR)
+}
+
+private val WEEKDAY_LABELS = arrayOf("星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六")
+
+/**
+ * 按微信规则格式化聊天消息时间分隔标签：
+ * 今天 HH:mm / 昨天 HH:mm / 7天内 星期X HH:mm / 今年内 M月d日 HH:mm / 跨年 yyyy年M月d日 HH:mm。
+ */
+internal fun formatWeChatMessageTime(
+    timestampMs: Long,
+    nowMs: Long = System.currentTimeMillis(),
+): String {
+    val date = Date(timestampMs)
+    val hm = SimpleDateFormat("HH:mm", Locale.getDefault()).format(date)
+
+    val msgCal = Calendar.getInstance().apply { timeInMillis = timestampMs }
+    val nowCal = Calendar.getInstance().apply { timeInMillis = nowMs }
+
+    val msgDayStart = (msgCal.clone() as Calendar).apply {
+        set(Calendar.HOUR_OF_DAY, 0)
+        set(Calendar.MINUTE, 0)
+        set(Calendar.SECOND, 0)
+        set(Calendar.MILLISECOND, 0)
+    }.timeInMillis
+
+    val nowDayStart = (nowCal.clone() as Calendar).apply {
+        set(Calendar.HOUR_OF_DAY, 0)
+        set(Calendar.MINUTE, 0)
+        set(Calendar.SECOND, 0)
+        set(Calendar.MILLISECOND, 0)
+    }.timeInMillis
+
+    val diffDays = ((nowDayStart - msgDayStart) / 86_400_000L).toInt()
+    return when {
+        diffDays == 0 -> hm
+        diffDays == 1 -> "昨天 $hm"
+        diffDays in 2..6 -> {
+            val weekdayIdx = (msgCal.get(Calendar.DAY_OF_WEEK) - Calendar.SUNDAY).coerceIn(0, 6)
+            "${WEEKDAY_LABELS[weekdayIdx]} $hm"
+        }
+        msgCal.get(Calendar.YEAR) == nowCal.get(Calendar.YEAR) -> {
+            val md = SimpleDateFormat("M月d日", Locale.getDefault()).format(date)
+            "$md $hm"
+        }
+        else -> {
+            val ymd = SimpleDateFormat("yyyy年M月d日", Locale.getDefault()).format(date)
+            "$ymd $hm"
+        }
+    }
 }

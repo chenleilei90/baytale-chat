@@ -4,6 +4,7 @@ import android.app.DownloadManager
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
@@ -390,37 +391,68 @@ object MediaDownloadHelper {
         }.getOrNull()
     }
 
-    // 安全打开本地路径或 content:// URI
-    fun openLocalFile(context: Context, localPath: String, mimeType: String): Boolean {
+    // 文件打开前探测结果：区分成功打开、本地文件丢失或无可用打开应用
+    enum class OpenFileResult {
+        OPENED,
+        FILE_NOT_FOUND,
+        NO_APP_FOUND,
+    }
+
+    // 安全打开本地路径或 content:// URI（返回详细状态以支持精确失败提示）
+    fun openLocalFileDetailed(context: Context, localPath: String, mimeType: String): OpenFileResult {
         if (localPath.startsWith("content://") || localPath.startsWith("file://")) {
-            return openContentUri(context, localPath, mimeType)
+            return openContentUriDetailed(context, localPath, mimeType)
         }
         val file = File(localPath)
-        if (!file.exists()) return false
-        return runCatching {
-            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
-            val intent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, mimeType.ifBlank { "*/*" })
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            context.startActivity(Intent.createChooser(intent, "打开文件").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-            true
+        if (!file.exists() || !file.isFile || !file.canRead()) {
+            return OpenFileResult.FILE_NOT_FOUND
+        }
+        val uri = runCatching {
+            FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+        }.getOrNull() ?: return OpenFileResult.FILE_NOT_FOUND
+        return launchViewIntent(context, uri, mimeType)
+    }
+
+    fun openContentUriDetailed(context: Context, uriString: String, mimeType: String): OpenFileResult {
+        val uri = runCatching { Uri.parse(uriString) }.getOrNull() ?: return OpenFileResult.FILE_NOT_FOUND
+        if (uri.scheme == "file" && uri.path != null) {
+            return openLocalFileDetailed(context, uri.path!!, mimeType)
+        }
+        val readable = runCatching {
+            context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { true } ?: false
         }.getOrDefault(false)
+        if (!readable) {
+            return OpenFileResult.FILE_NOT_FOUND
+        }
+        return launchViewIntent(context, uri, mimeType)
+    }
+
+    private fun launchViewIntent(context: Context, uri: Uri, mimeType: String): OpenFileResult {
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, mimeType.ifBlank { "*/*" })
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        val resolved = runCatching {
+            context.packageManager.resolveActivity(intent, PackageManager.MATCH_DEFAULT_ONLY)
+        }.getOrNull() ?: return OpenFileResult.NO_APP_FOUND
+        return if (runCatching {
+                context.startActivity(Intent.createChooser(intent, "打开文件").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                true
+            }.getOrDefault(false)
+        ) {
+            OpenFileResult.OPENED
+        } else {
+            OpenFileResult.NO_APP_FOUND
+        }
+    }
+
+    // 安全打开本地路径或 content:// URI
+    fun openLocalFile(context: Context, localPath: String, mimeType: String): Boolean {
+        return openLocalFileDetailed(context, localPath, mimeType) == OpenFileResult.OPENED
     }
 
     fun openContentUri(context: Context, uriString: String, mimeType: String): Boolean {
-        val uri = runCatching { Uri.parse(uriString) }.getOrNull() ?: return false
-        if (uri.scheme == "file" && uri.path != null) {
-            return openLocalFile(context, uri.path!!, mimeType)
-        }
-        return runCatching {
-            val intent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, mimeType.ifBlank { "*/*" })
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            context.startActivity(Intent.createChooser(intent, "打开文件").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-            true
-        }.getOrDefault(false)
+        return openContentUriDetailed(context, uriString, mimeType) == OpenFileResult.OPENED
     }
 
     fun shareUriOrPath(context: Context, uriOrPath: String, mimeType: String, title: String = "分享文件"): Boolean {

@@ -104,7 +104,7 @@ fun BayTextField(
                         .background(containerBg)
                         .padding(
                             horizontal = BaySpacing.md,
-                            vertical = if (singleLine) 0.dp else BaySpacing.md,
+                            vertical = if (singleLine) 8.dp else BaySpacing.md,
                         ),
                     verticalAlignment = if (singleLine) Alignment.CenterVertically else Alignment.Top,
                 ) {
@@ -129,7 +129,7 @@ fun BayTextField(
                                 text = placeholder,
                                 style = textStyle,
                                 color = colors.textTertiary,
-                                maxLines = if (singleLine) 1 else maxLines,
+                                maxLines = if (singleLine) 1 else resolvedMaxLines,
                                 overflow = TextOverflow.Ellipsis,
                             )
                         }

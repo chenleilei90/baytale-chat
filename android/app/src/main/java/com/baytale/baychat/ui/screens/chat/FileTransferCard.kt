@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Bolt
+import androidx.compose.material.icons.rounded.BrokenImage
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.CloudUpload
@@ -24,10 +25,14 @@ import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.FileOpen
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Share
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -37,7 +42,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import coil.compose.AsyncImage
+import coil.compose.SubcomposeAsyncImage
+import coil.compose.SubcomposeAsyncImageContent
 import com.baytale.baychat.core.model.ChatItem
 import com.baytale.baychat.core.model.CloudUploadStatus
 import com.baytale.baychat.core.model.FileTransferInfo
@@ -63,6 +69,8 @@ import java.util.Locale
 fun ImageMessageCard(
     item: ChatItem,
     imageHeaders: Map<String, String>,
+    snapshotTransferredBytes: Long? = null,
+    snapshotTotalBytes: Long? = null,
     onPreviewImage: () -> Unit,
     onCancelTransfer: (peerId: String, transferId: String) -> Unit,
     onRequestResend: () -> Unit,
@@ -76,6 +84,7 @@ fun ImageMessageCard(
         resolveImageModel(item)
     }
     val transfer = item.transfer
+    var retryNonce by remember(item.id) { mutableIntStateOf(0) }
 
     Column(
         modifier = modifier
@@ -86,22 +95,67 @@ fun ImageMessageCard(
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         if (imgModel != null) {
-            val request = remember(imgModel, imageHeaders) {
-                buildAuthedImageRequest(context, imgModel, imageHeaders)
+            val request = remember(imgModel, imageHeaders, retryNonce) {
+                buildAuthedImageRequest(context, imgModel, imageHeaders, retryNonce)
             }
-            AsyncImage(
+            SubcomposeAsyncImage(
                 model = request,
                 contentDescription = item.caption ?: "图片消息",
                 contentScale = ContentScale.Crop,
                 modifier = Modifier
-                    .bayClickable(onClick = onPreviewImage)
                     .fillMaxWidth()
                     .heightIn(min = 120.dp, max = 250.dp)
                     .clip(BayShapes.smShape),
+                loading = {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(150.dp)
+                            .background(colors.fill),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        CircularProgressIndicator(
+                            color = colors.accent,
+                            strokeWidth = 2.dp,
+                            modifier = Modifier.size(24.dp),
+                        )
+                    }
+                },
+                error = {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(140.dp)
+                            .bayClickable { retryNonce++ }
+                            .background(colors.fill)
+                            .padding(BaySpacing.md),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(BaySpacing.xs, Alignment.CenterVertically),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.BrokenImage,
+                            contentDescription = "图片加载失败",
+                            tint = colors.textSecondary,
+                            modifier = Modifier.size(26.dp),
+                        )
+                        Text(
+                            text = "加载失败，点击重试",
+                            style = BayType.caption,
+                            color = colors.textSecondary,
+                        )
+                    }
+                },
+                success = {
+                    SubcomposeAsyncImageContent(
+                        modifier = Modifier.bayClickable(onClick = onPreviewImage),
+                    )
+                },
             )
         } else {
-            val pct = if (transfer != null && transfer.fileSize > 0L) {
-                (transfer.transferredBytes.toFloat() / transfer.fileSize.toFloat()).coerceIn(0f, 1f)
+            val effectiveTotal = snapshotTotalBytes?.takeIf { it > 0L } ?: transfer?.fileSize ?: 0L
+            val effectiveTransferred = snapshotTransferredBytes ?: transfer?.transferredBytes ?: 0L
+            val pct = if (effectiveTotal > 0L) {
+                (effectiveTransferred.toFloat() / effectiveTotal.toFloat()).coerceIn(0f, 1f)
             } else {
                 0f
             }
@@ -202,6 +256,10 @@ fun ImageMessageCard(
 fun FileTransferCard(
     item: ChatItem,
     transfer: FileTransferInfo,
+    snapshotTransferredBytes: Long? = null,
+    snapshotTotalBytes: Long? = null,
+    snapshotSpeedBps: Long? = null,
+    snapshotEtaSeconds: Int? = null,
     onAccept: (peerId: String, transferId: String, resumeIfAvailable: Boolean) -> Unit,
     onReject: (peerId: String, transferId: String) -> Unit,
     onCancel: (peerId: String, transferId: String) -> Unit,
@@ -214,8 +272,12 @@ fun FileTransferCard(
 ) {
     val colors = BayTheme.colors
     val cardBg = if (colors.isDark) colors.surfaceElevated else colors.surface
-    val rawProgress = if (transfer.fileSize > 0L) {
-        (transfer.transferredBytes.toFloat() / transfer.fileSize.toFloat()).coerceIn(0f, 1f)
+    val effectiveTotalBytes = snapshotTotalBytes?.takeIf { it > 0L } ?: transfer.fileSize
+    val effectiveTransferredBytes = snapshotTransferredBytes ?: transfer.transferredBytes
+    val effectiveSpeedBps = snapshotSpeedBps?.toDouble() ?: transfer.speedBps
+    val effectiveEtaSeconds = snapshotEtaSeconds?.toDouble() ?: transfer.etaSeconds
+    val rawProgress = if (effectiveTotalBytes > 0L) {
+        (effectiveTransferredBytes.toFloat() / effectiveTotalBytes.toFloat()).coerceIn(0f, 1f)
     } else {
         1f
     }
@@ -229,6 +291,9 @@ fun FileTransferCard(
     val hasResume = transfer.canResumeBytes > 0L
     val peerId = transfer.targetPeerId?.takeIf { it.isNotBlank() } ?: item.senderId
     val canOpenLocal = !transfer.contentUri.isNullOrBlank() || !transfer.localPath.isNullOrBlank()
+    val (fileStem, fileExt) = remember(transfer.fileName) {
+        FormatUtils.splitFileNameAndExt(transfer.fileName)
+    }
 
     Column(
         modifier = modifier
@@ -250,17 +315,31 @@ fun FileTransferCard(
             )
 
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = transfer.fileName,
-                    style = BayType.callout.copy(fontWeight = FontWeight.SemiBold),
-                    color = colors.textPrimary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = fileStem,
+                        style = BayType.callout.copy(fontWeight = FontWeight.SemiBold),
+                        color = colors.textPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    if (fileExt.isNotEmpty()) {
+                        Text(
+                            text = fileExt,
+                            style = BayType.callout.copy(fontWeight = FontWeight.SemiBold),
+                            color = colors.textPrimary,
+                            maxLines = 1,
+                        )
+                    }
+                }
                 Spacer(modifier = Modifier.height(2.dp))
                 val sourceHint = buildFileSourceHint(transfer)
                 Text(
-                    text = "${FormatUtils.formatBytes(transfer.fileSize)} · $sourceHint",
+                    text = "${FormatUtils.formatBytes(effectiveTotalBytes)} · $sourceHint",
                     style = BayType.caption.copy(fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Normal),
                     color = colors.textSecondary,
                     maxLines = 1,
@@ -281,8 +360,8 @@ fun FileTransferCard(
                     Text(
                         text = when {
                             transfer.status == TransferStatus.WAITING_ACCEPT -> "等待对方确认接收..."
-                            transfer.transferredBytes == 0L -> "已确认，正在建立数据流..."
-                            else -> "$pctLabel% · ${FormatUtils.formatBytes(transfer.transferredBytes)} · ${FormatUtils.formatBytes(transfer.speedBps.toLong())}/s"
+                            effectiveTransferredBytes == 0L -> "已确认，正在建立数据流..."
+                            else -> "$pctLabel% · ${FormatUtils.formatBytes(effectiveTransferredBytes)} · ${FormatUtils.formatBytes(effectiveSpeedBps.toLong())}/s"
                         },
                         style = BayType.caption.copy(fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Normal),
                         color = colors.textSecondary,
@@ -290,14 +369,14 @@ fun FileTransferCard(
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f),
                     )
-                    if (transfer.status == TransferStatus.TRANSFERRING && transfer.speedBps > 0.0) {
-                        val eta = FormatUtils.formatEta(transfer.etaSeconds)
+                    if (transfer.status == TransferStatus.TRANSFERRING && effectiveSpeedBps > 0.0) {
+                        val eta = FormatUtils.formatEta(effectiveEtaSeconds)
                         if (eta.isNotEmpty()) {
                             Spacer(modifier = Modifier.width(BaySpacing.xs))
                             Text(
                                 text = eta,
                                 style = BayType.caption.copy(fontFamily = FontFamily.Monospace),
-                                color = colors.textTertiary,
+                                color = colors.textSecondary,
                             )
                         }
                     }

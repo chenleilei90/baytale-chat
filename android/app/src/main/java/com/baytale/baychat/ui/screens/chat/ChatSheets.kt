@@ -1,12 +1,18 @@
 package com.baytale.baychat.ui.screens.chat
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,13 +27,19 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ExitToApp
 import androidx.compose.material.icons.automirrored.rounded.Reply
 import androidx.compose.material.icons.rounded.Block
+import androidx.compose.material.icons.rounded.BrokenImage
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.DeleteForever
@@ -38,42 +50,54 @@ import androidx.compose.material.icons.rounded.Flag
 import androidx.compose.material.icons.rounded.FolderZip
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.MoreHoriz
+import androidx.compose.material.icons.rounded.NotificationsOff
 import androidx.compose.material.icons.rounded.PictureInPictureAlt
 import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.Undo
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import coil.compose.AsyncImage
+import coil.compose.SubcomposeAsyncImage
+import coil.compose.SubcomposeAsyncImageContent
 import com.baytale.baychat.core.model.ChatItem
 import com.baytale.baychat.core.model.ChatKind
 import com.baytale.baychat.core.model.LinkTransportType
 import com.baytale.baychat.core.model.PeerProfile
 import com.baytale.baychat.core.model.RoomMode
+import com.baytale.baychat.core.util.BayHaptic
 import com.baytale.baychat.core.util.FormatUtils
 import com.baytale.baychat.ui.ActiveRoomSession
 import com.baytale.baychat.ui.BayChatUiState
@@ -102,8 +126,6 @@ import com.baytale.baychat.ui.theme.BaySpacing
 import com.baytale.baychat.ui.theme.BayTheme
 import com.baytale.baychat.ui.theme.BayType
 
-private const val RECALL_TIMEOUT_MS = 5 * 60 * 1000L
-
 private val RETENTION_OPTIONS = listOf(
     0 to "阅后即焚",
     1 to "1 天",
@@ -127,15 +149,18 @@ private val MAX_FILE_OPTIONS = listOf(
 fun MessageActionSheet(
     item: ChatItem,
     selfPeerId: String,
+    hapticEnabled: Boolean,
     vm: BayChatViewModel,
+    onRequestDelete: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     val colors = BayTheme.colors
     val context = LocalContext.current
+    val view = LocalView.current
     val canRecall = item.isSelf &&
         item.kind != ChatKind.FILE &&
         item.kind != ChatKind.SYSTEM &&
-        (System.currentTimeMillis() - item.timestamp <= RECALL_TIMEOUT_MS)
+        (System.currentTimeMillis() - item.timestamp <= BayChatViewModel.RECALL_WINDOW_MS)
 
     val actions = buildList {
         add(
@@ -152,6 +177,7 @@ fun MessageActionSheet(
                     icon = Icons.Rounded.ContentCopy,
                     onClick = {
                         copyTextToClipboard(context, item.text)
+                        BayHaptic.confirm(view, hapticEnabled)
                         vm.showToast("已复制到剪贴板")
                     },
                 )
@@ -162,7 +188,11 @@ fun MessageActionSheet(
                 SheetAction(
                     label = "保存图片到相册",
                     icon = Icons.Rounded.Download,
-                    onClick = { vm.saveImageToGallery(item) },
+                    onClick = {
+                        if (vm.saveImageToGallery(item)) {
+                            BayHaptic.confirm(view, hapticEnabled)
+                        }
+                    },
                 )
             )
         }
@@ -182,6 +212,16 @@ fun MessageActionSheet(
                     icon = Icons.Rounded.Undo,
                     destructive = true,
                     onClick = { vm.recallMessage(item.id) },
+                )
+            )
+        }
+        if (item.kind != ChatKind.SYSTEM) {
+            add(
+                SheetAction(
+                    label = "删除",
+                    icon = Icons.Rounded.DeleteOutline,
+                    destructive = true,
+                    onClick = onRequestDelete,
                 )
             )
         }
@@ -248,11 +288,13 @@ fun MessageActionSheet(
 @Composable
 fun InviteSheet(
     room: ActiveRoomSession,
+    hapticEnabled: Boolean,
     vm: BayChatViewModel,
     onDismiss: () -> Unit,
 ) {
     val colors = BayTheme.colors
     val context = LocalContext.current
+    val view = LocalView.current
     val inviteUrl = remember(room.roomCode) { vm.buildInviteUrl(room.roomCode) }
     val qrBitmap = remember(inviteUrl) { FormatUtils.generateQrBitmap(inviteUrl, 560) }
 
@@ -270,6 +312,7 @@ fun InviteSheet(
             BayCard(
                 onClick = {
                     copyTextToClipboard(context, room.roomCode)
+                    BayHaptic.confirm(view, hapticEnabled)
                     vm.showToast("已复制房间口令 ${room.roomCode}")
                 },
                 modifier = Modifier.fillMaxWidth(),
@@ -324,6 +367,7 @@ fun InviteSheet(
                     text = "复制口令",
                     onClick = {
                         copyTextToClipboard(context, room.roomCode)
+                        BayHaptic.confirm(view, hapticEnabled)
                         vm.showToast("已复制房间口令")
                     },
                     style = BayButtonStyle.Neutral,
@@ -335,6 +379,7 @@ fun InviteSheet(
                     text = "复制链接",
                     onClick = {
                         copyTextToClipboard(context, inviteUrl)
+                        BayHaptic.confirm(view, hapticEnabled)
                         vm.showToast("已复制邀请链接")
                     },
                     style = BayButtonStyle.Secondary,
@@ -394,6 +439,7 @@ fun RoomSettingsSheet(
     onDismiss: () -> Unit,
 ) {
     val colors = BayTheme.colors
+    val focusManager = LocalFocusManager.current
     val isPasswordProtected = room.password.isNotBlank() || room.roomInfo?.hasPassword == true
     val effectiveMaxMB = vm.effectiveMaxFileMB()
     val modeLabel = if (room.roomInfo?.mode == RoomMode.FIXED.wireValue) "常驻房间" else "临时房间"
@@ -450,12 +496,27 @@ fun RoomSettingsSheet(
                                 value = draftTopic,
                                 onValueChange = { draftTopic = it },
                                 placeholder = "输入房间主题（可选）",
+                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+                                keyboardActions = KeyboardActions(
+                                    onNext = { focusManager.moveFocus(FocusDirection.Down) },
+                                ),
                             )
                             BayTextField(
                                 value = draftPassword,
                                 onValueChange = { draftPassword = it },
                                 placeholder = "输入新密码（留空则取消密码）",
                                 isPassword = true,
+                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                                keyboardActions = KeyboardActions(
+                                    onDone = {
+                                        focusManager.clearFocus()
+                                        vm.updateRoomProfile(
+                                            topic = draftTopic,
+                                            newPassword = draftPassword,
+                                        )
+                                        showProfileEditor = false
+                                    },
+                                ),
                             )
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -659,7 +720,18 @@ fun RoomSettingsSheet(
             }
 
             // 4. 聊天记录与挂起工具
+            val isMuted = room.roomCode.uppercase() in state.mutedRooms
             BayGroup(header = "记录与会话") {
+                BayListRow(
+                    icon = Icons.Rounded.NotificationsOff,
+                    title = "消息免打扰",
+                    subtitle = "开启后新消息不响铃与弹窗，仍接收文件确认提醒",
+                    trailing = RowTrailing.Switch(
+                        checked = isMuted,
+                        onChange = { vm.setRoomMuted(room.roomCode, it) },
+                    ),
+                    showDivider = true,
+                )
                 BayListRow(
                     icon = Icons.Rounded.Download,
                     title = "导出聊天记录",
@@ -788,105 +860,101 @@ fun RoomSettingsSheet(
 }
 
 /**
- * 全屏图片查看器（唯一允许使用 Color.Black 纯黑底色的组件）：支持双指缩放、双击放大与保存/分享原图。
+ * 全屏多图左右滑动浏览器（唯一允许使用 Color.Black 纯黑底色的组件）：
+ * 支持 HorizontalPager 左右切换、双指缩放、双击放大还原及当前页保存/分享原图。
  */
 @Composable
 fun ImageViewer(
-    item: ChatItem,
+    images: List<ChatItem>,
+    initialIndex: Int,
+    hapticEnabled: Boolean,
     imageHeaders: Map<String, String>,
-    onSave: () -> Unit,
-    onShare: () -> Unit,
+    onSave: (ChatItem) -> Boolean,
+    onShare: (ChatItem) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    val context = LocalContext.current
-    val model = remember(item.localFilePath, item.imageUrl, item.transfer?.localPath, item.transfer?.contentUri) {
-        resolveImageModel(item)
-    }
-    var scale by remember { mutableFloatStateOf(1f) }
-    var offset by remember { mutableStateOf(Offset.Zero) }
+    if (images.isEmpty()) return
+    val view = LocalView.current
+    val safeInitial = initialIndex.coerceIn(0, images.lastIndex)
+    val pagerState = rememberPagerState(initialPage = safeInitial, pageCount = { images.size })
     var showOverlay by remember { mutableStateOf(true) }
+    var currentPageScale by remember { mutableFloatStateOf(1f) }
 
     Dialog(
         onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false),
+        properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnBackPress = true),
     ) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color.Black)
-                .pointerInput(Unit) {
-                    detectTapGestures(
-                        onTap = { showOverlay = !showOverlay },
-                        onDoubleTap = {
-                            if (scale > 1.1f) {
-                                scale = 1f
-                                offset = Offset.Zero
-                            } else {
-                                scale = 2.4f
-                            }
-                        },
-                    )
-                }
-                .pointerInput(Unit) {
-                    detectTransformGestures { _, pan, zoom, _ ->
-                        val nextScale = (scale * zoom).coerceIn(1f, 4f)
-                        scale = nextScale
-                        offset = if (nextScale <= 1.01f) {
-                            Offset.Zero
-                        } else {
-                            offset + pan
-                        }
-                    }
-                },
-            contentAlignment = Alignment.Center,
+                .background(Color.Black),
         ) {
-            if (model != null) {
-                val request = remember(model, imageHeaders) {
-                    buildAuthedImageRequest(context, model, imageHeaders)
-                }
-                AsyncImage(
-                    model = request,
-                    contentDescription = item.caption ?: "图片预览",
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .graphicsLayer {
-                            scaleX = scale
-                            scaleY = scale
-                            translationX = offset.x
-                            translationY = offset.y
-                        },
+            HorizontalPager(
+                state = pagerState,
+                userScrollEnabled = currentPageScale <= 1.05f,
+                modifier = Modifier.fillMaxSize(),
+            ) { pageIndex ->
+                val pageItem = images[pageIndex]
+                val isCurrentPage = pagerState.currentPage == pageIndex
+                ZoomableGalleryPage(
+                    item = pageItem,
+                    isCurrentPage = isCurrentPage,
+                    imageHeaders = imageHeaders,
+                    onTap = { showOverlay = !showOverlay },
+                    onActiveScaleChanged = { activeScale ->
+                        if (isCurrentPage) {
+                            currentPageScale = activeScale
+                        }
+                    },
                 )
             }
 
-            // 顶部关闭按钮
+            // 顶部页码指示与关闭按钮
             AnimatedVisibility(
                 visible = showOverlay,
                 enter = fadeIn(),
                 exit = fadeOut(),
                 modifier = Modifier
-                    .align(Alignment.TopEnd)
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
                     .statusBarsPadding()
-                    .padding(BaySpacing.lg),
+                    .padding(horizontal = BaySpacing.lg, vertical = BaySpacing.lg),
             ) {
-                Box(
-                    modifier = Modifier
-                        .bayClickable(onClick = onDismiss)
-                        .size(40.dp)
-                        .clip(CircleShape)
-                        .background(Color.Black.copy(alpha = 0.55f)),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Close,
-                        contentDescription = "关闭图片查看器",
-                        tint = Color.White,
-                        modifier = Modifier.size(22.dp),
-                    )
+                Box(modifier = Modifier.fillMaxWidth()) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .clip(BayShapes.fullShape)
+                            .background(Color.Black.copy(alpha = 0.55f))
+                            .padding(horizontal = BaySpacing.md, vertical = 5.dp),
+                    ) {
+                        Text(
+                            text = "${pagerState.currentPage + 1} / ${images.size}",
+                            style = BayType.footnote.copy(fontFamily = FontFamily.Monospace),
+                            color = Color.White,
+                        )
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.CenterEnd)
+                            .bayClickable(onClick = onDismiss)
+                            .size(40.dp)
+                            .clip(CircleShape)
+                            .background(Color.Black.copy(alpha = 0.55f)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Close,
+                            contentDescription = "关闭图片查看器",
+                            tint = Color.White,
+                            modifier = Modifier.size(22.dp),
+                        )
+                    }
                 }
             }
 
-            // 底部保存与分享按钮栏
+            // 底部保存与分享按钮栏（始终作用于当前页图片）
             AnimatedVisibility(
                 visible = showOverlay,
                 enter = fadeIn(),
@@ -896,6 +964,7 @@ fun ImageViewer(
                     .navigationBarsPadding()
                     .padding(horizontal = BaySpacing.xl, vertical = BaySpacing.xl),
             ) {
+                val activeItem = images[pagerState.currentPage.coerceIn(0, images.lastIndex)]
                 Row(
                     modifier = Modifier
                         .clip(BayShapes.fullShape)
@@ -906,7 +975,11 @@ fun ImageViewer(
                 ) {
                     Row(
                         modifier = Modifier
-                            .bayClickable(onClick = onSave)
+                            .bayClickable {
+                                if (onSave(activeItem)) {
+                                    BayHaptic.confirm(view, hapticEnabled)
+                                }
+                            }
                             .clip(BayShapes.fullShape)
                             .padding(horizontal = BaySpacing.sm, vertical = BaySpacing.xs),
                         verticalAlignment = Alignment.CenterVertically,
@@ -927,7 +1000,7 @@ fun ImageViewer(
 
                     Row(
                         modifier = Modifier
-                            .bayClickable(onClick = onShare)
+                            .bayClickable { onShare(activeItem) }
                             .clip(BayShapes.fullShape)
                             .padding(horizontal = BaySpacing.sm, vertical = BaySpacing.xs),
                         verticalAlignment = Alignment.CenterVertically,
@@ -947,6 +1020,194 @@ fun ImageViewer(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun ZoomableGalleryPage(
+    item: ChatItem,
+    isCurrentPage: Boolean,
+    imageHeaders: Map<String, String>,
+    onTap: () -> Unit,
+    onActiveScaleChanged: (Float) -> Unit,
+) {
+    val context = LocalContext.current
+    val model = remember(item.localFilePath, item.imageUrl, item.transfer?.localPath, item.transfer?.contentUri) {
+        resolveImageModel(item)
+    }
+    var scale by remember(item.id) { mutableFloatStateOf(1f) }
+    var offset by remember(item.id) { mutableStateOf(Offset.Zero) }
+    var retryNonce by remember(item.id) { mutableIntStateOf(0) }
+
+    // 切走页面时自动还原缩放态，并向父级同步当前页缩放比例
+    LaunchedEffect(isCurrentPage, scale) {
+        if (!isCurrentPage && scale != 1f) {
+            scale = 1f
+            offset = Offset.Zero
+        } else if (isCurrentPage) {
+            onActiveScaleChanged(scale)
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .pointerInput(item.id) {
+                detectTapGestures(
+                    onTap = { onTap() },
+                    onDoubleTap = {
+                        if (scale > 1.1f) {
+                            scale = 1f
+                            offset = Offset.Zero
+                        } else {
+                            scale = 2.4f
+                        }
+                        onActiveScaleChanged(scale)
+                    },
+                )
+            }
+            .pointerInput(item.id) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    do {
+                        val event = awaitPointerEvent()
+                        val pointerCount = event.changes.count { it.pressed }
+                        val zoomChange = event.calculateZoom()
+                        val panChange = event.calculatePan()
+
+                        if (pointerCount >= 2) {
+                            val nextScale = (scale * zoomChange).coerceIn(1f, 4f)
+                            scale = nextScale
+                            offset = if (nextScale <= 1.02f) Offset.Zero else offset + panChange
+                            onActiveScaleChanged(nextScale)
+                            event.changes.forEach { if (it.positionChanged()) it.consume() }
+                        } else if (scale > 1.05f && pointerCount == 1) {
+                            offset += panChange
+                            event.changes.forEach { if (it.positionChanged()) it.consume() }
+                        }
+                    } while (event.changes.any { it.pressed })
+                }
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        if (model != null) {
+            val request = remember(model, imageHeaders, retryNonce) {
+                buildAuthedImageRequest(context, model, imageHeaders, retryNonce)
+            }
+            SubcomposeAsyncImage(
+                model = request,
+                contentDescription = item.caption ?: "图片预览",
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxSize(),
+                loading = {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        CircularProgressIndicator(
+                            color = Color.White,
+                            strokeWidth = 2.5.dp,
+                            modifier = Modifier.size(32.dp),
+                        )
+                    }
+                },
+                error = {
+                    Column(
+                        modifier = Modifier
+                            .bayClickable { retryNonce++ }
+                            .clip(BayShapes.mdShape)
+                            .background(Color.White.copy(alpha = 0.12f))
+                            .padding(horizontal = BaySpacing.xl, vertical = BaySpacing.lg),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(BaySpacing.sm),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.BrokenImage,
+                            contentDescription = "图片加载失败",
+                            tint = Color.White,
+                            modifier = Modifier.size(32.dp),
+                        )
+                        Text(
+                            text = "加载失败，点击重试",
+                            style = BayType.footnote,
+                            color = Color.White,
+                        )
+                    }
+                },
+                success = {
+                    SubcomposeAsyncImageContent(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer {
+                                scaleX = scale
+                                scaleY = scale
+                                translationX = offset.x
+                                translationY = offset.y
+                            },
+                    )
+                },
+            )
+        }
+    }
+}
+
+/**
+ * 双击文本气泡后的全屏阅读弹窗：纯色表面承托，支持长按选择复制部分文字、点击空白处或返回键关闭。
+ */
+@Composable
+fun TextFullscreenReader(
+    text: String,
+    onDismiss: () -> Unit,
+) {
+    val colors = BayTheme.colors
+    val blankInteraction = remember { MutableInteractionSource() }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnBackPress = true),
+    ) {
+        BackHandler(onBack = onDismiss)
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(colors.surface)
+                .statusBarsPadding()
+                .navigationBarsPadding()
+                .clickable(
+                    interactionSource = blankInteraction,
+                    indication = null,
+                    onClick = onDismiss,
+                ),
+        ) {
+            // 可滚动居中文本阅读区（支持部分选中复制）
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = BaySpacing.xxl, vertical = 64.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                SelectionContainer {
+                    Text(
+                        text = text,
+                        style = BayType.title2,
+                        color = colors.textPrimary,
+                        textAlign = TextAlign.Start,
+                    )
+                }
+            }
+
+            BayIconButton(
+                icon = Icons.Rounded.Close,
+                contentDescription = "关闭全屏阅读",
+                onClick = onDismiss,
+                style = BayIconStyle.Filled,
+                size = 36.dp,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(BaySpacing.lg),
+            )
         }
     }
 }

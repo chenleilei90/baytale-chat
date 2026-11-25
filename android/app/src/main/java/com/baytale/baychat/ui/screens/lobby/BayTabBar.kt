@@ -10,9 +10,9 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -86,7 +86,7 @@ fun BayTabBar(
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()
-                .height(48.dp)
+                .heightIn(min = 48.dp)
                 .padding(horizontal = BaySpacing.xs),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -106,7 +106,8 @@ fun BayTabBar(
                 Column(
                     modifier = Modifier
                         .weight(1f)
-                        .fillMaxHeight()
+                        .heightIn(min = 48.dp)
+                        .padding(vertical = BaySpacing.xs)
                         .clickable(
                             interactionSource = interactionSource,
                             indication = null,

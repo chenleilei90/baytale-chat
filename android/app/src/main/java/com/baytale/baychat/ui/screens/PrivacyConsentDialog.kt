@@ -57,7 +57,7 @@ fun PrivacyConsentDialog(
             Text(
                 text = "点击「同意并继续」即表示您理解并同意上述隐私说明与使用规范。",
                 style = BayType.caption,
-                color = colors.textTertiary,
+                color = colors.textSecondary,
             )
         }
     }

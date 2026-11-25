@@ -15,6 +15,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.NotificationsOff
 import androidx.compose.material.icons.rounded.QrCode2
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Tune
@@ -43,6 +44,7 @@ import com.baytale.baychat.ui.theme.BayType
 @Composable
 fun ChatTopBar(
     room: ActiveRoomSession,
+    isMuted: Boolean,
     searchActive: Boolean,
     hasQuickSwitchTargets: Boolean,
     onMinimize: () -> Unit,
@@ -122,6 +124,14 @@ fun ChatTopBar(
                             imageVector = Icons.Rounded.Lock,
                             contentDescription = "已加密",
                             tint = colors.accent,
+                            modifier = Modifier.size(14.dp),
+                        )
+                    }
+                    if (isMuted) {
+                        Icon(
+                            imageVector = Icons.Rounded.NotificationsOff,
+                            contentDescription = "消息免打扰",
+                            tint = colors.textTertiary,
                             modifier = Modifier.size(14.dp),
                         )
                     }

@@ -71,6 +71,7 @@ class TransferForegroundService : Service() {
         runCatching {
             IncomingNotificationHelper.ensureChannel(this)
             val openIntent = Intent(this, MainActivity::class.java).apply {
+                action = ACTION_RESTORE_ACTIVE_ROOM
                 flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
             }
             val pi = PendingIntent.getActivity(
@@ -150,6 +151,7 @@ class TransferForegroundService : Service() {
     private fun buildNotification(title: String, text: String, progress: Int): Notification {
         ensureChannel(this)
         val openIntent = Intent(this, MainActivity::class.java).apply {
+            action = ACTION_RESTORE_ACTIVE_ROOM
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
         val pi = PendingIntent.getActivity(
@@ -176,6 +178,7 @@ class TransferForegroundService : Service() {
 
     companion object {
         const val CHANNEL_ID = "baychat_transfer_channel"
+        const val ACTION_RESTORE_ACTIVE_ROOM = IncomingNotificationHelper.ACTION_RESTORE_ACTIVE_ROOM
         private const val NOTIFICATION_ID = 10086
         private const val NOTIFICATION_ID_TIMEOUT = 10087
         private const val ACTION_UPDATE = "com.baytale.baychat.action.UPDATE"

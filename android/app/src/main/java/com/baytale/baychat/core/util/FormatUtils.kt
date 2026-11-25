@@ -128,6 +128,35 @@ object FormatUtils {
         return trimmed.lowercase(Locale.ROOT)
     }
 
+    // UX-23：安全拆分文件名与扩展名，供 UI 做中间省略布局并保证扩展名完整可见
+    fun splitFileNameAndExt(name: String): Pair<String, String> {
+        val lastDot = name.lastIndexOf('.')
+        if (lastDot <= 0 || lastDot >= name.length - 1) {
+            return name to ""
+        }
+        val ext = name.substring(lastDot + 1)
+        if (ext.length > 8 || !ext.all { it.isLetterOrDigit() }) {
+            return name to ""
+        }
+        return name.substring(0, lastDot) to name.substring(lastDot)
+    }
+
+    // UX-24：严格从剪贴板提取合法房间码（仅匹配已知邀请链接或纯粹房间码格式，拒绝普通中文长句）
+    fun extractValidRoomCodeFromClipboard(raw: String): String? {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty()) return null
+        val codePattern = Regex("^[a-zA-Z0-9_-]{2,32}$")
+        if (codePattern.matches(trimmed)) {
+            return trimmed.lowercase(Locale.ROOT)
+        }
+        val looksLikeInviteLink = trimmed.contains("baychat://", ignoreCase = true) ||
+            trimmed.contains("?room=", ignoreCase = true) ||
+            trimmed.contains("/r/", ignoreCase = true)
+        if (!looksLikeInviteLink) return null
+        val extracted = extractRoomCode(trimmed)
+        return if (codePattern.matches(extracted)) extracted else null
+    }
+
     // 兼容旧版网页端防窥密信前缀，避免历史缓存展示乱码
     fun decodeLegacySecret(raw: String?): String {
         val text = raw ?: return ""

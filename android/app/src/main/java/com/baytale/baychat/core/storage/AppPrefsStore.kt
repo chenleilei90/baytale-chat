@@ -386,7 +386,116 @@ class AppPrefsStore(context: Context) {
         }
     }
 
+    // 按房间保存输入草稿（最近最多保留 20 个房间，roomCode 统一大写规范化）
+    fun loadRoomDrafts(): Map<String, String> {
+        val raw = sp.getString(KEY_ROOM_DRAFTS, null) ?: return emptyMap()
+        return runCatching {
+            val decoded = json.decodeFromString(MapSerializer(String.serializer(), String.serializer()), raw)
+            val normalized = linkedMapOf<String, String>()
+            decoded.forEach { (k, v) ->
+                val cleanKey = k.trim().uppercase()
+                if (cleanKey.isNotEmpty() && v.isNotEmpty()) {
+                    normalized[cleanKey] = v
+                }
+            }
+            normalized.toMap()
+        }.getOrDefault(emptyMap())
+    }
+
+    fun saveRoomDraft(roomCode: String, text: String): Map<String, String> {
+        val key = roomCode.trim().uppercase()
+        if (key.isEmpty()) return loadRoomDrafts()
+        val map = LinkedHashMap(loadRoomDrafts())
+        map.remove(key)
+        if (text.isNotEmpty()) {
+            map[key] = text
+        }
+        while (map.size > MAX_ROOM_DRAFTS) {
+            val oldestKey = map.keys.firstOrNull() ?: break
+            map.remove(oldestKey)
+        }
+        if (map.isEmpty()) {
+            sp.edit().remove(KEY_ROOM_DRAFTS).apply()
+        } else {
+            sp.edit()
+                .putString(KEY_ROOM_DRAFTS, json.encodeToString(MapSerializer(String.serializer(), String.serializer()), map))
+                .apply()
+        }
+        return map.toMap()
+    }
+
+    // 按房间保存消息免打扰开关（roomCode 统一大写规范化）
+    fun loadMutedRooms(): Set<String> {
+        val raw = sp.getString(KEY_MUTED_ROOMS, null) ?: return emptySet()
+        return runCatching {
+            json.decodeFromString(ListSerializer(String.serializer()), raw)
+                .map { it.trim().uppercase() }
+                .filter { it.isNotEmpty() }
+                .toSet()
+        }.getOrDefault(emptySet())
+    }
+
+    fun setRoomMuted(code: String, muted: Boolean): Set<String> {
+        val key = code.trim().uppercase()
+        if (key.isEmpty()) return loadMutedRooms()
+        val next = loadMutedRooms().toMutableSet()
+        if (muted) next.add(key) else next.remove(key)
+        if (next.isEmpty()) {
+            sp.edit().remove(KEY_MUTED_ROOMS).apply()
+        } else {
+            sp.edit()
+                .putString(KEY_MUTED_ROOMS, json.encodeToString(ListSerializer(String.serializer()), next.toList()))
+                .apply()
+        }
+        return next.toSet()
+    }
+
+    // UX-10：低内存相机拍照临时 URI 持久化，防止系统杀进程后冷启动丢失拍摄结果
+    fun savePendingCameraCapture(roomCode: String, uriString: String) {
+        val key = roomCode.trim().uppercase()
+        if (key.isEmpty() || uriString.isBlank()) return
+        val payload = listOf(key, System.currentTimeMillis().toString(), uriString.trim())
+        sp.edit()
+            .putString(KEY_PENDING_CAMERA_CAPTURE, json.encodeToString(ListSerializer(String.serializer()), payload))
+            .apply()
+    }
+
+    fun peekPendingCameraCapture(roomCode: String): String? {
+        val raw = sp.getString(KEY_PENDING_CAMERA_CAPTURE, null) ?: return null
+        val list = runCatching {
+            json.decodeFromString(ListSerializer(String.serializer()), raw)
+        }.getOrNull() ?: run {
+            clearPendingCameraCapture()
+            return null
+        }
+        if (list.size < 3) {
+            clearPendingCameraCapture()
+            return null
+        }
+        val savedCode = list[0]
+        val savedAt = list[1].toLongOrNull() ?: 0L
+        val savedUri = list[2]
+        val ageMs = System.currentTimeMillis() - savedAt
+        if (ageMs !in 0L..PENDING_CAMERA_TTL_MS || savedUri.isBlank()) {
+            clearPendingCameraCapture()
+            return null
+        }
+        return if (savedCode.equals(roomCode.trim(), ignoreCase = true)) savedUri else null
+    }
+
+    fun consumePendingCameraCapture(roomCode: String): String? {
+        val matched = peekPendingCameraCapture(roomCode) ?: return null
+        clearPendingCameraCapture()
+        return matched
+    }
+
+    fun clearPendingCameraCapture() {
+        sp.edit().remove(KEY_PENDING_CAMERA_CAPTURE).apply()
+    }
+
     companion object {
+        private const val MAX_ROOM_DRAFTS = 20
+        private const val PENDING_CAMERA_TTL_MS = 30L * 60L * 1000L
         private const val KEY_PRIVACY_ACCEPTED = "privacy_accepted_v1"
         private const val KEY_PROFILE = "user_profile"
         private const val KEY_THEME_V2 = "theme_mode_v2"
@@ -412,5 +521,8 @@ class AppPrefsStore(context: Context) {
         private const val KEY_BLOCKED_CLIENTS = "blocked_clients_v1"
         private const val KEY_MY_PICKUPS = "my_pickups_v1"
         private const val KEY_LAST_ACTIVE_ROOM = "last_active_room_v1"
+        private const val KEY_ROOM_DRAFTS = "room_drafts_v1"
+        private const val KEY_MUTED_ROOMS = "muted_rooms_v1"
+        private const val KEY_PENDING_CAMERA_CAPTURE = "pending_camera_capture_v1"
     }
 }

@@ -1,34 +1,39 @@
 package com.baytale.baychat.ui.screens.chat
 
 import android.Manifest
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Reply
 import androidx.compose.material.icons.automirrored.rounded.Send
@@ -47,25 +52,39 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import com.baytale.baychat.core.model.PeerProfile
 import com.baytale.baychat.core.model.ReplyQuote
+import com.baytale.baychat.core.util.BayHaptic
 import com.baytale.baychat.ui.BayChatUiState
 import com.baytale.baychat.ui.BayChatViewModel
-import com.baytale.baychat.ui.design.BayButton
-import com.baytale.baychat.ui.design.BayButtonSize
-import com.baytale.baychat.ui.design.BayButtonStyle
+import com.baytale.baychat.ui.design.BayAvatar
+import com.baytale.baychat.ui.design.BayDialog
 import com.baytale.baychat.ui.design.BayIconButton
 import com.baytale.baychat.ui.design.BayIconStyle
 import com.baytale.baychat.ui.design.BayTextField
@@ -74,31 +93,65 @@ import com.baytale.baychat.ui.theme.BayShapes
 import com.baytale.baychat.ui.theme.BaySpacing
 import com.baytale.baychat.ui.theme.BayTheme
 import com.baytale.baychat.ui.theme.BayType
+import kotlin.coroutines.cancellation.CancellationException
 
 /**
- * 底部聊天输入区：支持文字输入、语音录制与波形状态、引用回复、相册/拍照/文件/文件夹/剪贴板附件面板。
+ * 底部聊天输入区：支持文字输入、微信式按住说话/上滑取消语音录制、@提及选择、引用回复与多模态附件面板。
  */
 @Composable
 fun Composer(
     state: BayChatUiState,
+    roomCode: String,
+    peers: List<PeerProfile>,
+    inputText: String,
+    onInputTextChange: (String) -> Unit,
+    voiceMode: Boolean,
+    onVoiceModeChange: (Boolean) -> Unit,
+    showAttachmentPanel: Boolean,
+    onShowAttachmentPanelChange: (Boolean) -> Unit,
+    inputFocusRequester: FocusRequester,
     replyingTo: ReplyQuote?,
     vm: BayChatViewModel,
+    onVoiceCancellingChanged: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val colors = BayTheme.colors
     val context = LocalContext.current
+    val view = LocalView.current
+    val haptic = LocalHapticFeedback.current
+    val density = LocalDensity.current
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
 
-    var inputText by rememberSaveable { mutableStateOf("") }
-    var voiceMode by rememberSaveable { mutableStateOf(false) }
-    var showAttachmentPanel by remember { mutableStateOf(false) }
     var pendingCameraUri by rememberSaveable { mutableStateOf<Uri?>(null) }
+    var cameraPermAsked by rememberSaveable { mutableStateOf(false) }
+    var audioPermAsked by rememberSaveable { mutableStateOf(false) }
+    var permSettingsGuide by rememberSaveable { mutableStateOf<String?>(null) }
+
+    // 解析末尾 @提及 关键词与候选在线成员
+    val mentionQuery = remember(inputText, voiceMode) {
+        if (voiceMode) null else extractMentionQuery(inputText)
+    }
+    val mentionCandidates = remember(mentionQuery, peers) {
+        val q = mentionQuery ?: return@remember emptyList()
+        if (peers.isEmpty()) return@remember emptyList()
+        peers.filter { q.isEmpty() || it.name.contains(q, ignoreCase = true) }
+    }
+
+    // 语音按住/取消态（供按钮视觉与底层指针循环共享）
+    var isPressingVoice by remember { mutableStateOf(false) }
+    var isCancellingVoice by remember { mutableStateOf(false) }
+    val latestIsRecording by rememberUpdatedState(state.isRecordingVoice)
+    val latestHapticEnabled by rememberUpdatedState(state.prefs.hapticEnabled)
+    val latestOnCancellingChanged by rememberUpdatedState(onVoiceCancellingChanged)
+    val cancelThresholdPx = remember(density) { with(density) { 80.dp.toPx() } }
 
     // 1. 多文件选择器（SAF 零权限）
     val filePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments(),
     ) { uris ->
         if (uris.isNotEmpty()) {
-            showAttachmentPanel = false
+            onShowAttachmentPanelChange(false)
             vm.sendUris(uris)
         }
     }
@@ -108,7 +161,7 @@ fun Composer(
         contract = ActivityResultContracts.PickMultipleVisualMedia(maxItems = 20),
     ) { uris ->
         if (uris.isNotEmpty()) {
-            showAttachmentPanel = false
+            onShowAttachmentPanelChange(false)
             vm.sendUris(uris)
         }
     }
@@ -120,7 +173,7 @@ fun Composer(
         val uri = pendingCameraUri
         pendingCameraUri = null
         if (success && uri != null) {
-            showAttachmentPanel = false
+            onShowAttachmentPanelChange(false)
             vm.sendUris(listOf(uri))
         }
     }
@@ -133,7 +186,15 @@ fun Composer(
             pendingCameraUri = uri
             takePictureLauncher.launch(uri)
         } else {
-            vm.showToast("请先授予相机权限后再拍照")
+            val activity = context.findActivity()
+            val canAskAgain = activity != null &&
+                ActivityCompat.shouldShowRequestPermissionRationale(activity, Manifest.permission.CAMERA)
+            if (cameraPermAsked && !canAskAgain) {
+                permSettingsGuide = "camera"
+            } else {
+                cameraPermAsked = true
+                vm.showToast("请先授予相机权限后再拍照")
+            }
         }
     }
 
@@ -142,19 +203,27 @@ fun Composer(
         contract = ActivityResultContracts.OpenDocumentTree(),
     ) { treeUri ->
         if (treeUri != null) {
-            showAttachmentPanel = false
+            onShowAttachmentPanelChange(false)
             vm.sendFolder(treeUri)
         }
     }
 
-    // 5. 麦克风录音权限
+    // 5. 麦克风录音权限（授权后仅提示用户按住说话，不在回调中自动启动录音；永久拒绝则引导系统设置）
     val audioPermLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
     ) { granted ->
         if (granted) {
-            vm.startVoiceRecording()
+            vm.showToast("已授予麦克风权限，请按住说话")
         } else {
-            vm.showToast("请先授予麦克风权限后再录制语音")
+            val activity = context.findActivity()
+            val canAskAgain = activity != null &&
+                ActivityCompat.shouldShowRequestPermissionRationale(activity, Manifest.permission.RECORD_AUDIO)
+            if (audioPermAsked && !canAskAgain) {
+                permSettingsGuide = "audio"
+            } else {
+                audioPermAsked = true
+                vm.showToast("请先授予麦克风权限后再录制语音")
+            }
         }
     }
 
@@ -172,23 +241,11 @@ fun Composer(
         }
     }
 
-    fun triggerVoiceRecordStart() {
-        val granted = ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.RECORD_AUDIO,
-        ) == PackageManager.PERMISSION_GRANTED
-        if (granted) {
-            vm.startVoiceRecording()
-        } else {
-            audioPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
-        }
-    }
-
+    // 注意：外层 ChatRoomScreen 已统一应用 WindowInsets.ime.union(WindowInsets.navigationBars)，此处不重复加 navigationBarsPadding
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .background(colors.surface)
-            .navigationBarsPadding(),
+            .background(colors.surface),
     ) {
         // 顶部分隔发丝线
         Box(
@@ -198,7 +255,52 @@ fun Composer(
                 .background(colors.separator),
         )
 
-        // 引用回复预览条
+        // @提及 在线成员快速选择浮层（输入 @ 或 @关键词 且存在匹配成员时弹出）
+        AnimatedVisibility(
+            visible = mentionCandidates.isNotEmpty(),
+            enter = expandVertically() + fadeIn(),
+            exit = shrinkVertically() + fadeOut(),
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = BaySpacing.md, end = BaySpacing.md, top = BaySpacing.sm)
+                    .shadow(elevation = 4.dp, shape = BayShapes.mdShape, clip = false)
+                    .clip(BayShapes.mdShape)
+                    .background(colors.surfaceElevated)
+                    .heightIn(max = 180.dp)
+                    .verticalScroll(rememberScrollState())
+                    .padding(vertical = BaySpacing.xs),
+            ) {
+                mentionCandidates.forEach { peer ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .bayClickable {
+                                val updated = replaceTrailingMention(inputText, peer.name)
+                                onInputTextChange(updated)
+                                vm.updateDraft(roomCode, updated)
+                                vm.onDraftTypingChanged(updated.isNotBlank())
+                            }
+                            .padding(horizontal = BaySpacing.md, vertical = BaySpacing.sm),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(BaySpacing.sm),
+                    ) {
+                        BayAvatar(emojiId = peer.avatar, size = 28.dp)
+                        Text(
+                            text = peer.name,
+                            style = BayType.callout,
+                            color = colors.textPrimary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                }
+            }
+        }
+
+        // 引用回复预览条（取消按钮保证 >= 44.dp 触摸热区）
         AnimatedVisibility(
             visible = replyingTo != null,
             enter = expandVertically() + fadeIn(),
@@ -211,7 +313,7 @@ fun Composer(
                         .padding(start = BaySpacing.md, end = BaySpacing.md, top = BaySpacing.sm)
                         .clip(BayShapes.smShape)
                         .background(colors.fill)
-                        .padding(horizontal = BaySpacing.md, vertical = 7.dp),
+                        .padding(start = BaySpacing.md, end = BaySpacing.xs, top = 2.dp, bottom = 2.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(BaySpacing.sm),
                 ) {
@@ -236,97 +338,198 @@ fun Composer(
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f),
                     )
-                    BayIconButton(
-                        icon = Icons.Rounded.Close,
-                        contentDescription = "取消引用",
-                        onClick = { vm.setReplyingTo(null) },
-                        style = BayIconStyle.Plain,
-                        size = 24.dp,
-                    )
+                    Box(
+                        modifier = Modifier
+                            .defaultMinSize(minWidth = 44.dp, minHeight = 44.dp)
+                            .bayClickable { vm.setReplyingTo(null) },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Close,
+                            contentDescription = "取消引用",
+                            tint = colors.textSecondary,
+                            modifier = Modifier.size(16.dp),
+                        )
+                    }
                 }
             }
         }
 
-        // 主输入栏或语音录制面板
-        if (state.isRecordingVoice) {
-            RecordingStatusBar(
-                durationMs = state.voiceRecordDurationMs,
-                onCancel = { vm.cancelVoiceRecording() },
-                onSend = { vm.stopVoiceRecording(send = true) },
-            )
-        } else {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = BaySpacing.md, vertical = BaySpacing.sm),
-                verticalAlignment = Alignment.Bottom,
-                horizontalArrangement = Arrangement.spacedBy(BaySpacing.sm),
-            ) {
-                // 语音 / 键盘模式切换按钮
-                BayIconButton(
-                    icon = if (voiceMode) Icons.Rounded.Keyboard else Icons.Rounded.Mic,
-                    contentDescription = if (voiceMode) "切回键盘输入" else "切换到语音输入",
-                    onClick = {
-                        voiceMode = !voiceMode
-                        if (voiceMode) showAttachmentPanel = false
-                    },
-                    style = if (voiceMode) BayIconStyle.Accent else BayIconStyle.Filled,
-                    size = 40.dp,
-                    modifier = Modifier.padding(bottom = 4.dp),
-                )
-
-                if (voiceMode) {
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .bayClickable(onClick = ::triggerVoiceRecordStart)
-                            .height(48.dp)
-                            .clip(BayShapes.smShape)
-                            .background(colors.fill),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Mic,
-                                contentDescription = null,
-                                tint = colors.accent,
-                                modifier = Modifier.size(18.dp),
-                            )
-                            Text(
-                                text = "点击开始录制语音（最长 60 秒）",
-                                style = BayType.callout.copy(fontWeight = FontWeight.Medium),
-                                color = colors.textPrimary,
-                            )
-                        }
+        // 主输入栏（语音按住说话按钮保持常驻在位，确保录音中不会卸载而中断指针捕获）
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = BaySpacing.md, vertical = BaySpacing.sm),
+            verticalAlignment = Alignment.Bottom,
+            horizontalArrangement = Arrangement.spacedBy(BaySpacing.sm),
+        ) {
+            // 语音 / 键盘模式切换按钮（切至语音时同步隐藏软键盘并收起面板）
+            BayIconButton(
+                icon = if (voiceMode) Icons.Rounded.Keyboard else Icons.Rounded.Mic,
+                contentDescription = if (voiceMode) "切回键盘输入" else "切换到语音输入",
+                onClick = {
+                    val next = !voiceMode
+                    onVoiceModeChange(next)
+                    if (next) {
+                        onShowAttachmentPanelChange(false)
+                        focusManager.clearFocus()
+                        keyboardController?.hide()
                     }
-                } else {
-                    BayTextField(
-                        value = inputText,
-                        onValueChange = { next ->
-                            inputText = next
-                            vm.onDraftTypingChanged(next.isNotBlank())
-                        },
-                        placeholder = "输入消息...",
-                        singleLine = false,
-                        maxLines = 4,
-                        modifier = Modifier.weight(1f),
+                },
+                style = if (voiceMode) BayIconStyle.Accent else BayIconStyle.Filled,
+                size = 40.dp,
+                enabled = !state.isRecordingVoice,
+                modifier = Modifier
+                    .defaultMinSize(minWidth = 44.dp, minHeight = 44.dp)
+                    .padding(bottom = 2.dp),
+            )
+
+            if (voiceMode) {
+                val activeRecordingUi = isPressingVoice || state.isRecordingVoice
+                val holdBg = when {
+                    activeRecordingUi && isCancellingVoice -> colors.danger.copy(
+                        alpha = if (colors.isDark) 0.26f else 0.14f,
                     )
+                    activeRecordingUi -> colors.fillStrong
+                    else -> colors.fill
+                }
+                val holdLabel = when {
+                    activeRecordingUi && isCancellingVoice -> "松开 取消"
+                    activeRecordingUi -> "松开 结束"
+                    else -> "按住 说话"
+                }
+                val holdTextColor = when {
+                    activeRecordingUi && isCancellingVoice -> colors.danger
+                    else -> colors.textPrimary
                 }
 
-                // 发送按钮（文本非空）或加号附件展开按钮
-                if (!voiceMode && inputText.isNotBlank()) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(48.dp)
+                        .clip(BayShapes.smShape)
+                        .background(holdBg)
+                        .pointerInput(cancelThresholdPx) {
+                            awaitEachGesture {
+                                val down = awaitFirstDown(requireUnconsumed = false)
+                                val granted = ContextCompat.checkSelfPermission(
+                                    context,
+                                    Manifest.permission.RECORD_AUDIO,
+                                ) == PackageManager.PERMISSION_GRANTED
+                                if (!granted) {
+                                    audioPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                    return@awaitEachGesture
+                                }
+
+                                down.consume()
+                                BayHaptic.heavy(haptic, latestHapticEnabled)
+                                isPressingVoice = true
+                                isCancellingVoice = false
+                                latestOnCancellingChanged(false)
+
+                                val started = vm.startVoiceRecording()
+                                if (!started) {
+                                    isPressingVoice = false
+                                    isCancellingVoice = false
+                                    latestOnCancellingChanged(false)
+                                    return@awaitEachGesture
+                                }
+
+                                try {
+                                    while (true) {
+                                        val event = awaitPointerEvent()
+                                        val change = event.changes.firstOrNull { it.id == down.id }
+                                        if (change == null) {
+                                            if (latestIsRecording) {
+                                                vm.cancelVoiceRecording()
+                                            }
+                                            break
+                                        }
+
+                                        if (!change.pressed) {
+                                            val normalRelease = (event.type == PointerEventType.Release ||
+                                                change.changedToUpIgnoreConsumed()) && !change.isConsumed
+                                            change.consume()
+                                            if (!normalRelease || isCancellingVoice) {
+                                                if (latestIsRecording) {
+                                                    vm.cancelVoiceRecording()
+                                                }
+                                            } else if (latestIsRecording) {
+                                                // 若 60 秒已到期自动发送使 isRecordingVoice 变为 false，此处不再重复发送
+                                                vm.stopVoiceRecording(send = true)
+                                            }
+                                            break
+                                        }
+
+                                        val dyUp = down.position.y - change.position.y
+                                        val nextCancel = dyUp > cancelThresholdPx
+                                        if (nextCancel != isCancellingVoice) {
+                                            isCancellingVoice = nextCancel
+                                            latestOnCancellingChanged(nextCancel)
+                                            // UX-29：进出取消阈值均触发一次轻触感提示
+                                            BayHaptic.tap(haptic, latestHapticEnabled)
+                                        }
+                                        change.consume()
+                                    }
+                                } catch (e: CancellationException) {
+                                    if (latestIsRecording) {
+                                        vm.cancelVoiceRecording()
+                                    }
+                                    throw e
+                                } finally {
+                                    isPressingVoice = false
+                                    isCancellingVoice = false
+                                    latestOnCancellingChanged(false)
+                                }
+                            }
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = holdLabel,
+                        style = BayType.callout.copy(fontWeight = FontWeight.SemiBold),
+                        color = holdTextColor,
+                        maxLines = 1,
+                    )
+                }
+            } else {
+                BayTextField(
+                    value = inputText,
+                    onValueChange = { next ->
+                        onInputTextChange(next)
+                        vm.updateDraft(roomCode, next)
+                        vm.onDraftTypingChanged(next.isNotBlank())
+                    },
+                    placeholder = "输入消息...",
+                    singleLine = false,
+                    maxLines = 4,
+                    modifier = Modifier
+                        .weight(1f)
+                        .focusRequester(inputFocusRequester)
+                        .onFocusChanged { focusState ->
+                            if (focusState.isFocused && showAttachmentPanel) {
+                                onShowAttachmentPanelChange(false)
+                            }
+                        },
+                )
+            }
+
+            // 发送按钮（文本非空）或加号附件展开按钮（键盘与附件面板严格互斥）
+            if (!voiceMode && inputText.isNotBlank()) {
+                Box(
+                    modifier = Modifier
+                        .defaultMinSize(minWidth = 44.dp, minHeight = 44.dp)
+                        .padding(bottom = 2.dp)
+                        .bayClickable {
+                            val textToSend = inputText
+                            onInputTextChange("")
+                            onShowAttachmentPanelChange(false)
+                            vm.sendTextMessage(textToSend)
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
                     Box(
                         modifier = Modifier
-                            .padding(bottom = 4.dp)
-                            .bayClickable {
-                                val textToSend = inputText
-                                inputText = ""
-                                showAttachmentPanel = false
-                                vm.sendTextMessage(textToSend)
-                            }
                             .size(40.dp)
                             .clip(CircleShape)
                             .background(colors.accent),
@@ -339,19 +542,27 @@ fun Composer(
                             modifier = Modifier.size(19.dp),
                         )
                     }
-                } else {
-                    BayIconButton(
-                        icon = if (showAttachmentPanel) Icons.Rounded.Close else Icons.Rounded.Add,
-                        contentDescription = if (showAttachmentPanel) "收起附件面板" else "展开更多功能",
-                        onClick = {
-                            voiceMode = false
-                            showAttachmentPanel = !showAttachmentPanel
-                        },
-                        style = if (showAttachmentPanel) BayIconStyle.Accent else BayIconStyle.Filled,
-                        size = 40.dp,
-                        modifier = Modifier.padding(bottom = 4.dp),
-                    )
                 }
+            } else {
+                BayIconButton(
+                    icon = if (showAttachmentPanel) Icons.Rounded.Close else Icons.Rounded.Add,
+                    contentDescription = if (showAttachmentPanel) "收起附件面板" else "展开更多功能",
+                    onClick = {
+                        val nextPanel = !showAttachmentPanel
+                        onVoiceModeChange(false)
+                        if (nextPanel) {
+                            focusManager.clearFocus()
+                            keyboardController?.hide()
+                        }
+                        onShowAttachmentPanelChange(nextPanel)
+                    },
+                    style = if (showAttachmentPanel) BayIconStyle.Accent else BayIconStyle.Filled,
+                    size = 40.dp,
+                    enabled = !state.isRecordingVoice,
+                    modifier = Modifier
+                        .defaultMinSize(minWidth = 44.dp, minHeight = 44.dp)
+                        .padding(bottom = 2.dp),
+                )
             }
         }
 
@@ -419,8 +630,9 @@ fun Composer(
                             if (clipText.isNullOrBlank()) {
                                 vm.showToast("当前系统剪贴板为空")
                             } else {
+                                BayHaptic.confirm(view, state.prefs.hapticEnabled)
                                 vm.sendClipboardSync(clipText)
-                                showAttachmentPanel = false
+                                onShowAttachmentPanelChange(false)
                             }
                         },
                         modifier = Modifier.weight(1f),
@@ -430,59 +642,30 @@ fun Composer(
             }
         }
     }
-}
 
-@Composable
-private fun RecordingStatusBar(
-    durationMs: Long,
-    onCancel: () -> Unit,
-    onSend: () -> Unit,
-) {
-    val colors = BayTheme.colors
-    val infiniteTransition = rememberInfiniteTransition(label = "voicePulse")
-    val pulseAlpha by infiniteTransition.animateFloat(
-        initialValue = 1f,
-        targetValue = 0.25f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 650),
-            repeatMode = RepeatMode.Reverse,
-        ),
-        label = "voicePulseAlpha",
-    )
-
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = BaySpacing.md, vertical = BaySpacing.sm)
-            .clip(BayShapes.mdShape)
-            .background(colors.fill)
-            .padding(horizontal = BaySpacing.md, vertical = BaySpacing.sm),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(BaySpacing.sm),
-    ) {
-        Box(
-            modifier = Modifier
-                .size(10.dp)
-                .clip(CircleShape)
-                .background(colors.danger.copy(alpha = pulseAlpha)),
-        )
-        Text(
-            text = "正在录音 ${formatDurationMs(durationMs)} / 01:00",
-            style = BayType.callout.copy(fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Medium),
-            color = colors.textPrimary,
-            modifier = Modifier.weight(1f),
-        )
-        BayButton(
-            text = "取消",
-            onClick = onCancel,
-            style = BayButtonStyle.DestructiveSoft,
-            size = BayButtonSize.Small,
-        )
-        BayButton(
-            text = "发送",
-            onClick = onSend,
-            style = BayButtonStyle.Primary,
-            size = BayButtonSize.Small,
+    // 权限被永久拒绝时引导前往系统设置页开启
+    permSettingsGuide?.let { permType ->
+        val isCamera = permType == "camera"
+        BayDialog(
+            title = if (isCamera) "需要相机权限" else "需要麦克风权限",
+            message = if (isCamera) {
+                "相机权限已被拒绝，请在系统设置中开启后才能拍照发送图片。"
+            } else {
+                "麦克风权限已被拒绝，请在系统设置中开启后才能按住录制语音。"
+            },
+            confirmText = "去系统设置开启",
+            onConfirm = {
+                permSettingsGuide = null
+                runCatching {
+                    val intent = Intent(
+                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.fromParts("package", context.packageName, null),
+                    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    context.startActivity(intent)
+                }
+            },
+            dismissText = "暂不",
+            onDismiss = { permSettingsGuide = null },
         )
     }
 }
@@ -533,4 +716,25 @@ private fun AttachmentGridItem(
             maxLines = 1,
         )
     }
+}
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+
+private fun extractMentionQuery(text: String): String? {
+    val atIndex = text.lastIndexOf('@')
+    if (atIndex < 0) return null
+    if (atIndex > 0 && !text[atIndex - 1].isWhitespace()) return null
+    val after = text.substring(atIndex + 1)
+    if (after.length > 24 || after.any { it.isWhitespace() }) return null
+    return after
+}
+
+private fun replaceTrailingMention(text: String, peerName: String): String {
+    val atIndex = text.lastIndexOf('@')
+    if (atIndex < 0) return text
+    return text.substring(0, atIndex) + "@$peerName "
 }

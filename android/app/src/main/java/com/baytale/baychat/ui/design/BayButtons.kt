@@ -5,7 +5,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.defaultMinSize
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -59,18 +59,18 @@ enum class BayButtonStyle {
  * [BayButton] 尺寸规格枚举。
  */
 enum class BayButtonSize {
-    /** 大按钮：高 50dp、圆角 14dp、headline 字阶 */
+    /** 大按钮：最小高 50dp、圆角 14dp、headline 字阶 */
     Large,
 
-    /** 中按钮：高 40dp、圆角 12dp、callout Medium 字阶 */
+    /** 中按钮：最小高 40dp、圆角 12dp、callout Medium 字阶 */
     Medium,
 
-    /** 小按钮：高 32dp、全圆角胶囊、footnote Medium 字阶 */
+    /** 小按钮：最小高 32dp、全圆角胶囊、footnote Medium 字阶（外层热区 >= 44dp） */
     Small,
 }
 
 /**
- * Bay Design 2.0 统一按钮组件（基于 Row 自绘，零描边、带按压缩放与触感）。
+ * Bay Design 2.0 统一按钮组件（基于 Row 自绘，零描边、带按压缩放与触感，支持大字号撑开与最小 44dp 热区）。
  */
 @Composable
 fun BayButton(
@@ -103,22 +103,26 @@ fun BayButton(
         BayButtonStyle.DestructiveSoft -> colors.danger
     }
 
-    val height: Dp
+    val minHeight: Dp
     val shape: RoundedCornerShape
+    val verticalPadding: Dp
     val textStyle = when (size) {
         BayButtonSize.Large -> {
-            height = 50.dp
+            minHeight = 50.dp
             shape = RoundedCornerShape(14.dp)
+            verticalPadding = 10.dp
             BayType.headline
         }
         BayButtonSize.Medium -> {
-            height = 40.dp
+            minHeight = 40.dp
             shape = BayShapes.smShape
+            verticalPadding = 8.dp
             BayType.callout.copy(fontWeight = FontWeight.Medium)
         }
         BayButtonSize.Small -> {
-            height = 32.dp
+            minHeight = 32.dp
             shape = BayShapes.fullShape
+            verticalPadding = 6.dp
             BayType.footnote.copy(fontWeight = FontWeight.Medium)
         }
     }
@@ -136,43 +140,56 @@ fun BayButton(
     }
 
     val interactive = enabled && !loading
+    val interactionModifier = Modifier
+        .semantics { role = Role.Button }
+        .graphicsLayer { alpha = if (enabled) 1f else 0.45f }
+        .bayClickable(enabled = interactive, onClick = onClick)
 
-    Row(
-        modifier = modifier
-            .semantics { role = Role.Button }
-            .graphicsLayer { alpha = if (enabled) 1f else 0.45f }
-            .bayClickable(enabled = interactive, onClick = onClick)
-            .defaultMinSize(minHeight = height)
-            .height(height)
-            .clip(shape)
-            .background(containerColor)
-            .padding(horizontal = horizontalPadding),
-        horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        if (loading) {
-            CircularProgressIndicator(
-                modifier = Modifier.size(iconSize),
+    val buttonContent: @Composable (Modifier) -> Unit = { rowModifier ->
+        Row(
+            modifier = rowModifier
+                .heightIn(min = minHeight)
+                .clip(shape)
+                .background(containerColor)
+                .padding(horizontal = horizontalPadding, vertical = verticalPadding),
+            horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (loading) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(iconSize),
+                    color = contentColor,
+                    strokeWidth = 2.dp,
+                    strokeCap = StrokeCap.Round,
+                )
+            } else if (leadingIcon != null) {
+                Icon(
+                    imageVector = leadingIcon,
+                    contentDescription = null,
+                    tint = contentColor,
+                    modifier = Modifier.size(iconSize),
+                )
+            }
+
+            Text(
+                text = text,
+                style = textStyle,
                 color = contentColor,
-                strokeWidth = 2.dp,
-                strokeCap = StrokeCap.Round,
-            )
-        } else if (leadingIcon != null) {
-            Icon(
-                imageVector = leadingIcon,
-                contentDescription = null,
-                tint = contentColor,
-                modifier = Modifier.size(iconSize),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
         }
+    }
 
-        Text(
-            text = text,
-            style = textStyle,
-            color = contentColor,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
+    if (size == BayButtonSize.Small) {
+        // 小尺寸按钮保持 32dp 视觉胶囊的同时，外层透明扩充触摸热区至 >= 44dp
+        BayMinTouchTarget(
+            modifier = modifier.then(interactionModifier),
+        ) {
+            buttonContent(Modifier)
+        }
+    } else {
+        buttonContent(modifier.then(interactionModifier))
     }
 }
 
@@ -192,6 +209,7 @@ enum class BayIconStyle {
 
 /**
  * Bay Design 2.0 统一圆形图标按钮，替代尺寸杂乱的原生 IconButton。
+ * 当视觉尺寸小于 44dp 时，外层透明区域自动扩充至 44dp × 44dp 以满足无障碍最小触摸热区。
  */
 @Composable
 fun BayIconButton(
@@ -215,22 +233,29 @@ fun BayIconButton(
         BayIconStyle.Plain -> colors.textSecondary
     }
     val iconSize = (size * 0.52f).coerceIn(14.dp, 24.dp)
+    val touchTargetSize = maxOf(size, 44.dp)
 
     Box(
         modifier = modifier
+            .defaultMinSize(minWidth = touchTargetSize, minHeight = touchTargetSize)
             .semantics { role = Role.Button }
             .graphicsLayer { alpha = if (enabled) 1f else 0.45f }
-            .bayClickable(enabled = enabled, onClick = onClick)
-            .size(size)
-            .clip(CircleShape)
-            .background(containerColor),
+            .bayClickable(enabled = enabled, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = contentDescription,
-            tint = tintColor,
-            modifier = Modifier.size(iconSize),
-        )
+        Box(
+            modifier = Modifier
+                .size(size)
+                .clip(CircleShape)
+                .background(containerColor),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = contentDescription,
+                tint = tintColor,
+                modifier = Modifier.size(iconSize),
+            )
+        }
     }
 }

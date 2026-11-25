@@ -685,6 +685,7 @@ class AppUpdateService : Service() {
 
     private fun buildOpenAppPendingIntent(): PendingIntent {
         val intent = Intent(this, MainActivity::class.java).apply {
+            action = ACTION_OPEN_OTA_DIALOG
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
         return PendingIntent.getActivity(
@@ -738,6 +739,7 @@ class AppUpdateService : Service() {
         const val CHANNEL_ID = "baychat_ota_update_channel"
         const val READY_CHANNEL_ID = "baychat_ota_update_ready_channel"
         const val ACTION_OPEN_OTA_INSTALL = "com.baytale.baychat.action.OPEN_OTA_INSTALL"
+        const val ACTION_OPEN_OTA_DIALOG = "com.baytale.baychat.ACTION_OPEN_OTA_DIALOG"
 
         private const val ACTION_START_DOWNLOAD = "com.baytale.baychat.action.OTA_START"
         private const val ACTION_RESUME_DOWNLOAD = "com.baytale.baychat.action.OTA_RESUME"

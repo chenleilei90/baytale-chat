@@ -479,7 +479,7 @@ fun UpdateAvailableDialog(
                         Text(
                             text = "${FormatUtils.formatBytes(ota.downloadedBytes)} / ${FormatUtils.formatBytes(ota.totalBytes)}",
                             style = BayType.caption,
-                            color = colors.textTertiary,
+                            color = colors.textSecondary,
                         )
                     }
                 }

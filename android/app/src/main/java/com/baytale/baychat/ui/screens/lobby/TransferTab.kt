@@ -32,19 +32,25 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -80,7 +86,13 @@ import com.baytale.baychat.ui.theme.BaySpacing
 import com.baytale.baychat.ui.theme.BayTheme
 import com.baytale.baychat.ui.theme.BayType
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
+
+private const val TRANSFER_PULL_THROTTLE_MS = 1_500L
+private const val TRANSFER_REFRESH_MIN_MS = 350L
+private const val TRANSFER_REFRESH_TIMEOUT_MS = 8_000L
 
 private enum class CompletedFilter(val label: String) {
     ALL("全部"),
@@ -104,15 +116,31 @@ fun TransferTab(
     val clipboard = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
 
-    var selectedSegment by remember { mutableIntStateOf(0) }
-    var completedFilter by remember { mutableStateOf(CompletedFilter.ALL) }
+    // 使用 rememberSaveable 保留切 Tab / 旋转屏幕时的分段与筛选状态
+    var selectedSegment by rememberSaveable { mutableIntStateOf(0) }
+    var completedFilter by rememberSaveable { mutableStateOf(CompletedFilter.ALL) }
     var isRefreshing by remember { mutableStateOf(false) }
-    var lastPullAt by remember { mutableLongStateOf(0L) }
+    var isThrottleReset by remember { mutableStateOf(false) }
+    var lastPullAt by rememberSaveable { mutableLongStateOf(0L) }
 
-    var showPickupHub by remember { mutableStateOf(false) }
+    var showPickupHub by rememberSaveable { mutableStateOf(false) }
     var confirmClearRecords by remember { mutableStateOf(false) }
     var confirmClearPartials by remember { mutableStateOf(false) }
     var pendingRevokeCode by remember { mutableStateOf<String?>(null) }
+
+    val latestTransferRefreshing by rememberUpdatedState(state.isTransferRefreshing)
+
+    // 监听真实刷新状态：最少展示 350ms 防止视觉闪烁，最长 8000ms 超时兜底
+    LaunchedEffect(isRefreshing, isThrottleReset) {
+        if (!isRefreshing || isThrottleReset) return@LaunchedEffect
+        delay(TRANSFER_REFRESH_MIN_MS)
+        withTimeoutOrNull(TRANSFER_REFRESH_TIMEOUT_MS - TRANSFER_REFRESH_MIN_MS) {
+            snapshotFlow { latestTransferRefreshing }.first { !it }
+        }
+        isRefreshing = false
+        BayHaptic.confirm(view, state.prefs.hapticEnabled)
+        vm.playRefreshSound()
+    }
 
     // 提取当前房间内尚未结束的活跃传输项
     val activeTransfers = remember(state.activeRoom?.messages) {
@@ -187,17 +215,22 @@ fun TransferTab(
             isRefreshing = isRefreshing,
             onRefresh = {
                 val now = System.currentTimeMillis()
-                if (now - lastPullAt >= 600L) {
-                    lastPullAt = now
-                    isRefreshing = true
-                    vm.refreshTransferCenter()
+                if (now - lastPullAt < TRANSFER_PULL_THROTTLE_MS) {
+                    // 节流期内立即复位指示器并轻提示，不触发刷新确认反馈
+                    vm.showToast("刚刚刷新过，请稍候")
                     scope.launch {
-                        delay(450L)
+                        isThrottleReset = true
+                        isRefreshing = true
+                        delay(50L)
                         isRefreshing = false
-                        BayHaptic.confirm(view, state.prefs.hapticEnabled)
-                        vm.playRefreshSound()
+                        isThrottleReset = false
                     }
+                    return@PullToRefreshBox
                 }
+                lastPullAt = now
+                isThrottleReset = false
+                isRefreshing = true
+                vm.refreshTransferCenter()
             },
             modifier = Modifier.fillMaxSize(),
         ) {
@@ -488,6 +521,40 @@ fun TransferTab(
     }
 }
 
+/**
+ * 保留文件扩展名的中间省略文件名展示组件，确保 .apk / .zip / .pptx 等扩展名永不被截断。
+ */
+@Composable
+private fun MiddleEllipsisFileName(
+    fileName: String,
+    style: TextStyle,
+    color: Color,
+    modifier: Modifier = Modifier,
+) {
+    val (stem, ext) = remember(fileName) { FormatUtils.splitFileNameAndExt(fileName) }
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = stem,
+            style = style,
+            color = color,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f, fill = false),
+        )
+        if (ext.isNotEmpty()) {
+            Text(
+                text = ext,
+                style = style,
+                color = color,
+                maxLines = 1,
+            )
+        }
+    }
+}
+
 @Composable
 private fun ActiveTransferCard(
     info: FileTransferInfo,
@@ -530,12 +597,11 @@ private fun ActiveTransferCard(
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
-                Text(
-                    text = info.fileName,
+                MiddleEllipsisFileName(
+                    fileName = info.fileName,
                     style = BayType.headline,
                     color = colors.textPrimary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.fillMaxWidth(),
                 )
                 val peerPart = info.targetPeerName?.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty()
                 Text(
@@ -621,12 +687,11 @@ private fun PartialResumeCard(
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
-                Text(
-                    text = item.fileName,
+                MiddleEllipsisFileName(
+                    fileName = item.fileName,
                     style = BayType.headline,
                     color = colors.textPrimary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.fillMaxWidth(),
                 )
                 val roomPart = if (item.roomCode.isNotBlank()) " · #${item.roomCode}" else ""
                 Text(
@@ -704,6 +769,7 @@ private fun CompletedRecordCard(
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
                 Row(
+                    modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(BaySpacing.xs),
                 ) {
@@ -716,12 +782,11 @@ private fun CompletedRecordCard(
                             .background(directionColor.copy(alpha = if (colors.isDark) 0.20f else 0.12f))
                             .padding(horizontal = 6.dp, vertical = 2.dp),
                     )
-                    Text(
-                        text = record.fileName,
+                    MiddleEllipsisFileName(
+                        fileName = record.fileName,
                         style = BayType.headline,
                         color = colors.textPrimary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
                     )
                 }
 
@@ -818,12 +883,11 @@ private fun PickupSummaryCard(
                     }
                 }
 
-                Text(
-                    text = record.fileName,
+                MiddleEllipsisFileName(
+                    fileName = record.fileName,
                     style = BayType.subhead,
                     color = colors.textPrimary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.fillMaxWidth(),
                 )
 
                 Text(

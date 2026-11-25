@@ -40,6 +40,11 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.progressBarRangeInfo
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -74,6 +79,9 @@ fun BayProgressBar(
         modifier = modifier
             .fillMaxWidth()
             .height(4.dp)
+            .semantics {
+                progressBarRangeInfo = ProgressBarRangeInfo(animatedFraction, 0f..1f)
+            }
             .clip(BayShapes.fullShape)
             .background(trackColor ?: colors.fill),
     ) {
@@ -148,6 +156,7 @@ fun BayAvatar(
     emojiId: String?,
     size: Dp = 40.dp,
     modifier: Modifier = Modifier,
+    contentDescription: String? = null,
 ) {
     val colors = BayTheme.colors
     val glyph = FormatUtils.presetEmoji(emojiId)
@@ -155,6 +164,11 @@ fun BayAvatar(
 
     Box(
         modifier = modifier
+            .clearAndSetSemantics {
+                if (contentDescription != null) {
+                    this.contentDescription = contentDescription
+                }
+            }
             .size(size)
             .clip(CircleShape)
             .background(colors.accentSoft),

@@ -21,10 +21,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.baytale.baychat.core.model.ChatItem
+import com.baytale.baychat.core.util.BayHaptic
 import com.baytale.baychat.ui.design.BayButton
 import com.baytale.baychat.ui.design.BayButtonSize
 import com.baytale.baychat.ui.design.BayButtonStyle
@@ -39,11 +41,13 @@ import com.baytale.baychat.ui.theme.BayType
 @Composable
 fun ClipCard(
     item: ChatItem,
+    hapticEnabled: Boolean,
     onCopied: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val colors = BayTheme.colors
     val context = LocalContext.current
+    val view = LocalView.current
     val cardBg = if (colors.isDark) colors.surfaceElevated else colors.surface
     val clipText = item.text.orEmpty()
 
@@ -106,6 +110,7 @@ fun ClipCard(
                 onClick = {
                     if (clipText.isNotEmpty()) {
                         copyTextToClipboard(context, clipText)
+                        BayHaptic.confirm(view, hapticEnabled)
                         onCopied()
                     }
                 },

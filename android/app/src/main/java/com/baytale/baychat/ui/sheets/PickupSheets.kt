@@ -41,13 +41,18 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -95,21 +100,25 @@ fun PickupHubSheet(
     val colors = BayTheme.colors
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
 
-    var selectedTab by remember { mutableIntStateOf(0) }
+    // 使用 rememberSaveable 持久化分段页签与表单输入，旋转屏幕不丢失
+    var selectedSegment by rememberSaveable { mutableIntStateOf(0) }
 
     // 寄出文件表单状态
-    var selectedUri by remember { mutableStateOf<Uri?>(null) }
-    var expireHours by remember { mutableIntStateOf(24) }
-    var burnAfterRead by remember { mutableStateOf(false) }
-    var sendPassword by remember { mutableStateOf("") }
+    var selectedUriString by rememberSaveable { mutableStateOf<String?>(null) }
+    val selectedUri = remember(selectedUriString) { selectedUriString?.let { Uri.parse(it) } }
+    var expireHours by rememberSaveable { mutableIntStateOf(24) }
+    var burnAfterRead by rememberSaveable { mutableStateOf(false) }
+    var sendPassword by rememberSaveable { mutableStateOf("") }
     var awaitingCreatedResult by remember { mutableStateOf(false) }
     var submitStartedAt by remember { mutableLongStateOf(0L) }
     var createdRecord by remember { mutableStateOf<SavedPickupRecord?>(null) }
 
     // 凭码取件表单状态
-    var lookupCode by remember { mutableStateOf("") }
-    var lookupPassword by remember { mutableStateOf("") }
+    var inputCode by rememberSaveable { mutableStateOf("") }
+    var lookupPassword by rememberSaveable { mutableStateOf("") }
 
     // 撤销取件码二次确认
     var pendingRevokeCode by remember { mutableStateOf<String?>(null) }
@@ -118,7 +127,7 @@ fun PickupHubSheet(
         contract = ActivityResultContracts.OpenDocument(),
     ) { uri ->
         if (uri != null) {
-            selectedUri = uri
+            selectedUriString = uri.toString()
             createdRecord = null
         }
     }
@@ -151,7 +160,17 @@ fun PickupHubSheet(
         vm.showToast(tip)
     }
 
+    fun triggerLookup() {
+        focusManager.clearFocus()
+        keyboardController?.hide()
+        if (!state.pickupBusy && inputCode.isNotBlank()) {
+            vm.lookupPickup(inputCode, lookupPassword)
+        }
+    }
+
     val handleDismiss = {
+        focusManager.clearFocus()
+        keyboardController?.hide()
         vm.clearPickupLookup()
         onDismiss()
     }
@@ -169,14 +188,16 @@ fun PickupHubSheet(
         ) {
             BaySegmented(
                 options = listOf("寄出文件", "凭码取件", "我的记录"),
-                selected = selectedTab,
+                selected = selectedSegment,
                 onSelect = { next ->
-                    selectedTab = next
+                    focusManager.clearFocus()
+                    keyboardController?.hide()
+                    selectedSegment = next
                     vm.clearPickupLookup()
                 },
             )
 
-            when (selectedTab) {
+            when (selectedSegment) {
                 0 -> {
                     val fileMeta = remember(selectedUri) {
                         selectedUri?.let { MediaDownloadHelper.queryUriMeta(context, it) }
@@ -204,13 +225,24 @@ fun PickupHubSheet(
                                 color = colors.textPrimary,
                                 textAlign = TextAlign.Center,
                             )
-                            Text(
-                                text = "${rec.fileName} · ${FormatUtils.formatBytes(rec.fileSize)}",
-                                style = BayType.footnote,
-                                color = colors.textSecondary,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.Center,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                PickupMiddleEllipsisFileName(
+                                    fileName = rec.fileName,
+                                    style = BayType.footnote,
+                                    color = colors.textSecondary,
+                                    modifier = Modifier.weight(1f, fill = false),
+                                )
+                                Text(
+                                    text = " · ${FormatUtils.formatBytes(rec.fileSize)}",
+                                    style = BayType.footnote,
+                                    color = colors.textSecondary,
+                                    maxLines = 1,
+                                )
+                            }
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(BaySpacing.sm),
@@ -238,7 +270,11 @@ fun PickupHubSheet(
                     // 待上传文件选择卡
                     if (fileMeta == null) {
                         BayCard(
-                            onClick = { filePicker.launch(arrayOf("*/*")) },
+                            onClick = if (!state.pickupBusy) {
+                                { filePicker.launch(arrayOf("*/*")) }
+                            } else {
+                                null
+                            },
                             modifier = Modifier.fillMaxWidth(),
                         ) {
                             Row(
@@ -249,9 +285,14 @@ fun PickupHubSheet(
                                 BayIconButton(
                                     icon = Icons.Rounded.UploadFile,
                                     contentDescription = "选择文件",
-                                    onClick = { filePicker.launch(arrayOf("*/*")) },
+                                    onClick = {
+                                        if (!state.pickupBusy) {
+                                            filePicker.launch(arrayOf("*/*"))
+                                        }
+                                    },
                                     style = BayIconStyle.Accent,
                                     size = 44.dp,
+                                    enabled = !state.pickupBusy,
                                 )
                                 Column(
                                     modifier = Modifier.weight(1f),
@@ -286,12 +327,11 @@ fun PickupHubSheet(
                                     modifier = Modifier.weight(1f),
                                     verticalArrangement = Arrangement.spacedBy(2.dp),
                                 ) {
-                                    Text(
-                                        text = fileMeta.fileName,
+                                    PickupMiddleEllipsisFileName(
+                                        fileName = fileMeta.fileName,
                                         style = BayType.headline,
                                         color = colors.textPrimary,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.fillMaxWidth(),
                                     )
                                     Text(
                                         text = FormatUtils.formatBytes(fileMeta.fileSize),
@@ -301,7 +341,11 @@ fun PickupHubSheet(
                                 }
                                 BayButton(
                                     text = "更换",
-                                    onClick = { filePicker.launch(arrayOf("*/*")) },
+                                    onClick = {
+                                        if (!state.pickupBusy) {
+                                            filePicker.launch(arrayOf("*/*"))
+                                        }
+                                    },
                                     style = BayButtonStyle.Neutral,
                                     size = BayButtonSize.Small,
                                     enabled = !state.pickupBusy,
@@ -360,6 +404,16 @@ fun PickupHubSheet(
                         leadingIcon = Icons.Rounded.Lock,
                         isPassword = true,
                         enabled = !state.pickupBusy,
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Password,
+                            imeAction = ImeAction.Done,
+                        ),
+                        keyboardActions = KeyboardActions(
+                            onDone = {
+                                focusManager.clearFocus()
+                                keyboardController?.hide()
+                            },
+                        ),
                     )
 
                     // 上传实时进度条
@@ -370,6 +424,9 @@ fun PickupHubSheet(
                     BayButton(
                         text = if (state.pickupBusy) "正在上传文件..." else "生成取件码",
                         onClick = {
+                            if (state.pickupBusy) return@BayButton
+                            focusManager.clearFocus()
+                            keyboardController?.hide()
                             val targetUri = selectedUri ?: return@BayButton
                             createdRecord = null
                             submitStartedAt = System.currentTimeMillis()
@@ -393,39 +450,56 @@ fun PickupHubSheet(
                 1 -> {
                     // 凭码取件
                     BayTextField(
-                        value = lookupCode,
+                        value = inputCode,
                         onValueChange = { next ->
-                            val clean = next.filter { it.isLetterOrDigit() }.take(12)
-                            lookupCode = clean
+                            if (!state.pickupBusy) {
+                                inputCode = next.filter { it.isLetterOrDigit() }.take(12)
+                            }
                         },
                         placeholder = "输入 6 位取件码",
                         leadingIcon = Icons.Rounded.QrCode2,
                         large = true,
+                        enabled = !state.pickupBusy,
                         keyboardOptions = KeyboardOptions(
                             keyboardType = KeyboardType.Ascii,
                             imeAction = ImeAction.Search,
                         ),
                         keyboardActions = KeyboardActions(
-                            onSearch = { vm.lookupPickup(lookupCode, lookupPassword) },
+                            onSearch = { triggerLookup() },
                         ),
                     )
 
                     BayTextField(
                         value = lookupPassword,
-                        onValueChange = { lookupPassword = it },
+                        onValueChange = {
+                            if (!state.pickupBusy) {
+                                lookupPassword = it
+                            }
+                        },
                         placeholder = "取件密码（无密码请留空）",
                         leadingIcon = Icons.Rounded.Lock,
                         isPassword = true,
+                        enabled = !state.pickupBusy,
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Password,
+                            imeAction = ImeAction.Done,
+                        ),
+                        keyboardActions = KeyboardActions(
+                            onDone = {
+                                focusManager.clearFocus()
+                                keyboardController?.hide()
+                            },
+                        ),
                     )
 
                     BayButton(
                         text = "查询取件文件",
-                        onClick = { vm.lookupPickup(lookupCode, lookupPassword) },
+                        onClick = { triggerLookup() },
                         style = BayButtonStyle.Secondary,
                         size = BayButtonSize.Medium,
                         leadingIcon = Icons.Rounded.Search,
                         loading = state.pickupBusy && state.pickupProgress == null,
-                        enabled = lookupCode.isNotBlank() && !state.pickupBusy,
+                        enabled = inputCode.isNotBlank() && !state.pickupBusy,
                         modifier = Modifier.fillMaxWidth(),
                     )
 
@@ -446,12 +520,11 @@ fun PickupHubSheet(
                                     modifier = Modifier.weight(1f),
                                     verticalArrangement = Arrangement.spacedBy(BaySpacing.xs),
                                 ) {
-                                    Text(
-                                        text = lookupInfo.fileName.ifBlank { "离线文件" },
+                                    PickupMiddleEllipsisFileName(
+                                        fileName = lookupInfo.fileName.ifBlank { "离线文件" },
                                         style = BayType.headline,
                                         color = colors.textPrimary,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.fillMaxWidth(),
                                     )
                                     val metaParts = buildList {
                                         add(FormatUtils.formatBytes(lookupInfo.fileSize))
@@ -478,7 +551,13 @@ fun PickupHubSheet(
 
                             BayButton(
                                 text = if (state.pickupBusy) "正在下载..." else "下载到下载目录",
-                                onClick = { vm.downloadPickup(lookupInfo.code, lookupPassword) },
+                                onClick = {
+                                    focusManager.clearFocus()
+                                    keyboardController?.hide()
+                                    if (!state.pickupBusy) {
+                                        vm.downloadPickup(lookupInfo.code, lookupPassword)
+                                    }
+                                },
                                 style = BayButtonStyle.Primary,
                                 size = BayButtonSize.Large,
                                 leadingIcon = Icons.Rounded.Download,
@@ -502,7 +581,7 @@ fun PickupHubSheet(
                             title = "暂无已寄出的取件码",
                             message = "在「寄出文件」中选择文件并上传后，取件码记录将自动保存在此处。",
                             actionLabel = "去寄出文件",
-                            onAction = { selectedTab = 0 },
+                            onAction = { selectedSegment = 0 },
                         )
                     } else {
                         Column(verticalArrangement = Arrangement.spacedBy(BaySpacing.sm)) {
@@ -537,6 +616,40 @@ fun PickupHubSheet(
             onDismiss = { pendingRevokeCode = null },
             destructive = true,
         )
+    }
+}
+
+/**
+ * 保留文件扩展名的中间省略文件名展示组件，确保 .apk / .zip / .pptx 等后缀始终可见。
+ */
+@Composable
+private fun PickupMiddleEllipsisFileName(
+    fileName: String,
+    style: TextStyle,
+    color: Color,
+    modifier: Modifier = Modifier,
+) {
+    val (stem, ext) = remember(fileName) { FormatUtils.splitFileNameAndExt(fileName) }
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = stem,
+            style = style,
+            color = color,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f, fill = false),
+        )
+        if (ext.isNotEmpty()) {
+            Text(
+                text = ext,
+                style = style,
+                color = color,
+                maxLines = 1,
+            )
+        }
     }
 }
 
@@ -581,12 +694,10 @@ private fun PickupProgressCard(progress: PickupTransferProgress) {
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(
-                    text = progress.fileName.ifBlank { if (progress.isUpload) "正在上传" else "正在下载" },
+                PickupMiddleEllipsisFileName(
+                    fileName = progress.fileName.ifBlank { if (progress.isUpload) "正在上传" else "正在下载" },
                     style = BayType.footnote,
                     color = colors.textPrimary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
                 )
                 val speedText = if (progress.speedBps > 0.0) {
@@ -598,6 +709,7 @@ private fun PickupProgressCard(progress: PickupTransferProgress) {
                     text = "$percent%$speedText",
                     style = BayType.caption,
                     color = colors.accent,
+                    maxLines = 1,
                 )
             }
             BayProgressBar(fraction = fraction)
@@ -661,12 +773,11 @@ private fun PickupRecordCard(
                         )
                     }
                 }
-                Text(
-                    text = record.fileName,
+                PickupMiddleEllipsisFileName(
+                    fileName = record.fileName,
                     style = BayType.subhead,
                     color = colors.textPrimary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.fillMaxWidth(),
                 )
                 Text(
                     text = "${FormatUtils.formatBytes(record.fileSize)} · $expiryText",

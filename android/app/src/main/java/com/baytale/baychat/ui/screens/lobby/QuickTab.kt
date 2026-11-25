@@ -27,33 +27,40 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Computer
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.ContentPaste
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Devices
+import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Explore
 import androidx.compose.material.icons.rounded.Inventory2
 import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.QrCodeScanner
 import androidx.compose.material.icons.rounded.Send
+import androidx.compose.material.icons.rounded.Smartphone
 import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material.icons.rounded.WifiOff
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -62,7 +69,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.baytale.baychat.core.model.NearbyInvite
 import com.baytale.baychat.core.model.NearbyPeer
 import com.baytale.baychat.core.model.RecentRoom
 import com.baytale.baychat.core.model.RoomMode
@@ -72,12 +78,14 @@ import com.baytale.baychat.core.util.FormatUtils
 import com.baytale.baychat.service.OtaUpdateStatus
 import com.baytale.baychat.ui.BayChatUiState
 import com.baytale.baychat.ui.BayChatViewModel
+import com.baytale.baychat.ui.design.BayActionSheet
 import com.baytale.baychat.ui.design.BayAvatar
 import com.baytale.baychat.ui.design.BayButton
 import com.baytale.baychat.ui.design.BayButtonSize
 import com.baytale.baychat.ui.design.BayButtonStyle
 import com.baytale.baychat.ui.design.BayCard
 import com.baytale.baychat.ui.design.BayChip
+import com.baytale.baychat.ui.design.BayDialog
 import com.baytale.baychat.ui.design.BayGroup
 import com.baytale.baychat.ui.design.BayIconButton
 import com.baytale.baychat.ui.design.BayIconStyle
@@ -86,6 +94,7 @@ import com.baytale.baychat.ui.design.BayListRow
 import com.baytale.baychat.ui.design.BaySectionHeader
 import com.baytale.baychat.ui.design.BayTextField
 import com.baytale.baychat.ui.design.RowTrailing
+import com.baytale.baychat.ui.design.SheetAction
 import com.baytale.baychat.ui.design.bayClickable
 import com.baytale.baychat.ui.screens.update.UpdateBannerCard
 import com.baytale.baychat.ui.theme.BayShapes
@@ -93,9 +102,39 @@ import com.baytale.baychat.ui.theme.BaySpacing
 import com.baytale.baychat.ui.theme.BayTheme
 import com.baytale.baychat.ui.theme.BayType
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
+import java.util.Locale
 
 private const val QUICK_PULL_DEBOUNCE_MS = 1500L
+private const val QUICK_MIN_REFRESH_MS = 350L
+private const val QUICK_REFRESH_TIMEOUT_MS = 8000L
+
+// UX-10：将 RoomOptionsDraft 持久化至 SavedState，防止旋转屏幕或后台重建丢失已填设置
+private val RoomOptionsDraftSaver = listSaver<RoomOptionsDraft, Any>(
+    save = { d ->
+        listOf(
+            d.mode.wireValue,
+            d.retentionDays,
+            d.maxFileSizeMB,
+            d.password,
+            d.topic,
+            d.privatePairOnly,
+            d.saveFixedFavorite,
+        )
+    },
+    restore = { list ->
+        RoomOptionsDraft(
+            mode = RoomMode.fromWire(list[0] as String),
+            retentionDays = list[1] as Int,
+            maxFileSizeMB = list[2] as Int,
+            password = list[3] as String,
+            topic = list[4] as String,
+            privatePairOnly = list[5] as Boolean,
+            saveFixedFavorite = list[6] as Boolean,
+        )
+    },
+)
 
 /**
  * 「快传」主页：单入口智能直达台、场景快捷胶囊、同局域网附近设备与最近/收藏房间。
@@ -113,29 +152,30 @@ fun QuickTab(
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
     val view = LocalView.current
-    val scope = rememberCoroutineScope()
 
     var roomInput by rememberSaveable { mutableStateOf("") }
-    var optionsDraft by remember {
+    var optionsDraft by rememberSaveable(stateSaver = RoomOptionsDraftSaver) {
         mutableStateOf(
             RoomOptionsDraft(
                 maxFileSizeMB = state.serverConfig.defaultRoomMaxFileMB,
             )
         )
     }
-    var showRoomOptions by remember { mutableStateOf(false) }
-    var isRefreshing by remember { mutableStateOf(false) }
-    var lastPullAt by remember { mutableLongStateOf(0L) }
+    var showRoomOptions by rememberSaveable { mutableStateOf(false) }
 
-    // 同局域网附近设备心跳与邀请轮询生命周期联动
-    DisposableEffect(state.privacyAccepted) {
-        if (state.privacyAccepted) {
-            vm.startNearbyPolling()
-        }
-        onDispose {
-            vm.stopNearbyPolling()
-        }
-    }
+    // UX-7：真实下拉刷新等待状态
+    var pullRefreshing by remember { mutableStateOf(false) }
+    var lastPullAt by remember { mutableLongStateOf(0L) }
+    var pullStartedAt by remember { mutableLongStateOf(0L) }
+    val latestLobbyRefreshing by rememberUpdatedState(state.isLobbyRefreshing)
+    val latestHapticEnabled by rememberUpdatedState(state.prefs.hapticEnabled)
+
+    // UX-28：常用房间更多操作菜单与编辑弹窗状态
+    var actionTargetCode by rememberSaveable { mutableStateOf<String?>(null) }
+    var renameDialogCode by rememberSaveable { mutableStateOf<String?>(null) }
+    var renameInput by rememberSaveable { mutableStateOf("") }
+    var passwordDialogCode by rememberSaveable { mutableStateOf<String?>(null) }
+    var passwordInput by rememberSaveable { mutableStateOf("") }
 
     // 同步深链/外部跳转写入的待加入口令
     LaunchedEffect(state.pendingJoinCode) {
@@ -144,6 +184,22 @@ fun QuickTab(
             roomInput = code
             vm.consumePendingJoinCode()
         }
+    }
+
+    // UX-7：监听真实刷新完成再收起指示器并触发触感/音效（最小 350ms 防闪烁，8000ms 超时兜底）
+    LaunchedEffect(pullRefreshing) {
+        if (!pullRefreshing) return@LaunchedEffect
+        delay(120L)
+        withTimeoutOrNull(QUICK_REFRESH_TIMEOUT_MS) {
+            snapshotFlow { latestLobbyRefreshing }.first { !it }
+        }
+        val elapsed = System.currentTimeMillis() - pullStartedAt
+        if (elapsed < QUICK_MIN_REFRESH_MS) {
+            delay(QUICK_MIN_REFRESH_MS - elapsed)
+        }
+        pullRefreshing = false
+        BayHaptic.confirm(view, enabled = latestHapticEnabled)
+        vm.playRefreshSound()
     }
 
     val submitRoomAction = {
@@ -197,19 +253,17 @@ fun QuickTab(
         )
 
         PullToRefreshBox(
-            isRefreshing = isRefreshing,
+            isRefreshing = pullRefreshing,
             onRefresh = {
                 val now = System.currentTimeMillis()
-                if (now - lastPullAt >= QUICK_PULL_DEBOUNCE_MS) {
+                if (now - lastPullAt < QUICK_PULL_DEBOUNCE_MS) {
+                    pullRefreshing = false
+                    vm.showToast("刚刚刷新过，请稍候")
+                } else {
                     lastPullAt = now
-                    isRefreshing = true
+                    pullStartedAt = now
+                    pullRefreshing = true
                     vm.refreshLobbyOverview()
-                    scope.launch {
-                        delay(550L)
-                        isRefreshing = false
-                        BayHaptic.confirm(view, enabled = state.prefs.hapticEnabled)
-                        vm.playRefreshSound()
-                    }
                 }
             },
             modifier = Modifier
@@ -226,6 +280,13 @@ fun QuickTab(
                 ),
                 verticalArrangement = Arrangement.spacedBy(BaySpacing.lg),
             ) {
+                // UX-14：断网状态提示条
+                if (state.isNetworkOffline) {
+                    item(key = "network_offline_banner") {
+                        OfflineNoticeStrip()
+                    }
+                }
+
                 // 1. 应用自动更新横幅
                 val ota = state.otaState
                 val isIgnored = ota.release != null && state.prefs.ignoredVersionCode == ota.release.versionCode
@@ -284,16 +345,15 @@ fun QuickTab(
                         busy = state.lobbyBusy,
                         onPasteClipboard = {
                             val clipText = readClipboardText(context)
-                            if (clipText.isNullOrBlank()) {
-                                vm.showToast("剪贴板暂无可用内容")
-                            } else {
-                                val extracted = FormatUtils.extractRoomCode(clipText)
-                                val nextVal = extracted.ifBlank { clipText.trim() }.take(160)
-                                roomInput = nextVal
-                                vm.onJoinCodeInputChanged(nextVal)
+                            val validCode = clipText?.let { FormatUtils.extractValidRoomCodeFromClipboard(it) }
+                            if (validCode != null) {
+                                roomInput = validCode
+                                vm.onJoinCodeInputChanged(validCode)
                                 vm.clearLobbyError()
                                 BayHaptic.tap(haptic, enabled = state.prefs.hapticEnabled)
                                 vm.showToast("已填入剪贴板口令")
+                            } else {
+                                vm.showToast("剪贴板中未识别到有效房间口令或链接")
                             }
                         },
                         onRequestQrScan = { nav.requestQrScan() },
@@ -302,9 +362,10 @@ fun QuickTab(
                     )
                 }
 
-                // 4. 三个一键场景胶囊（新建私密房 / 取件码 / 随机串门）
+                // 4. 三个一键场景胶囊（UX-5：忙碌时禁用防连点）
                 item(key = "quick_actions") {
                     QuickScenarioRow(
+                        lobbyBusy = state.lobbyBusy,
                         randomJoining = state.randomJoining,
                         onCreatePrivate = {
                             BayHaptic.tap(haptic, enabled = state.prefs.hapticEnabled)
@@ -331,60 +392,65 @@ fun QuickTab(
                     )
                 }
 
-                // 5. 收到的附近直连邀请
-                if (state.incomingNearbyInvites.isNotEmpty()) {
-                    item(key = "nearby_invites_header") {
-                        BaySectionHeader(title = "直连邀请")
-                    }
-                    items(
-                        count = state.incomingNearbyInvites.size,
-                        key = { idx -> "invite_${state.incomingNearbyInvites[idx].inviteId}" },
-                    ) { idx ->
-                        val invite = state.incomingNearbyInvites[idx]
-                        NearbyInviteCard(
-                            invite = invite,
-                            onAccept = { vm.respondNearbyInvite(invite, accept = true) },
-                            onDecline = { vm.respondNearbyInvite(invite, accept = false) },
-                        )
-                    }
-                }
-
-                // 6. 同局域网附近设备列表
+                // 5. 同局域网附近设备列表（UX-4 防连点、UX-15 移动网络区分提示、UX-33 友好设备名）
                 if (state.prefs.nearbyDiscoverable) {
                     item(key = "nearby_peers_section") {
                         Column(verticalArrangement = Arrangement.spacedBy(BaySpacing.sm)) {
                             BaySectionHeader(title = "附近设备")
                             if (state.nearbyPeers.isEmpty()) {
+                                val isCellular = state.nearbyNetworkType.equals("cellular", ignoreCase = true)
                                 BayCard(modifier = Modifier.fillMaxWidth()) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(BaySpacing.md),
-                                    ) {
-                                        Box(
-                                            modifier = Modifier
-                                                .size(36.dp)
-                                                .clip(BayShapes.smShape)
-                                                .background(colors.fill),
-                                            contentAlignment = Alignment.Center,
+                                    Column(verticalArrangement = Arrangement.spacedBy(BaySpacing.md)) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(BaySpacing.md),
                                         ) {
-                                            Icon(
-                                                imageVector = Icons.Rounded.Devices,
-                                                contentDescription = null,
-                                                tint = colors.textSecondary,
-                                                modifier = Modifier.size(18.dp),
-                                            )
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(36.dp)
+                                                    .clip(BayShapes.smShape)
+                                                    .background(colors.fill),
+                                                contentAlignment = Alignment.Center,
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Rounded.Devices,
+                                                    contentDescription = null,
+                                                    tint = colors.textSecondary,
+                                                    modifier = Modifier.size(18.dp),
+                                                )
+                                            }
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = if (isCellular) "当前使用移动网络" else "正在扫描同一局域网设备",
+                                                    style = BayType.callout.copy(fontWeight = FontWeight.Medium),
+                                                    color = colors.textPrimary,
+                                                )
+                                                Text(
+                                                    text = if (isCellular) {
+                                                        "同局域网设备发现需双方连接同一 Wi-Fi（仍可通过口令或取件码传输）"
+                                                    } else {
+                                                        "同网络下开启 BayChat 的设备将自动显示在此处"
+                                                    },
+                                                    style = BayType.caption,
+                                                    color = colors.textSecondary,
+                                                )
+                                            }
                                         }
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Text(
-                                                text = "正在扫描同一局域网设备",
-                                                style = BayType.callout.copy(fontWeight = FontWeight.Medium),
-                                                color = colors.textPrimary,
-                                            )
-                                            Text(
-                                                text = "同网络下开启 BayChat 的设备将自动显示在此处",
-                                                style = BayType.caption,
-                                                color = colors.textSecondary,
-                                            )
+                                        if (isCellular) {
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.End,
+                                            ) {
+                                                BayButton(
+                                                    text = "手动刷新",
+                                                    onClick = {
+                                                        vm.startNearbyPolling()
+                                                        vm.refreshLobbyOverview()
+                                                    },
+                                                    style = BayButtonStyle.Secondary,
+                                                    size = BayButtonSize.Small,
+                                                )
+                                            }
                                         }
                                     }
                                 }
@@ -393,6 +459,8 @@ fun QuickTab(
                                     state.nearbyPeers.forEachIndexed { index, peer ->
                                         NearbyPeerRow(
                                             peer = peer,
+                                            isInviting = state.invitingNearbyClientId == peer.clientId,
+                                            inviteLocked = state.invitingNearbyClientId != null,
                                             showDivider = index < state.nearbyPeers.lastIndex,
                                             onInvite = { vm.inviteNearby(peer) },
                                         )
@@ -403,7 +471,7 @@ fun QuickTab(
                     }
                 }
 
-                // 7. 收藏常驻房间
+                // 6. 收藏常驻房间（UX-28：提供更多操作菜单）
                 if (state.savedRooms.isNotEmpty()) {
                     item(key = "saved_rooms_section") {
                         Column(verticalArrangement = Arrangement.spacedBy(BaySpacing.sm)) {
@@ -414,10 +482,8 @@ fun QuickTab(
                                         room = room,
                                         showDivider = index < state.savedRooms.lastIndex,
                                         onEnter = { vm.joinRoom(room.code, room.password) },
-                                        onCopyLink = {
-                                            copyInviteLink(context, vm, room.code)
-                                        },
-                                        onRemove = { vm.removeSavedRoom(room.code) },
+                                        onCopyLink = { copyInviteLink(context, vm, room.code) },
+                                        onMore = { actionTargetCode = room.code },
                                     )
                                 }
                             }
@@ -425,7 +491,7 @@ fun QuickTab(
                     }
                 }
 
-                // 8. 最近房间
+                // 7. 最近房间
                 if (state.recentRooms.isNotEmpty()) {
                     item(key = "recent_rooms_section") {
                         Column(verticalArrangement = Arrangement.spacedBy(BaySpacing.sm)) {
@@ -441,9 +507,7 @@ fun QuickTab(
                                         room = room,
                                         showDivider = index < displayed.lastIndex,
                                         onEnter = { vm.joinRoom(room.code, room.password) },
-                                        onCopyLink = {
-                                            copyInviteLink(context, vm, room.code)
-                                        },
+                                        onCopyLink = { copyInviteLink(context, vm, room.code) },
                                         onRemove = { vm.removeRecentRoom(room.code) },
                                     )
                                 }
@@ -462,6 +526,124 @@ fun QuickTab(
             maxRoomPeers = state.serverConfig.maxRoomPeers,
             onApply = { updated -> optionsDraft = updated },
             onDismiss = { showRoomOptions = false },
+        )
+    }
+
+    // UX-28：常用房间操作菜单（设置备注名 / 修改保存密码 / 复制链接 / 移除收藏）
+    val actionRoom = actionTargetCode?.let { code ->
+        state.savedRooms.firstOrNull { it.code.equals(code, ignoreCase = true) }
+    }
+    if (actionRoom != null) {
+        val headerTitle = if (actionRoom.alias.isNotBlank()) {
+            "${actionRoom.alias} (#${actionRoom.code})"
+        } else {
+            "房间 #${actionRoom.code}"
+        }
+        BayActionSheet(
+            onDismiss = { actionTargetCode = null },
+            title = headerTitle,
+            actions = listOf(
+                SheetAction(
+                    label = "设置备注名称",
+                    icon = Icons.Rounded.Edit,
+                    onClick = {
+                        renameInput = actionRoom.alias
+                        renameDialogCode = actionRoom.code
+                    },
+                ),
+                SheetAction(
+                    label = "修改保存密码",
+                    icon = Icons.Rounded.Lock,
+                    onClick = {
+                        passwordInput = actionRoom.password
+                        passwordDialogCode = actionRoom.code
+                    },
+                ),
+                SheetAction(
+                    label = "复制邀请链接",
+                    icon = Icons.Rounded.ContentCopy,
+                    onClick = { copyInviteLink(context, vm, actionRoom.code) },
+                ),
+                SheetAction(
+                    label = "移除收藏",
+                    icon = Icons.Rounded.DeleteOutline,
+                    destructive = true,
+                    onClick = { vm.removeSavedRoom(actionRoom.code) },
+                ),
+            ),
+        )
+    }
+
+    // UX-28：设置备注名称弹窗
+    val renameCode = renameDialogCode
+    if (renameCode != null) {
+        BayDialog(
+            title = "设置备注名称",
+            message = "为常用房间 #$renameCode 设置易于识别的名称，留空可清除备注。",
+            confirmText = "保存",
+            onConfirm = {
+                vm.renameSavedRoom(renameCode, renameInput)
+                renameDialogCode = null
+            },
+            dismissText = "取消",
+            onDismiss = { renameDialogCode = null },
+        ) {
+            BayTextField(
+                value = renameInput,
+                onValueChange = { renameInput = it.take(24) },
+                placeholder = "例如：办公室传输室",
+                leadingIcon = Icons.Rounded.Edit,
+            )
+        }
+    }
+
+    // UX-28：修改本地保存密码弹窗
+    val pwdCode = passwordDialogCode
+    if (pwdCode != null) {
+        BayDialog(
+            title = "修改保存密码",
+            message = "更新本地为房间 #$pwdCode 记住的访问密码，留空表示清除本地密码。",
+            confirmText = "保存",
+            onConfirm = {
+                vm.updateSavedPassword(pwdCode, passwordInput)
+                passwordDialogCode = null
+            },
+            dismissText = "取消",
+            onDismiss = { passwordDialogCode = null },
+        ) {
+            BayTextField(
+                value = passwordInput,
+                onValueChange = { passwordInput = it.take(40) },
+                placeholder = "输入访问密码（留空则清除）",
+                leadingIcon = Icons.Rounded.Lock,
+                isPassword = true,
+            )
+        }
+    }
+}
+
+@Composable
+private fun OfflineNoticeStrip() {
+    val colors = BayTheme.colors
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(BayShapes.mdShape)
+            .background(colors.danger.copy(alpha = if (colors.isDark) 0.22f else 0.10f))
+            .padding(horizontal = BaySpacing.md, vertical = BaySpacing.sm),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(BaySpacing.sm),
+    ) {
+        Icon(
+            imageVector = Icons.Rounded.WifiOff,
+            contentDescription = null,
+            tint = colors.danger,
+            modifier = Modifier.size(16.dp),
+        )
+        Text(
+            text = "当前网络已断开，恢复后将自动重连",
+            style = BayType.footnote.copy(fontWeight = FontWeight.Medium),
+            color = colors.danger,
         )
     }
 }
@@ -731,6 +913,7 @@ private fun QuickEntryCard(
 
 @Composable
 private fun QuickScenarioRow(
+    lobbyBusy: Boolean,
     randomJoining: Boolean,
     onCreatePrivate: () -> Unit,
     onOpenPickup: () -> Unit,
@@ -743,6 +926,7 @@ private fun QuickScenarioRow(
         ScenarioTile(
             icon = Icons.Rounded.Lock,
             label = "新建私密房",
+            enabled = !lobbyBusy,
             onClick = onCreatePrivate,
             modifier = Modifier.weight(1f),
         )
@@ -755,7 +939,7 @@ private fun QuickScenarioRow(
         ScenarioTile(
             icon = Icons.Rounded.Explore,
             label = if (randomJoining) "匹配中" else "随机串门",
-            enabled = !randomJoining,
+            enabled = !randomJoining && !lobbyBusy,
             onClick = onRandomJoin,
             modifier = Modifier.weight(1f),
         )
@@ -773,6 +957,7 @@ private fun ScenarioTile(
     val colors = BayTheme.colors
     Column(
         modifier = modifier
+            .graphicsLayer { alpha = if (enabled) 1f else 0.45f }
             .bayClickable(enabled = enabled, onClick = onClick)
             .clip(BayShapes.mdShape)
             .background(colors.surface)
@@ -805,69 +990,23 @@ private fun ScenarioTile(
 }
 
 @Composable
-private fun NearbyInviteCard(
-    invite: NearbyInvite,
-    onAccept: () -> Unit,
-    onDecline: () -> Unit,
-) {
-    val colors = BayTheme.colors
-    BayCard(modifier = Modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(BaySpacing.md),
-                modifier = Modifier.weight(1f),
-            ) {
-                BayAvatar(emojiId = invite.fromAvatar, size = 40.dp)
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "${invite.fromName} 邀请直连",
-                        style = BayType.callout.copy(fontWeight = FontWeight.SemiBold),
-                        color = colors.textPrimary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        text = "房间 #${invite.roomCode}",
-                        style = BayType.caption,
-                        color = colors.textSecondary,
-                    )
-                }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(BaySpacing.sm)) {
-                BayButton(
-                    text = "婉拒",
-                    onClick = onDecline,
-                    style = BayButtonStyle.Neutral,
-                    size = BayButtonSize.Small,
-                )
-                BayButton(
-                    text = "接受",
-                    onClick = onAccept,
-                    style = BayButtonStyle.Primary,
-                    size = BayButtonSize.Small,
-                )
-            }
-        }
-    }
-}
-
-@Composable
 private fun NearbyPeerRow(
     peer: NearbyPeer,
+    isInviting: Boolean,
+    inviteLocked: Boolean,
     showDivider: Boolean,
     onInvite: () -> Unit,
 ) {
     val colors = BayTheme.colors
+    val (deviceIcon, deviceLabel) = remember(peer.deviceType) {
+        mapNearbyDeviceMeta(peer.deviceType)
+    }
+
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .bayClickable(onClick = onInvite)
+                .bayClickable(enabled = !inviteLocked, onClick = onInvite)
                 .padding(horizontal = BaySpacing.lg, vertical = BaySpacing.md),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -886,18 +1025,34 @@ private fun NearbyPeerRow(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    Text(
-                        text = "同网络在线 · ${peer.deviceType}",
-                        style = BayType.footnote,
-                        color = colors.textSecondary,
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Icon(
+                            imageVector = deviceIcon,
+                            contentDescription = null,
+                            tint = colors.textSecondary,
+                            modifier = Modifier.size(13.dp),
+                        )
+                        Text(
+                            text = "$deviceLabel · 同网络在线",
+                            style = BayType.footnote,
+                            color = colors.textSecondary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
             }
+            Spacer(modifier = Modifier.width(BaySpacing.sm))
             BayButton(
-                text = "邀请连接",
+                text = if (isInviting) "邀请中" else "邀请连接",
                 onClick = onInvite,
                 style = BayButtonStyle.Secondary,
                 size = BayButtonSize.Small,
+                loading = isInviting,
+                enabled = !inviteLocked,
             )
         }
         if (showDivider) {
@@ -912,13 +1067,25 @@ private fun NearbyPeerRow(
     }
 }
 
+private fun mapNearbyDeviceMeta(rawType: String): Pair<ImageVector, String> {
+    val normalized = rawType.trim().lowercase(Locale.ROOT)
+    return when {
+        normalized in setOf("android", "ios", "mobile", "phone") ->
+            Icons.Rounded.Smartphone to "手机端"
+        normalized in setOf("web", "browser", "desktop", "pc", "mac", "windows", "linux") ->
+            Icons.Rounded.Computer to "桌面浏览器"
+        else ->
+            Icons.Rounded.Devices to "附近设备"
+    }
+}
+
 @Composable
 private fun SavedFixedRoomRow(
     room: SavedFixedRoom,
     showDivider: Boolean,
     onEnter: () -> Unit,
     onCopyLink: () -> Unit,
-    onRemove: () -> Unit,
+    onMore: () -> Unit,
 ) {
     val colors = BayTheme.colors
     val title = if (room.alias.isNotBlank()) "${room.alias} (#${room.code})" else "#${room.code}"
@@ -940,7 +1107,7 @@ private fun SavedFixedRoomRow(
                     Icon(
                         imageVector = Icons.Rounded.Lock,
                         contentDescription = "已设密码",
-                        tint = colors.textTertiary,
+                        tint = colors.textSecondary,
                         modifier = Modifier.size(14.dp),
                     )
                 }
@@ -949,14 +1116,14 @@ private fun SavedFixedRoomRow(
                     contentDescription = "复制邀请链接",
                     onClick = onCopyLink,
                     style = BayIconStyle.Plain,
-                    size = 30.dp,
+                    size = 32.dp,
                 )
                 BayIconButton(
-                    icon = Icons.Rounded.DeleteOutline,
-                    contentDescription = "移除收藏",
-                    onClick = onRemove,
+                    icon = Icons.Rounded.MoreVert,
+                    contentDescription = "更多房间操作",
+                    onClick = onMore,
                     style = BayIconStyle.Plain,
-                    size = 30.dp,
+                    size = 32.dp,
                 )
             }
         },
@@ -993,7 +1160,7 @@ private fun RecentRoomItemRow(
                     Icon(
                         imageVector = Icons.Rounded.Lock,
                         contentDescription = "已设密码",
-                        tint = colors.textTertiary,
+                        tint = colors.textSecondary,
                         modifier = Modifier.size(14.dp),
                     )
                 }
@@ -1002,14 +1169,14 @@ private fun RecentRoomItemRow(
                     contentDescription = "复制邀请链接",
                     onClick = onCopyLink,
                     style = BayIconStyle.Plain,
-                    size = 30.dp,
+                    size = 32.dp,
                 )
                 BayIconButton(
                     icon = Icons.Rounded.DeleteOutline,
                     contentDescription = "移除记录",
                     onClick = onRemove,
                     style = BayIconStyle.Plain,
-                    size = 30.dp,
+                    size = 32.dp,
                 )
             }
         },

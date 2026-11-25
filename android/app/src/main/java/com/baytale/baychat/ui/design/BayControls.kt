@@ -11,9 +11,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -90,7 +89,7 @@ fun BaySwitch(
 }
 
 /**
- * iOS 风格分段控制器：34dp 高填充轨道 + 弹性平移白底滑块（浅色微投影 / 深色高阶面）。
+ * iOS 风格分段控制器：最小高 34dp 填充轨道 + 弹性平移白底滑块（支持大字号自适应撑高）。
  */
 @Composable
 fun BaySegmented(
@@ -109,7 +108,7 @@ fun BaySegmented(
     BoxWithConstraints(
         modifier = modifier
             .fillMaxWidth()
-            .height(34.dp)
+            .heightIn(min = 34.dp)
             .clip(outerShape)
             .background(colors.fill)
             .padding(2.dp),
@@ -124,55 +123,65 @@ fun BaySegmented(
             label = "baySegmentedOffset",
         )
 
-        // 选中项滑动指示块
         val thumbShadowModifier = if (colors.isDark) {
             Modifier
         } else {
             Modifier.shadow(elevation = 1.dp, shape = thumbShape, clip = false)
         }
-        Box(
-            modifier = Modifier
-                .offset(x = thumbOffset)
-                .width(segmentWidth)
-                .fillMaxHeight()
-                .then(thumbShadowModifier)
-                .clip(thumbShape)
-                .background(if (colors.isDark) colors.surfaceElevated else colors.surface),
-        )
 
-        // 选项标签层
-        Row(modifier = Modifier.fillMaxSize()) {
-            options.forEachIndexed { index, label ->
-                val isSelected = index == safeSelected
-                val interactionSource = remember(index) { MutableInteractionSource() }
+        Box(modifier = Modifier.fillMaxWidth()) {
+            // 选中项滑动指示块：使用 matchParentSize 与文本行等高，大字号时随内容同步增高
+            Box(modifier = Modifier.matchParentSize()) {
                 Box(
                     modifier = Modifier
-                        .weight(1f)
+                        .offset(x = thumbOffset)
+                        .width(segmentWidth)
                         .fillMaxHeight()
+                        .then(thumbShadowModifier)
                         .clip(thumbShape)
-                        .clickable(
-                            interactionSource = interactionSource,
-                            indication = null,
-                            role = Role.Tab,
-                            onClick = {
-                                if (index != safeSelected) {
-                                    BayHaptic.tap(haptic, enabled = true)
-                                    onSelect(index)
-                                }
-                            },
-                        ),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        text = label,
-                        style = BayType.footnote.copy(
-                            fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium,
-                        ),
-                        color = if (isSelected) colors.textPrimary else colors.textSecondary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(horizontal = BaySpacing.sm),
-                    )
+                        .background(if (colors.isDark) colors.surfaceElevated else colors.surface),
+                )
+            }
+
+            // 选项标签层
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 30.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                options.forEachIndexed { index, label ->
+                    val isSelected = index == safeSelected
+                    val interactionSource = remember(index) { MutableInteractionSource() }
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = 30.dp)
+                            .clip(thumbShape)
+                            .clickable(
+                                interactionSource = interactionSource,
+                                indication = null,
+                                role = Role.Tab,
+                                onClick = {
+                                    if (index != safeSelected) {
+                                        BayHaptic.tap(haptic, enabled = true)
+                                        onSelect(index)
+                                    }
+                                },
+                            )
+                            .padding(horizontal = BaySpacing.sm, vertical = 5.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = label,
+                            style = BayType.footnote.copy(
+                                fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium,
+                            ),
+                            color = if (isSelected) colors.textPrimary else colors.textSecondary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
             }
         }
@@ -180,7 +189,7 @@ fun BaySegmented(
 }
 
 /**
- * 轻量胶囊筛选项：高 32dp，零描边，选中时主题实底白字，未选中时 fill 填充。
+ * 轻量胶囊筛选项：最小高 32dp 视觉胶囊（外层透明热区 >= 44dp），零描边，支持大字号自适应撑高。
  */
 @Composable
 fun BayChip(
@@ -194,31 +203,35 @@ fun BayChip(
     val containerColor = if (selected) colors.accent else colors.fill
     val contentColor = if (selected) colors.onAccent else colors.textPrimary
 
-    Row(
+    BayMinTouchTarget(
         modifier = modifier
             .semantics { role = Role.Checkbox }
-            .bayClickable(onClick = onClick)
-            .height(32.dp)
-            .clip(BayShapes.fullShape)
-            .background(containerColor)
-            .padding(horizontal = BaySpacing.md),
-        horizontalArrangement = Arrangement.spacedBy(BaySpacing.xs),
-        verticalAlignment = Alignment.CenterVertically,
+            .bayClickable(onClick = onClick),
     ) {
-        if (leadingIcon != null) {
-            Icon(
-                imageVector = leadingIcon,
-                contentDescription = null,
-                tint = contentColor,
-                modifier = Modifier.size(14.dp),
+        Row(
+            modifier = Modifier
+                .heightIn(min = 32.dp)
+                .clip(BayShapes.fullShape)
+                .background(containerColor)
+                .padding(horizontal = BaySpacing.md, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(BaySpacing.xs),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (leadingIcon != null) {
+                Icon(
+                    imageVector = leadingIcon,
+                    contentDescription = null,
+                    tint = contentColor,
+                    modifier = Modifier.size(14.dp),
+                )
+            }
+            Text(
+                text = label,
+                style = BayType.footnote.copy(fontWeight = FontWeight.Medium),
+                color = contentColor,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
         }
-        Text(
-            text = label,
-            style = BayType.footnote.copy(fontWeight = FontWeight.Medium),
-            color = contentColor,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
     }
 }

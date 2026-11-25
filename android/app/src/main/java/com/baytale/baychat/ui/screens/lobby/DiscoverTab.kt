@@ -16,15 +16,19 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.Explore
 import androidx.compose.material.icons.rounded.Group
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Shuffle
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -36,16 +40,22 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.baytale.baychat.core.model.RoomSummary
@@ -70,9 +80,12 @@ import com.baytale.baychat.ui.theme.BaySpacing
 import com.baytale.baychat.ui.theme.BayTheme
 import com.baytale.baychat.ui.theme.BayType
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 
 private const val DISCOVER_PULL_DEBOUNCE_MS = 1500L
+private const val DISCOVER_MIN_REFRESH_MS = 350L
+private const val DISCOVER_REFRESH_TIMEOUT_MS = 8000L
 
 private val PUBLIC_RETENTION_CHOICES = listOf(
     0 to "阅后即焚",
@@ -108,15 +121,35 @@ fun DiscoverTab(
     val colors = BayTheme.colors
     val haptic = LocalHapticFeedback.current
     val view = LocalView.current
-    val scope = rememberCoroutineScope()
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
 
     var searchKeyword by rememberSaveable { mutableStateOf("") }
     var showCreatePublicSheet by remember { mutableStateOf(false) }
-    var isRefreshing by remember { mutableStateOf(false) }
+    var pullRefreshing by remember { mutableStateOf(false) }
     var lastPullAt by remember { mutableLongStateOf(0L) }
+    var pullStartedAt by remember { mutableLongStateOf(0L) }
+    val latestLoading by rememberUpdatedState(state.publicRoomsLoading)
+    val latestHapticEnabled by rememberUpdatedState(state.prefs.hapticEnabled)
 
     LaunchedEffect(Unit) {
         vm.refreshPublicRoomsIfStale()
+    }
+
+    // UX-7：等待真实公开房刷新结束（最短 350ms 防闪烁，最长 8000ms 超时兜底）
+    LaunchedEffect(pullRefreshing) {
+        if (!pullRefreshing) return@LaunchedEffect
+        delay(120L)
+        withTimeoutOrNull(DISCOVER_REFRESH_TIMEOUT_MS) {
+            snapshotFlow { latestLoading }.first { !it }
+        }
+        val elapsed = System.currentTimeMillis() - pullStartedAt
+        if (elapsed < DISCOVER_MIN_REFRESH_MS) {
+            delay(DISCOVER_MIN_REFRESH_MS - elapsed)
+        }
+        pullRefreshing = false
+        BayHaptic.confirm(view, enabled = latestHapticEnabled)
+        vm.playRefreshSound()
     }
 
     val filteredRooms = remember(state.publicRooms, searchKeyword) {
@@ -143,7 +176,7 @@ fun DiscoverTab(
                 BayIconButton(
                     icon = Icons.Rounded.Shuffle,
                     contentDescription = "随机串门",
-                    enabled = !state.randomJoining,
+                    enabled = !state.randomJoining && !state.lobbyBusy,
                     onClick = {
                         BayHaptic.tap(haptic, enabled = state.prefs.hapticEnabled)
                         vm.joinRandomPublicRoom(excludeCurrent = false)
@@ -153,13 +186,14 @@ fun DiscoverTab(
                 BayIconButton(
                     icon = Icons.Rounded.Add,
                     contentDescription = "创建公开房间",
+                    enabled = !state.lobbyBusy,
                     onClick = { showCreatePublicSheet = true },
                     style = BayIconStyle.Accent,
                 )
             },
         )
 
-        // 本地关键词搜索栏
+        // 本地关键词搜索栏（UX-32：配置 Search 动作收起键盘）
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -170,6 +204,13 @@ fun DiscoverTab(
                 onValueChange = { searchKeyword = it.take(60) },
                 placeholder = "搜索房间口令或主题关键词",
                 leadingIcon = Icons.Rounded.Search,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                keyboardActions = KeyboardActions(
+                    onSearch = {
+                        keyboardController?.hide()
+                        focusManager.clearFocus()
+                    },
+                ),
                 trailing = if (searchKeyword.isNotEmpty()) {
                     {
                         BayIconButton(
@@ -189,19 +230,17 @@ fun DiscoverTab(
         Spacer(modifier = Modifier.height(BaySpacing.xs))
 
         PullToRefreshBox(
-            isRefreshing = isRefreshing || state.publicRoomsLoading,
+            isRefreshing = pullRefreshing,
             onRefresh = {
                 val now = System.currentTimeMillis()
-                if (now - lastPullAt >= DISCOVER_PULL_DEBOUNCE_MS) {
+                if (now - lastPullAt < DISCOVER_PULL_DEBOUNCE_MS) {
+                    pullRefreshing = false
+                    vm.showToast("刚刚刷新过，请稍候")
+                } else {
                     lastPullAt = now
-                    isRefreshing = true
+                    pullStartedAt = now
+                    pullRefreshing = true
                     vm.refreshPublicRooms(silent = false)
-                    scope.launch {
-                        delay(550L)
-                        isRefreshing = false
-                        BayHaptic.confirm(view, enabled = state.prefs.hapticEnabled)
-                        vm.playRefreshSound()
-                    }
                 }
             },
             modifier = Modifier
@@ -214,22 +253,55 @@ fun DiscoverTab(
                     contentPadding = PaddingValues(vertical = BaySpacing.xl),
                 ) {
                     item {
-                        if (searchKeyword.isNotBlank()) {
-                            BayEmptyState(
-                                icon = Icons.Rounded.Search,
-                                title = "未找到匹配房间",
-                                message = "换个关键词试试，或清空搜索条件查看全部公开房间。",
-                                actionLabel = "清空搜索",
-                                onAction = { searchKeyword = "" },
-                            )
-                        } else {
-                            BayEmptyState(
-                                icon = Icons.Rounded.Explore,
-                                title = "暂无公开房间",
-                                message = "你可以创建一个公开房间供大家发现，或下拉刷新重试。",
-                                actionLabel = "创建公开房间",
-                                onAction = { showCreatePublicSheet = true },
-                            )
+                        when {
+                            state.publicRoomsLoading -> {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = BaySpacing.xxxl),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(BaySpacing.md),
+                                ) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(28.dp),
+                                        color = colors.accent,
+                                        strokeWidth = 2.5.dp,
+                                        strokeCap = StrokeCap.Round,
+                                    )
+                                    Text(
+                                        text = "正在加载公开房间…",
+                                        style = BayType.subhead,
+                                        color = colors.textSecondary,
+                                    )
+                                }
+                            }
+                            state.publicRoomsError != null -> {
+                                BayEmptyState(
+                                    icon = Icons.Rounded.ErrorOutline,
+                                    title = "公开房间加载失败",
+                                    message = state.publicRoomsError,
+                                    actionLabel = "重新加载",
+                                    onAction = { vm.refreshPublicRooms(silent = false) },
+                                )
+                            }
+                            searchKeyword.isNotBlank() -> {
+                                BayEmptyState(
+                                    icon = Icons.Rounded.Search,
+                                    title = "未找到匹配房间",
+                                    message = "换个关键词试试，或清空搜索条件查看全部公开房间。",
+                                    actionLabel = "清空搜索",
+                                    onAction = { searchKeyword = "" },
+                                )
+                            }
+                            else -> {
+                                BayEmptyState(
+                                    icon = Icons.Rounded.Explore,
+                                    title = "暂无公开房间",
+                                    message = "你可以创建一个公开房间供大家发现，或下拉刷新重试。",
+                                    actionLabel = "创建公开房间",
+                                    onAction = { showCreatePublicSheet = true },
+                                )
+                            }
                         }
                     }
                 }
@@ -250,6 +322,7 @@ fun DiscoverTab(
                     ) { room ->
                         PublicRoomCard(
                             room = room,
+                            enabled = !state.lobbyBusy,
                             onJoin = { vm.joinRoom(room.code, "") },
                         )
                     }
@@ -278,6 +351,7 @@ fun DiscoverTab(
 @Composable
 private fun PublicRoomCard(
     room: RoomSummary,
+    enabled: Boolean,
     onJoin: () -> Unit,
 ) {
     val colors = BayTheme.colors
@@ -286,8 +360,10 @@ private fun PublicRoomCard(
     val limitDesc = FormatUtils.formatLimitMB(room.maxFileSizeMB)
 
     BayCard(
-        modifier = Modifier.fillMaxWidth(),
-        onClick = onJoin,
+        modifier = Modifier
+            .fillMaxWidth()
+            .graphicsLayer { alpha = if (enabled) 1f else 0.55f },
+        onClick = if (enabled) onJoin else null,
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -362,6 +438,7 @@ private fun PublicRoomCard(
                 onClick = onJoin,
                 style = BayButtonStyle.Secondary,
                 size = BayButtonSize.Small,
+                enabled = enabled,
             )
         }
     }

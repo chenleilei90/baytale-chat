@@ -1,5 +1,7 @@
 package com.baytale.baychat.ui.screens.chat
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
@@ -9,8 +11,11 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -24,10 +29,12 @@ import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -59,7 +66,16 @@ fun MessageBubble(
     hapticEnabled: Boolean,
     imageHeaders: Map<String, String>,
     voicePlayback: VoicePlaybackState,
+    playedVoiceIds: Set<String>,
+    snapshotTransferredBytes: Long? = null,
+    snapshotTotalBytes: Long? = null,
+    snapshotSpeedBps: Long? = null,
+    snapshotEtaSeconds: Int? = null,
+    isHighlighted: Boolean = false,
     onLongPress: () -> Unit,
+    onReEditRecall: (String) -> Unit,
+    onJumpToReply: (String) -> Unit,
+    onDoubleClickText: (String) -> Unit,
     onPeerClick: (peerId: String, peerName: String) -> Unit,
     onRetrySend: (messageId: String) -> Unit,
     onReact: (emoji: String) -> Unit,
@@ -73,34 +89,47 @@ fun MessageBubble(
     onRequestResend: () -> Unit,
     onRetryCloudUpload: () -> Unit,
     onToggleVoice: () -> Unit,
-    onSeekVoice: (Long) -> Unit,
     onCopiedClip: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val colors = BayTheme.colors
     val haptic = LocalHapticFeedback.current
 
-    // 系统通知 / 撤回提示气泡
+    // 系统通知 / 撤回提示气泡（本人撤回的文本消息支持「重新编辑」）
     if (item.kind == ChatKind.SYSTEM) {
         val rawText = item.text.orEmpty()
         val displayText = if (rawText.startsWith("↩ ")) rawText.removePrefix("↩ ").trim() else rawText
+        val recalledText = item.recalledText
         Box(
             modifier = modifier
                 .fillMaxWidth()
                 .padding(vertical = BaySpacing.xs),
             contentAlignment = Alignment.Center,
         ) {
-            Box(
+            Row(
                 modifier = Modifier
                     .clip(BayShapes.fullShape)
                     .background(colors.fill)
                     .padding(horizontal = BaySpacing.md, vertical = 5.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(BaySpacing.sm),
             ) {
                 Text(
                     text = displayText,
                     style = BayType.caption.copy(fontWeight = FontWeight.Normal),
                     color = colors.textSecondary,
                 )
+                if (item.isSelfRecall && !recalledText.isNullOrEmpty()) {
+                    Text(
+                        text = "重新编辑",
+                        style = BayType.caption.copy(fontWeight = FontWeight.SemiBold),
+                        color = colors.accent,
+                        modifier = Modifier
+                            .bayClickable { onReEditRecall(recalledText) }
+                            .clip(BayShapes.xsShape)
+                            .padding(horizontal = 2.dp),
+                    )
+                }
             }
         }
         return
@@ -114,26 +143,40 @@ fun MessageBubble(
     )
 
     val topGap = if (isFirstInGroup) BaySpacing.sm else 2.dp
+    val rowHighlightColor by animateColorAsState(
+        targetValue = if (isHighlighted) colors.accentSoft else Color.Transparent,
+        animationSpec = tween(durationMillis = 320),
+        label = "messageJumpHighlight",
+    )
 
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .padding(top = topGap),
+            .padding(top = topGap)
+            .clip(BayShapes.mdShape)
+            .background(rowHighlightColor)
+            .padding(horizontal = 2.dp, vertical = 1.dp),
         horizontalArrangement = if (item.isSelf) Arrangement.End else Arrangement.Start,
         verticalAlignment = Alignment.Top,
     ) {
-        // 他人消息左侧头像列（连贯消息保留对齐空白）
+        // 他人消息左侧头像列（连贯消息保留对齐空白，点击热区 >= 44.dp）
         if (!item.isSelf) {
             if (isFirstInGroup) {
-                BayAvatar(
-                    emojiId = item.senderAvatar,
-                    size = 34.dp,
-                    modifier = Modifier.bayClickable { onPeerClick(item.senderId, item.senderName) },
-                )
+                Box(
+                    modifier = Modifier
+                        .defaultMinSize(minWidth = 44.dp, minHeight = 44.dp)
+                        .bayClickable { onPeerClick(item.senderId, item.senderName) },
+                    contentAlignment = Alignment.TopCenter,
+                ) {
+                    BayAvatar(
+                        emojiId = item.senderAvatar,
+                        size = 34.dp,
+                    )
+                }
             } else {
-                Spacer(modifier = Modifier.width(34.dp))
+                Spacer(modifier = Modifier.width(44.dp))
             }
-            Spacer(modifier = Modifier.width(BaySpacing.sm))
+            Spacer(modifier = Modifier.width(BaySpacing.xs))
         }
 
         Column(
@@ -167,13 +210,13 @@ fun MessageBubble(
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Normal,
                         ),
-                        color = colors.textTertiary,
+                        color = colors.textSecondary,
                     )
                     if (item.fromCache) {
                         Text(
                             text = "云端",
                             style = BayType.caption.copy(fontWeight = FontWeight.Normal),
-                            color = colors.textTertiary,
+                            color = colors.textSecondary,
                         )
                     }
                 }
@@ -192,6 +235,7 @@ fun MessageBubble(
                 }
 
                 val longPressInteraction = remember { MutableInteractionSource() }
+                val textBody = item.text.orEmpty()
                 Box(
                     modifier = Modifier
                         .widthIn(max = 304.dp)
@@ -199,6 +243,11 @@ fun MessageBubble(
                             interactionSource = longPressInteraction,
                             indication = null,
                             onClick = {},
+                            onDoubleClick = if (item.kind == ChatKind.TEXT && textBody.isNotBlank()) {
+                                { onDoubleClickText(textBody) }
+                            } else {
+                                null
+                            },
                             onLongClick = {
                                 BayHaptic.heavy(haptic, hapticEnabled)
                                 onLongPress()
@@ -207,22 +256,31 @@ fun MessageBubble(
                 ) {
                     when (item.kind) {
                         ChatKind.TEXT -> {
-                            val bubbleBg = if (item.isSelf) {
-                                colors.accent
-                            } else if (colors.isDark) {
-                                colors.surfaceElevated
-                            } else {
-                                colors.surface
-                            }
+                            val basePeerBg = if (colors.isDark) colors.surfaceElevated else colors.surface
                             val textColor = if (item.isSelf) colors.onAccent else colors.textPrimary
+                            val bubbleBgModifier = when {
+                                item.isSelf -> Modifier.background(colors.accent)
+                                item.mentionedMe -> Modifier
+                                    .background(basePeerBg)
+                                    .background(colors.accentSoft)
+                                else -> Modifier.background(basePeerBg)
+                            }
 
                             Column(
                                 modifier = Modifier
                                     .clip(bubbleShape)
-                                    .background(bubbleBg)
+                                    .then(bubbleBgModifier)
                                     .padding(horizontal = BaySpacing.md + 2.dp, vertical = 10.dp),
                                 verticalArrangement = Arrangement.spacedBy(6.dp),
                             ) {
+                                if (!item.isSelf && item.mentionedMe) {
+                                    Text(
+                                        text = "@我",
+                                        style = BayType.caption.copy(fontWeight = FontWeight.SemiBold),
+                                        color = colors.accent,
+                                    )
+                                }
+
                                 item.replyTo?.let { quote ->
                                     val quoteBg = if (item.isSelf) {
                                         colors.onAccent.copy(alpha = 0.16f)
@@ -230,8 +288,11 @@ fun MessageBubble(
                                         colors.fill
                                     }
                                     val quoteBar = if (item.isSelf) colors.onAccent else colors.accent
+                                    val isRecalledQuote = quote.preview == "该引用内容已撤回"
                                     Row(
                                         modifier = Modifier
+                                            .bayClickable { onJumpToReply(quote.id) }
+                                            .height(IntrinsicSize.Min)
                                             .clip(BayShapes.xsShape)
                                             .background(quoteBg)
                                             .padding(horizontal = BaySpacing.sm, vertical = 5.dp),
@@ -240,7 +301,7 @@ fun MessageBubble(
                                         Box(
                                             modifier = Modifier
                                                 .width(2.5.dp)
-                                                .height(28.dp)
+                                                .fillMaxHeight()
                                                 .clip(BayShapes.fullShape)
                                                 .background(quoteBar),
                                         )
@@ -254,10 +315,12 @@ fun MessageBubble(
                                             Text(
                                                 text = quote.preview,
                                                 style = BayType.caption.copy(fontWeight = FontWeight.Normal),
-                                                color = if (item.isSelf) {
-                                                    colors.onAccent.copy(alpha = 0.88f)
-                                                } else {
-                                                    colors.textSecondary
+                                                color = when {
+                                                    item.isSelf -> colors.onAccent.copy(
+                                                        alpha = if (isRecalledQuote) 0.65f else 0.88f,
+                                                    )
+                                                    isRecalledQuote -> colors.textSecondary.copy(alpha = 0.72f)
+                                                    else -> colors.textSecondary
                                                 },
                                                 maxLines = 2,
                                                 overflow = TextOverflow.Ellipsis,
@@ -267,7 +330,7 @@ fun MessageBubble(
                                 }
 
                                 Text(
-                                    text = item.text.orEmpty(),
+                                    text = textBody,
                                     style = BayType.callout,
                                     color = textColor,
                                 )
@@ -278,6 +341,8 @@ fun MessageBubble(
                             ImageMessageCard(
                                 item = item,
                                 imageHeaders = imageHeaders,
+                                snapshotTransferredBytes = snapshotTransferredBytes,
+                                snapshotTotalBytes = snapshotTotalBytes,
                                 onPreviewImage = onPreviewImage,
                                 onCancelTransfer = onCancelTransfer,
                                 onRequestResend = onRequestResend,
@@ -291,6 +356,10 @@ fun MessageBubble(
                                 FileTransferCard(
                                     item = item,
                                     transfer = tr,
+                                    snapshotTransferredBytes = snapshotTransferredBytes,
+                                    snapshotTotalBytes = snapshotTotalBytes,
+                                    snapshotSpeedBps = snapshotSpeedBps,
+                                    snapshotEtaSeconds = snapshotEtaSeconds,
                                     onAccept = onAcceptFile,
                                     onReject = onRejectFile,
                                     onCancel = onCancelTransfer,
@@ -309,14 +378,17 @@ fun MessageBubble(
                             VoiceMessageRow(
                                 item = item,
                                 voicePlayback = voicePlayback,
+                                isUnread = !item.isSelf && item.id !in playedVoiceIds,
+                                hapticEnabled = hapticEnabled,
                                 onTogglePlayback = onToggleVoice,
-                                onSeekTo = onSeekVoice,
+                                onLongPress = onLongPress,
                             )
                         }
 
                         ChatKind.CLIP -> {
                             ClipCard(
                                 item = item,
+                                hapticEnabled = hapticEnabled,
                                 onCopied = onCopiedClip,
                             )
                         }
@@ -349,24 +421,30 @@ fun MessageBubble(
                         } else {
                             colors.surface
                         }
-                        Row(
+                        Box(
                             modifier = Modifier
-                                .bayClickable { onReact(emoji) }
-                                .clip(BayShapes.fullShape)
-                                .background(pillBg)
-                                .padding(horizontal = 8.dp, vertical = 3.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                .defaultMinSize(minWidth = 44.dp, minHeight = 44.dp)
+                                .bayClickable { onReact(emoji) },
+                            contentAlignment = Alignment.Center,
                         ) {
-                            Text(
-                                text = emoji,
-                                style = BayType.footnote,
-                            )
-                            Text(
-                                text = users.size.toString(),
-                                style = BayType.caption.copy(fontFamily = FontFamily.Monospace),
-                                color = if (reactedByMe) colors.accent else colors.textSecondary,
-                            )
+                            Row(
+                                modifier = Modifier
+                                    .clip(BayShapes.fullShape)
+                                    .background(pillBg)
+                                    .padding(horizontal = 8.dp, vertical = 3.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                Text(
+                                    text = emoji,
+                                    style = BayType.footnote,
+                                )
+                                Text(
+                                    text = users.size.toString(),
+                                    style = BayType.caption.copy(fontFamily = FontFamily.Monospace),
+                                    color = if (reactedByMe) colors.accent else colors.textSecondary,
+                                )
+                            }
                         }
                     }
                 }
@@ -387,7 +465,7 @@ private fun SelfSendStatusIndicator(
             Icon(
                 imageVector = Icons.Rounded.Schedule,
                 contentDescription = "发送中",
-                tint = colors.textTertiary,
+                tint = colors.textSecondary,
                 modifier = Modifier
                     .padding(bottom = 6.dp)
                     .size(16.dp),
@@ -396,27 +474,32 @@ private fun SelfSendStatusIndicator(
         MessageSendStatus.FAILED -> {
             Box(
                 modifier = Modifier
-                    .padding(bottom = 4.dp)
-                    .bayClickable(onClick = onRetry)
-                    .clip(BayShapes.fullShape)
-                    .background(colors.danger.copy(alpha = if (colors.isDark) 0.24f else 0.14f))
-                    .padding(horizontal = 6.dp, vertical = 3.dp),
+                    .defaultMinSize(minWidth = 44.dp, minHeight = 44.dp)
+                    .bayClickable(onClick = onRetry),
+                contentAlignment = Alignment.Center,
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                Box(
+                    modifier = Modifier
+                        .clip(BayShapes.fullShape)
+                        .background(colors.danger.copy(alpha = if (colors.isDark) 0.24f else 0.14f))
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
                 ) {
-                    Icon(
-                        imageVector = Icons.Rounded.ErrorOutline,
-                        contentDescription = "发送失败，点击重试",
-                        tint = colors.danger,
-                        modifier = Modifier.size(14.dp),
-                    )
-                    Text(
-                        text = "重发",
-                        style = BayType.caption,
-                        color = colors.danger,
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(3.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.ErrorOutline,
+                            contentDescription = "发送失败，点击重试",
+                            tint = colors.danger,
+                            modifier = Modifier.size(14.dp),
+                        )
+                        Text(
+                            text = "重发",
+                            style = BayType.caption,
+                            color = colors.danger,
+                        )
+                    }
                 }
             }
         }

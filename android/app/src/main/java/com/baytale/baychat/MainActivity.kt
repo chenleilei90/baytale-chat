@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
@@ -20,13 +21,18 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.baytale.baychat.service.AppUpdateService
+import com.baytale.baychat.service.IncomingNotificationHelper
 import com.baytale.baychat.service.OtaUpdateStatus
+import com.baytale.baychat.service.TransferForegroundService
 import com.baytale.baychat.ui.AppShortcutAction
 import com.baytale.baychat.ui.BayChatViewModel
 import com.baytale.baychat.ui.PortraitCaptureActivity
@@ -74,13 +80,36 @@ class MainActivity : ComponentActivity() {
         setContent {
             val uiState by viewModel.uiState.collectAsState()
             var showLeaveConfirm by remember { mutableStateOf(false) }
+            var permissionGuide by remember { mutableStateOf<Pair<String, String>?>(null) }
 
+            // UX-16：悬浮球归一化停靠位置，跨旋转与回房重挂稳定保持
+            var orbDockedRight by rememberSaveable { mutableStateOf(true) }
+            var orbVerticalFraction by rememberSaveable { mutableFloatStateOf(0.86f) }
+
+            fun openAppDetailsSettings() {
+                val settingsIntent = Intent(
+                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.fromParts("package", packageName, null),
+                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                runCatching { startActivity(settingsIntent) }
+            }
+
+            // UX-8：通知权限被永久拒绝时给出用途说明并跳转系统设置
             val notificationPermLauncher = rememberLauncherForActivityResult(
                 contract = ActivityResultContracts.RequestPermission()
             ) { granted ->
                 viewModel.markNotificationAsked()
                 if (!granted) {
-                    viewModel.showToast("已跳过通知权限，如需后台来件提醒可在系统设置中开启")
+                    val permanentlyDenied = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                        !ActivityCompat.shouldShowRequestPermissionRationale(
+                            this@MainActivity,
+                            Manifest.permission.POST_NOTIFICATIONS,
+                        )
+                    if (permanentlyDenied) {
+                        permissionGuide = "需要通知权限" to "通知权限用于显示后台文件传输保活进度与新消息提醒，请前往系统设置开启。"
+                    } else {
+                        viewModel.showToast("已跳过通知权限，如需后台来件提醒可在系统设置中开启")
+                    }
                 }
             }
 
@@ -93,7 +122,7 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            fun launchQrScanner() {
+            fun startQrScanIntent() {
                 val opts = ScanOptions().apply {
                     setCaptureActivity(PortraitCaptureActivity::class.java)
                     setDesiredBarcodeFormats(ScanOptions.QR_CODE)
@@ -103,6 +132,37 @@ class MainActivity : ComponentActivity() {
                     setBarcodeImageEnabled(false)
                 }
                 qrScanLauncher.launch(opts)
+            }
+
+            // UX-8：扫一扫前检查与申请 CAMERA 权限，永久拒绝时弹窗引导系统设置
+            val cameraPermLauncher = rememberLauncherForActivityResult(
+                contract = ActivityResultContracts.RequestPermission()
+            ) { granted ->
+                if (granted) {
+                    startQrScanIntent()
+                } else {
+                    val permanentlyDenied = !ActivityCompat.shouldShowRequestPermissionRationale(
+                        this@MainActivity,
+                        Manifest.permission.CAMERA,
+                    )
+                    if (permanentlyDenied) {
+                        permissionGuide = "需要相机权限" to "扫一扫需要使用相机识别房间二维码，请前往系统设置开启相机权限。"
+                    } else {
+                        viewModel.showToast("未授予相机权限，无法使用扫一扫")
+                    }
+                }
+            }
+
+            fun launchQrScanner() {
+                val granted = ContextCompat.checkSelfPermission(
+                    this@MainActivity,
+                    Manifest.permission.CAMERA,
+                ) == PackageManager.PERMISSION_GRANTED
+                if (granted) {
+                    startQrScanIntent()
+                } else {
+                    cameraPermLauncher.launch(Manifest.permission.CAMERA)
+                }
             }
 
             // B24：仅在尚未询问过通知权限时按需引导一次
@@ -122,6 +182,13 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
+            // UX-9：协调附近设备轮询（仅在已同意隐私且处于前台时保持轮询，退后台由 onAppBackgrounded 停止）
+            LaunchedEffect(uiState.privacyAccepted, uiState.isAppForeground, uiState.prefs.nearbyDiscoverable) {
+                if (uiState.privacyAccepted && uiState.isAppForeground && uiState.prefs.nearbyDiscoverable) {
+                    viewModel.startNearbyPolling()
+                }
+            }
+
             // 桌面快捷方式扫码动作路由
             LaunchedEffect(uiState.pendingAppAction, uiState.privacyAccepted) {
                 if (uiState.privacyAccepted && uiState.pendingAppAction == AppShortcutAction.SCAN) {
@@ -130,10 +197,10 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            // 悬浮胶囊 Toast 自动定时消失
-            LaunchedEffect(uiState.toastMessage) {
+            // UX-12：悬浮胶囊 Toast 自动定时消失（收敛至 2000ms，并用 toastSeq 支持同文案重计时）
+            LaunchedEffect(uiState.toastMessage, uiState.toastSeq) {
                 if (!uiState.toastMessage.isNullOrBlank()) {
-                    delay(2400L)
+                    delay(2000L)
                     viewModel.clearToast()
                 }
             }
@@ -179,7 +246,15 @@ class MainActivity : ComponentActivity() {
                                 FloatingRoomOrb(
                                     room = activeRoom,
                                     unreadCount = uiState.unreadCount,
+                                    isMuted = activeRoom.roomCode.uppercase() in uiState.mutedRooms,
+                                    transferProgress = uiState.transferProgress,
                                     hapticEnabled = uiState.prefs.hapticEnabled,
+                                    dockedRight = orbDockedRight,
+                                    verticalFraction = orbVerticalFraction,
+                                    onPositionChange = { right, fraction ->
+                                        orbDockedRight = right
+                                        orbVerticalFraction = fraction
+                                    },
                                     onRestoreRoom = { viewModel.restoreRoom() },
                                     onRequestLeaveRoom = { showLeaveConfirm = true },
                                 )
@@ -204,8 +279,9 @@ class MainActivity : ComponentActivity() {
                         )
                     }
 
-                    // 应用更新详情与断点续传弹窗
+                    // UX-17：应用更新详情与断点续传弹窗（非强制升级不打断新手引导）
                     val canShowUpdateModal = uiState.privacyAccepted &&
+                        (uiState.prefs.onboardingDone || uiState.otaState.isForceUpdate) &&
                         uiState.showUpdateDialog &&
                         uiState.otaState.release != null &&
                         (uiState.activeRoom == null || uiState.roomMinimized || uiState.otaState.isForceUpdate)
@@ -217,6 +293,22 @@ class MainActivity : ComponentActivity() {
                             onInstall = { viewModel.installReadyAppUpdate() },
                             onIgnore = { viewModel.ignoreCurrentUpdate() },
                             onDismiss = { viewModel.dismissUpdateDialog() },
+                        )
+                    }
+
+                    // UX-8：权限被永久拒绝后的系统设置引导弹窗
+                    val guide = permissionGuide
+                    if (guide != null) {
+                        BayDialog(
+                            title = guide.first,
+                            message = guide.second,
+                            confirmText = "去设置开启",
+                            onConfirm = {
+                                permissionGuide = null
+                                openAppDetailsSettings()
+                            },
+                            dismissText = "暂不",
+                            onDismiss = { permissionGuide = null },
                         )
                     }
 
@@ -288,6 +380,16 @@ class MainActivity : ComponentActivity() {
     private fun parseIncomingIntent(intent: Intent?) {
         if (intent == null) return
         when (intent.action) {
+            // UX-18：通知点击直达挂起房间或打开 OTA 详情弹窗
+            IncomingNotificationHelper.ACTION_RESTORE_ACTIVE_ROOM,
+            TransferForegroundService.ACTION_RESTORE_ACTIVE_ROOM -> {
+                viewModel.restoreRoom()
+            }
+
+            AppUpdateService.ACTION_OPEN_OTA_DIALOG -> {
+                viewModel.openUpdateDialog()
+            }
+
             AppUpdateService.ACTION_OPEN_OTA_INSTALL -> {
                 viewModel.installReadyAppUpdate()
             }

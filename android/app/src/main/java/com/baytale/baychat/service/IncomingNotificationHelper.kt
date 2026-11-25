@@ -13,6 +13,7 @@ import com.baytale.baychat.core.util.FormatUtils
 // 后台高优先级来件与消息提醒通知管理器（渠道：baychat_incoming）
 object IncomingNotificationHelper {
     const val CHANNEL_ID = "baychat_incoming"
+    const val ACTION_RESTORE_ACTIVE_ROOM = "com.baytale.baychat.ACTION_RESTORE_ACTIVE_ROOM"
     private const val NOTIFICATION_ID_MESSAGES = 10110
     private const val OFFER_ID_BASE = 10200
 
@@ -47,6 +48,7 @@ object IncomingNotificationHelper {
         val notifId = offerNotificationId(transferId)
 
         val openIntent = Intent(appCtx, MainActivity::class.java).apply {
+            action = ACTION_RESTORE_ACTIVE_ROOM
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
         val openPi = PendingIntent.getActivity(
@@ -106,12 +108,14 @@ object IncomingNotificationHelper {
         unreadCount: Int,
         senderName: String,
         previewText: String,
+        mentionedMe: Boolean = false,
     ) {
         val appCtx = context.applicationContext
         ensureChannel(appCtx)
         val nm = appCtx.getSystemService(NotificationManager::class.java) ?: return
 
         val openIntent = Intent(appCtx, MainActivity::class.java).apply {
+            action = ACTION_RESTORE_ACTIVE_ROOM
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
         val openPi = PendingIntent.getActivity(
@@ -121,11 +125,12 @@ object IncomingNotificationHelper {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
 
-        val title = if (unreadCount > 1) {
+        val baseTitle = if (unreadCount > 1) {
             "湾聊 #$roomCode · $unreadCount 条新消息"
         } else {
             "$senderName · 湾聊 #$roomCode"
         }
+        val title = if (mentionedMe) "[有人@我] $baseTitle" else baseTitle
         val notification = NotificationCompat.Builder(appCtx, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentTitle(title)

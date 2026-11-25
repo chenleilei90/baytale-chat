@@ -5,6 +5,8 @@ import android.app.Application
 import android.content.Context
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import android.media.MediaPlayer
 import android.media.MediaRecorder
 import android.net.ConnectivityManager
@@ -144,6 +146,24 @@ data class PendingSwitchRoom(
     val password: String = "",
     val source: String = "",
     val roomSummary: RoomSummary? = null,
+    // UX-15：若是因收到附近邀请触发切换确认，暂存该邀请以便确认切换时再回复服务端
+    val pendingNearbyInvite: NearbyInvite? = null,
+)
+
+// UX-15：已发出的附近设备直连邀请状态（供房间顶部横幅轮询展示）
+data class OutgoingNearbyInvite(
+    val inviteId: String,
+    val toName: String,
+    val roomCode: String,
+    val status: String = "waiting", // waiting | accepted | declined | expired
+)
+
+// UX-19：高频文件传输实时进度快照（独立于消息列表，防止每 200ms 重建全列表重组）
+data class TransferProgressSnapshot(
+    val transferredBytes: Long,
+    val totalBytes: Long,
+    val speedBps: Long,
+    val etaSeconds: Int,
 )
 
 // 文件夹 ZIP 打包实时进度
@@ -233,8 +253,26 @@ data class BayChatUiState(
     val packingFolder: FolderPackProgress? = null,
     val isRecordingVoice: Boolean = false,
     val voiceRecordDurationMs: Long = 0L,
+    val voiceAmplitude: Float = 0f,
     val voicePlayback: VoicePlaybackState = VoicePlaybackState(),
+    val playedVoiceIds: Set<String> = emptySet(),
     val storageStats: StorageStats = StorageStats(),
+    // 按房间持久化的输入草稿与消息免打扰开关
+    val draftsByRoom: Map<String, String> = emptyMap(),
+    val mutedRooms: Set<String> = emptySet(),
+    // 「以下为新消息」定位标记与待跳转 @我 消息 ID 列表
+    val firstUnreadMessageId: String? = null,
+    val unreadMentionMessageIds: List<String> = emptyList(),
+    // UX-4/6/7/12/14/15/19 新增交互与状态字段
+    val invitingNearbyClientId: String? = null,
+    val publicRoomsError: String? = null,
+    val isLobbyRefreshing: Boolean = false,
+    val isTransferRefreshing: Boolean = false,
+    val toastSeq: Long = 0L,
+    val isNetworkOffline: Boolean = false,
+    val nearbyNetworkType: String = "unknown",
+    val outgoingNearbyInvite: OutgoingNearbyInvite? = null,
+    val transferProgress: Map<String, TransferProgressSnapshot> = emptyMap(),
 ) {
     // B12：供 Activity 与导航判断当前是否保有活跃或后台挂起的房间会话
     val hasActiveRoom: Boolean
@@ -267,6 +305,8 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
             blockedClients = initialBlocked,
             lastRecoverableRoom = initialLastRoom,
             myPickups = store.loadMyPickups(),
+            draftsByRoom = store.loadRoomDrafts(),
+            mutedRooms = store.loadMutedRooms(),
         )
     )
     val uiState: StateFlow<BayChatUiState> = _uiState.asStateFlow()
@@ -274,6 +314,10 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     private var selfPeerId: String = FormatUtils.generatePeerId()
     private var signaling: SignalingClient? = null
     private var mesh: WebRtcMeshManager? = null
+    private var awaitingInitialHistorySync: Boolean = false
+    private var hadRoomWsDisconnect: Boolean = false
+    private var hasJoinedRoomOnce: Boolean = false
+    private var pendingRestoreCaptureChecked: Boolean = false
 
     // 发送去重与重发源上下文缓存
     private val recordedTransfers = ConcurrentHashMap.newKeySet<String>()
@@ -282,11 +326,17 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     private val outgoingSourcesByItemId = ConcurrentHashMap<String, OutgoingFileSource>()
     private val activeDownloadIds = ConcurrentHashMap.newKeySet<String>()
     private val typingTimeoutJobs = ConcurrentHashMap<String, Job>()
+    private val lastResendActionAt = ConcurrentHashMap<String, Long>()
+    private val currentProcessCameraUris = ConcurrentHashMap.newKeySet<String>()
 
     private var awaitingInstallPermission: Boolean = false
+    private var dismissedUpdateVersionInSession: Int = 0
+    private var lastToastText: String = ""
+    private var lastToastAt: Long = 0L
     private var lastTypingSentAt: Long = 0L
     private var draftIdleTypingJob: Job? = null
     private var nearbyPollingJob: Job? = null
+    private var outgoingInvitePollingJob: Job? = null
 
     // 语音录制与播放控制器
     private var mediaRecorder: MediaRecorder? = null
@@ -295,6 +345,11 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     private var voiceRecordTickerJob: Job? = null
     private var mediaPlayer: MediaPlayer? = null
     private var voicePlaybackTickerJob: Job? = null
+    private val audioManager: AudioManager? by lazy {
+        appContext.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+    }
+    private var recordAudioFocusRequest: AudioFocusRequest? = null
+    private var playbackAudioFocusRequest: AudioFocusRequest? = null
 
     // 系统网络状态回调（断网恢复秒触发 WS/ICE 重连）
     private var connectivityManager: ConnectivityManager? = null
@@ -332,17 +387,51 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    private fun isCurrentlyOnline(cm: ConnectivityManager?): Boolean {
+        val network = cm?.activeNetwork ?: return false
+        val caps = cm.getNetworkCapabilities(network) ?: return false
+        return caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+    }
+
     private fun registerNetworkMonitor() {
         runCatching {
             val cm = appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+            connectivityManager = cm
+            _uiState.update {
+                it.copy(
+                    isNetworkOffline = !isCurrentlyOnline(cm),
+                    nearbyNetworkType = detectNearbyNetworkType(),
+                )
+            }
             val cb = object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
+                    val wasOffline = _uiState.value.isNetworkOffline
+                    _uiState.update {
+                        it.copy(
+                            isNetworkOffline = false,
+                            nearbyNetworkType = detectNearbyNetworkType(),
+                        )
+                    }
                     signaling?.notifyNetworkAvailable()
                     mesh?.refreshIceIfNeeded()
+                    if (wasOffline) {
+                        viewModelScope.launch(Dispatchers.Main.immediate) {
+                            showToast("网络已恢复，已重新连接")
+                        }
+                    }
+                }
+
+                override fun onLost(network: Network) {
+                    val offlineNow = !isCurrentlyOnline(cm)
+                    _uiState.update {
+                        it.copy(
+                            isNetworkOffline = offlineNow,
+                            nearbyNetworkType = detectNearbyNetworkType(),
+                        )
+                    }
                 }
             }
             cm.registerDefaultNetworkCallback(cb)
-            connectivityManager = cm
             networkCallback = cb
         }
     }
@@ -405,7 +494,12 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun onAppForegrounded() {
-        _uiState.update { it.copy(isAppForeground = true, unreadCount = 0) }
+        _uiState.update {
+            it.copy(
+                isAppForeground = true,
+                unreadCount = if (it.roomMinimized) it.unreadCount else 0,
+            )
+        }
         IncomingNotificationHelper.cancelAllIncomingNotifications(appContext)
         if (!_uiState.value.privacyAccepted) return
         startNearbyPolling()
@@ -432,6 +526,8 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun onAppBackgrounded() {
+        // 切入后台时立即中止未完成的语音录制，防止麦克风持续占用
+        cancelVoiceRecording()
         _uiState.update { it.copy(isAppForeground = false) }
         stopNearbyPolling()
     }
@@ -465,8 +561,17 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         _uiState.update { it.copy(toastMessage = null) }
     }
 
+    // UX-12：同一提示文案 3 秒内自动去重防刷屏，并递增 toastSeq 驱动 UI 准确重置自动消失计时
     fun showToast(msg: String) {
-        _uiState.update { it.copy(toastMessage = msg) }
+        val clean = msg.trim()
+        if (clean.isEmpty()) return
+        val now = System.currentTimeMillis()
+        if (clean == lastToastText && now - lastToastAt < TOAST_DEDUP_WINDOW_MS) {
+            return
+        }
+        lastToastText = clean
+        lastToastAt = now
+        _uiState.update { it.copy(toastMessage = clean, toastSeq = it.toastSeq + 1L) }
     }
 
     // B21：清除错误文案时不重置 lobbyNeedPassword，避免用户清空密码框时输入框突然消失
@@ -623,7 +728,12 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
             refreshPublicRooms()
         }
         if (prevNearby != next.nearbyDiscoverable && _uiState.value.privacyAccepted) {
-            if (next.nearbyDiscoverable) startNearbyPolling() else _uiState.update { it.copy(nearbyPeers = emptyList()) }
+            if (next.nearbyDiscoverable) {
+                startNearbyPolling()
+            } else {
+                stopNearbyPolling()
+                _uiState.update { it.copy(nearbyPeers = emptyList()) }
+            }
         }
     }
 
@@ -713,6 +823,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         topic: String = "",
     ) {
         if (_uiState.value.lobbyBusy) return
+        cancelVoiceRecording()
         _uiState.update { it.copy(lobbyBusy = true, lobbyError = null) }
         viewModelScope.launch {
             try {
@@ -763,24 +874,37 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    // UX-6：公开房间加载失败写入可读错误，成功时清零 publicRoomsError
+    private suspend fun fetchPublicRoomsInternal(silent: Boolean) {
+        if (!silent) {
+            _uiState.update { it.copy(publicRoomsLoading = true, publicRoomsError = null) }
+        } else {
+            _uiState.update { it.copy(publicRoomsError = null) }
+        }
+        runCatching { api.fetchPublicRooms() }
+            .onSuccess { resp ->
+                _uiState.update {
+                    it.copy(
+                        publicRooms = resp.rooms,
+                        publicRoomsLoading = false,
+                        publicRoomsError = null,
+                        publicRoomsLastRefreshedAt = System.currentTimeMillis(),
+                    )
+                }
+            }
+            .onFailure {
+                _uiState.update {
+                    it.copy(
+                        publicRoomsLoading = false,
+                        publicRoomsError = "网络异常，公开房间加载失败",
+                    )
+                }
+            }
+    }
+
     fun refreshPublicRooms(silent: Boolean = false) {
         viewModelScope.launch {
-            if (!silent) {
-                _uiState.update { it.copy(publicRoomsLoading = true) }
-            }
-            runCatching { api.fetchPublicRooms() }
-                .onSuccess { resp ->
-                    _uiState.update {
-                        it.copy(
-                            publicRooms = resp.rooms,
-                            publicRoomsLoading = false,
-                            publicRoomsLastRefreshedAt = System.currentTimeMillis(),
-                        )
-                    }
-                }
-                .onFailure {
-                    _uiState.update { it.copy(publicRoomsLoading = false) }
-                }
+            fetchPublicRoomsInternal(silent = silent)
         }
     }
 
@@ -792,11 +916,31 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    // UX-7：真实聚合等待所有刷新子协程彻底完成后才重置 isLobbyRefreshing = false
     fun refreshLobbyOverview() {
-        refreshServerConfig()
-        refreshPublicRooms(silent = _uiState.value.publicRooms.isNotEmpty())
-        checkForAppUpdate(manual = false, bypassThrottle = false)
-        refreshStorageStats()
+        if (_uiState.value.isLobbyRefreshing) return
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLobbyRefreshing = true) }
+            try {
+                val cfgJob = launch {
+                    runCatching { api.fetchServerConfig(_uiState.value.profile.clientId) }
+                        .onSuccess { cfg ->
+                            _uiState.update { it.copy(serverConfig = cfg, configLoaded = true) }
+                            mesh?.updateIceServers(cfg.iceServers)
+                        }
+                }
+                val roomsJob = launch {
+                    fetchPublicRoomsInternal(silent = _uiState.value.publicRooms.isNotEmpty())
+                }
+                val statsJob = launch { storageStats() }
+                checkForAppUpdate(manual = false, bypassThrottle = false)
+                cfgJob.join()
+                roomsJob.join()
+                statsJob.join()
+            } finally {
+                _uiState.update { it.copy(isLobbyRefreshing = false) }
+            }
+        }
     }
 
     fun setSoundEnabled(enabled: Boolean) {
@@ -871,36 +1015,41 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    // B4/B24：只扫描 resume_ 前缀或已有元信息的普通文件断点，过滤图片/语音临时碎片
+    // B4/B24/UX-7：只扫描 resume_ 前缀或已有元信息的普通文件断点，过滤图片/语音临时碎片，并维护真实下拉刷新状态
     fun refreshTransferCenter() {
         viewModelScope.launch(Dispatchers.IO) {
-            val dir = WebRtcMeshManager.transferCacheDir(appContext)
-            val metaMap = store.loadPartialMetaMap()
-            val partials = dir.listFiles()
-                ?.filter { f ->
-                    f.isFile &&
-                        f.name.endsWith(".part") &&
-                        f.length() > 0L &&
-                        (f.name.startsWith("resume_") || metaMap.containsKey(f.name))
-                }
-                ?.map { f ->
-                    val meta = metaMap[f.name]
-                    PartialResumeItem(
-                        partFileName = f.name,
-                        fileName = meta?.fileName ?: f.name,
-                        savedBytes = f.length(),
-                        totalBytes = meta?.fileSize ?: f.length(),
-                        roomCode = meta?.roomCode ?: "",
-                        peerName = meta?.peerName ?: "",
-                        lastModified = f.lastModified(),
-                        resumeKey = meta?.resumeKey.orEmpty(),
-                    )
-                }
-                ?.sortedByDescending { it.lastModified }
-                .orEmpty()
-            val history = store.loadTransferRecords()
-            _uiState.update { it.copy(partialTransfers = partials, transferRecords = history) }
-            refreshStorageStats()
+            _uiState.update { it.copy(isTransferRefreshing = true) }
+            try {
+                val dir = WebRtcMeshManager.transferCacheDir(appContext)
+                val metaMap = store.loadPartialMetaMap()
+                val partials = dir.listFiles()
+                    ?.filter { f ->
+                        f.isFile &&
+                            f.name.endsWith(".part") &&
+                            f.length() > 0L &&
+                            (f.name.startsWith("resume_") || metaMap.containsKey(f.name))
+                    }
+                    ?.map { f ->
+                        val meta = metaMap[f.name]
+                        PartialResumeItem(
+                            partFileName = f.name,
+                            fileName = meta?.fileName ?: f.name,
+                            savedBytes = f.length(),
+                            totalBytes = meta?.fileSize ?: f.length(),
+                            roomCode = meta?.roomCode ?: "",
+                            peerName = meta?.peerName ?: "",
+                            lastModified = f.lastModified(),
+                            resumeKey = meta?.resumeKey.orEmpty(),
+                        )
+                    }
+                    ?.sortedByDescending { it.lastModified }
+                    .orEmpty()
+                val history = store.loadTransferRecords()
+                _uiState.update { it.copy(partialTransfers = partials, transferRecords = history) }
+                storageStats()
+            } finally {
+                _uiState.update { it.copy(isTransferRefreshing = false) }
+            }
         }
     }
 
@@ -955,27 +1104,38 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         showToast("已清空传输记录列表（本地已保存文件不受影响）")
     }
 
-    // B7/G3/G12/G13：统一打开/分享已接收文件、相册保存、打开下载目录
-    fun openTransfer(record: TransferRecord): Boolean {
-        val opened = (!record.contentUri.isNullOrBlank() &&
-            MediaDownloadHelper.openContentUri(appContext, record.contentUri, record.mimeType)) ||
-            (!record.localPath.isNullOrBlank() &&
-                MediaDownloadHelper.openLocalFile(appContext, record.localPath, record.mimeType))
-        if (!opened) {
-            showToast("无法直接打开，文件保存在系统「${record.savedDisplayPath ?: "Download/BayChat"}」中")
+    // B7/G3/G12/G13/UX-34：统一打开/分享已接收文件，打开前先校验本地文件存在性与可用应用
+    private fun openMediaWithDiagnostics(
+        contentUri: String?,
+        localPath: String?,
+        mimeType: String,
+    ): Boolean {
+        var result = MediaDownloadHelper.OpenFileResult.FILE_NOT_FOUND
+        if (!contentUri.isNullOrBlank()) {
+            result = MediaDownloadHelper.openContentUriDetailed(appContext, contentUri, mimeType)
+            if (result == MediaDownloadHelper.OpenFileResult.OPENED) return true
         }
-        return opened
+        if (!localPath.isNullOrBlank()) {
+            val localRes = MediaDownloadHelper.openLocalFileDetailed(appContext, localPath, mimeType)
+            if (localRes == MediaDownloadHelper.OpenFileResult.OPENED) return true
+            if (localRes == MediaDownloadHelper.OpenFileResult.NO_APP_FOUND || result != MediaDownloadHelper.OpenFileResult.NO_APP_FOUND) {
+                result = localRes
+            }
+        }
+        when (result) {
+            MediaDownloadHelper.OpenFileResult.NO_APP_FOUND -> showToast("未找到可打开此格式文件的应用")
+            MediaDownloadHelper.OpenFileResult.FILE_NOT_FOUND -> showToast("本地文件已被移动或删除")
+            MediaDownloadHelper.OpenFileResult.OPENED -> Unit
+        }
+        return false
+    }
+
+    fun openTransfer(record: TransferRecord): Boolean {
+        return openMediaWithDiagnostics(record.contentUri, record.localPath, record.mimeType)
     }
 
     fun openTransfer(info: FileTransferInfo): Boolean {
-        val opened = (!info.contentUri.isNullOrBlank() &&
-            MediaDownloadHelper.openContentUri(appContext, info.contentUri, info.mimeType)) ||
-            (!info.localPath.isNullOrBlank() &&
-                MediaDownloadHelper.openLocalFile(appContext, info.localPath, info.mimeType))
-        if (!opened) {
-            showToast("无法直接打开，文件保存在系统「${info.savedDisplayPath ?: "Download/BayChat"}」中")
-        }
-        return opened
+        return openMediaWithDiagnostics(info.contentUri, info.localPath, info.mimeType)
     }
 
     fun shareTransfer(record: TransferRecord): Boolean {
@@ -1164,6 +1324,9 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         val isForce = rel.forceUpdate || (rel.minSupportedCode > 0 && BuildConfig.VERSION_CODE < rel.minSupportedCode)
         var currentPrefs = _uiState.value.prefs
 
+        if (manual) {
+            dismissedUpdateVersionInSession = 0
+        }
         if (manual && currentPrefs.ignoredVersionCode == rel.versionCode) {
             store.setIgnoredVersionCode(0)
             currentPrefs = currentPrefs.copy(ignoredVersionCode = 0)
@@ -1171,6 +1334,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         }
 
         val isIgnored = !manual && !isForce && currentPrefs.ignoredVersionCode == rel.versionCode
+        val isSessionDismissed = !manual && !isForce && dismissedUpdateVersionInSession == rel.versionCode
 
         val inspection = updateManager.inspectLocalRelease(rel)
         val readyApk = inspection.readyApkFile
@@ -1223,10 +1387,10 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                 silent = !isForce,
                 forceUpdate = isForce,
             )
-            if (isForce || !started) {
+            if (isForce || (!started && !isSessionDismissed)) {
                 _uiState.update { it.copy(showUpdateDialog = true) }
             }
-        } else {
+        } else if (!isSessionDismissed) {
             _uiState.update { it.copy(showUpdateDialog = true) }
             if (manual) {
                 showToast("发现新版本 v${rel.versionName}")
@@ -1316,7 +1480,12 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun dismissUpdateDialog() {
-        if (AppUpdateCenter.state.value.isForceUpdate) return
+        val ota = AppUpdateCenter.state.value
+        if (ota.isForceUpdate) return
+        // UX-17：本会话内暂缓自动重复弹窗（保留大厅横幅与「我的」红点提示）
+        ota.release?.versionCode?.let { ver ->
+            if (ver > 0) dismissedUpdateVersionInSession = ver
+        }
         _uiState.update { it.copy(showUpdateDialog = false) }
     }
 
@@ -1566,13 +1735,45 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         _uiState.update { it.copy(pendingCreateConfirm = null) }
     }
 
-    // B13：用户确认切换房间后，先发 leaveRoom 再进新房
+    // B13/UX-15：用户确认切换房间后，先发 leaveRoom 再进新房（若携带待处理的附近邀请，确认后再回复服务端）
     fun confirmSwitchRoom() {
         val pending = _uiState.value.pendingSwitchRoom ?: return
-        _uiState.update { it.copy(pendingSwitchRoom = null) }
+        cancelVoiceRecording()
+        _uiState.update { st ->
+            val pendingInvite = pending.pendingNearbyInvite
+            st.copy(
+                pendingSwitchRoom = null,
+                incomingNearbyInvites = if (pendingInvite != null) {
+                    st.incomingNearbyInvites.filterNot { it.inviteId == pendingInvite.inviteId }
+                } else {
+                    st.incomingNearbyInvites
+                },
+            )
+        }
         signaling?.leaveRoom()
         tearDownSession(stopService = false)
-        _uiState.update { it.copy(activeRoom = null, roomMinimized = false) }
+        _uiState.update {
+            it.copy(
+                activeRoom = null,
+                roomMinimized = false,
+                unreadCount = 0,
+                playedVoiceIds = emptySet(),
+                firstUnreadMessageId = null,
+                unreadMentionMessageIds = emptyList(),
+                transferProgress = emptyMap(),
+            )
+        }
+        val pendingInvite = pending.pendingNearbyInvite
+        if (pendingInvite != null) {
+            viewModelScope.launch {
+                val resp = runCatching {
+                    nearbyApi.respondInvite(pendingInvite.inviteId, _uiState.value.profile.clientId, true)
+                }.getOrNull()
+                val roomCode = resp?.roomCode?.takeIf { it.isNotBlank() } ?: pending.targetCode
+                joinRoomInternal(roomCode, "")
+            }
+            return
+        }
         val summary = pending.roomSummary
         if (summary != null && !summary.hasPassword) {
             recordRecentRoom(summary.code, summary.mode, false, "")
@@ -1599,6 +1800,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun joinRoom(rawInput: String, password: String) {
+        cancelVoiceRecording()
         val code = FormatUtils.extractRoomCode(rawInput)
         if (code.isBlank()) {
             _uiState.update { it.copy(lobbyError = "请输入房间口令或扫描二维码") }
@@ -1698,6 +1900,10 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         ownerToken: String = initialInfo?.ownerToken.orEmpty(),
     ) {
         tearDownSession(stopService = false)
+        awaitingInitialHistorySync = true
+        hasJoinedRoomOnce = false
+        hadRoomWsDisconnect = false
+        pendingRestoreCaptureChecked = false
         // B9：由稳定 clientId + roomCode 派生固定房间内 peerId
         selfPeerId = TransferResumeUtils.derivePeerId(_uiState.value.profile.clientId, code)
         recordedTransfers.clear()
@@ -1726,6 +1932,10 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                 lastRecoverableRoom = null,
                 roomMinimized = false,
                 unreadCount = 0,
+                playedVoiceIds = emptySet(),
+                firstUnreadMessageId = null,
+                unreadMentionMessageIds = emptyList(),
+                transferProgress = emptyMap(),
                 activeRoom = ActiveRoomSession(
                     roomCode = code,
                     password = password,
@@ -1786,43 +1996,53 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                 ) {
                     if (isPeerBlockedInternal(peerId)) return
                     val sender = _uiState.value.activeRoom?.peers?.get(peerId)
-                    val inserted = appendMessageIfAbsent(
-                        ChatItem(
-                            id = id,
-                            kind = ChatKind.TEXT,
-                            senderId = peerId,
-                            senderName = sender?.name ?: "伙伴",
-                            senderAvatar = sender?.avatar,
-                            isSelf = false,
-                            timestamp = timestamp,
-                            text = text,
-                            replyTo = replyTo,
-                        )
+                    val mentioned = isTextMentioningMe(text)
+                    val item = ChatItem(
+                        id = id,
+                        kind = ChatKind.TEXT,
+                        senderId = peerId,
+                        senderName = sender?.name ?: "伙伴",
+                        senderAvatar = sender?.avatar,
+                        isSelf = false,
+                        timestamp = timestamp,
+                        text = text,
+                        replyTo = replyTo,
+                        mentionedMe = mentioned,
                     )
+                    val inserted = appendMessageIfAbsent(item)
                     if (inserted) {
-                        playSoundIfEnabled { playMessageIn() }
-                        notifyIfBackgroundMessage(sender?.name ?: "伙伴", text)
+                        val roomCode = _uiState.value.activeRoom?.roomCode.orEmpty()
+                        handleIncomingMessageArrived(
+                            item = item,
+                            fromCache = false,
+                            roomCode = roomCode,
+                            previewText = text,
+                        )
                     }
                 }
 
                 override fun onClipboardSync(peerId: String, text: String, updatedAt: Long) {
                     if (isPeerBlockedInternal(peerId) || !_uiState.value.prefs.acceptClipShare) return
                     val sender = _uiState.value.activeRoom?.peers?.get(peerId)
-                    val inserted = appendMessageIfAbsent(
-                        ChatItem(
-                            id = "clip_${updatedAt}_${peerId.take(6)}",
-                            kind = ChatKind.CLIP,
-                            senderId = peerId,
-                            senderName = sender?.name ?: "伙伴",
-                            senderAvatar = sender?.avatar,
-                            isSelf = false,
-                            timestamp = updatedAt,
-                            text = text,
-                        )
+                    val item = ChatItem(
+                        id = "clip_${updatedAt}_${peerId.take(6)}",
+                        kind = ChatKind.CLIP,
+                        senderId = peerId,
+                        senderName = sender?.name ?: "伙伴",
+                        senderAvatar = sender?.avatar,
+                        isSelf = false,
+                        timestamp = updatedAt,
+                        text = text,
                     )
+                    val inserted = appendMessageIfAbsent(item)
                     if (inserted) {
-                        playSoundIfEnabled { playMessageIn() }
-                        notifyIfBackgroundMessage(sender?.name ?: "伙伴", "[跨端剪贴板] $text")
+                        val roomCode = _uiState.value.activeRoom?.roomCode.orEmpty()
+                        handleIncomingMessageArrived(
+                            item = item,
+                            fromCache = false,
+                            roomCode = roomCode,
+                            previewText = "[跨端剪贴板] $text",
+                        )
                     }
                 }
 
@@ -1832,7 +2052,16 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                         showToast("房间已更换新口令 #$newCode，正在自动跟随...")
                         signaling?.leaveRoom()
                         tearDownSession(stopService = false)
-                        _uiState.update { it.copy(activeRoom = null, roomMinimized = false) }
+                        _uiState.update {
+                            it.copy(
+                                activeRoom = null,
+                                roomMinimized = false,
+                                unreadCount = 0,
+                                playedVoiceIds = emptySet(),
+                                firstUnreadMessageId = null,
+                                unreadMentionMessageIds = emptyList(),
+                            )
+                        }
                         joinRoomInternal(newCode, password)
                     }
                 }
@@ -1917,63 +2146,130 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                             )
                         )
                     }
-                    val inserted = appendMessageIfAbsent(
-                        ChatItem(
-                            id = itemId,
-                            kind = kind,
-                            senderId = peerId,
-                            senderName = sender?.name ?: "伙伴",
-                            senderAvatar = sender?.avatar,
-                            isSelf = false,
-                            timestamp = timestamp,
-                            caption = caption,
-                            transfer = info.copy(targetPeerName = sender?.name),
-                        )
+                    val incomingItem = ChatItem(
+                        id = itemId,
+                        kind = kind,
+                        senderId = peerId,
+                        senderName = sender?.name ?: "伙伴",
+                        senderAvatar = sender?.avatar,
+                        isSelf = false,
+                        timestamp = timestamp,
+                        caption = caption,
+                        transfer = info.copy(targetPeerName = sender?.name),
                     )
+                    val inserted = appendMessageIfAbsent(incomingItem)
                     if (inserted) {
-                        playSoundIfEnabled { playMessageIn() }
+                        val roomCode = _uiState.value.activeRoom?.roomCode.orEmpty()
                         val autoAccept = shouldAutoAccept(info)
-                        if (!_uiState.value.isAppForeground && !autoAccept) {
-                            IncomingNotificationHelper.showIncomingOfferNotification(
-                                context = appContext,
-                                roomCode = _uiState.value.activeRoom?.roomCode.orEmpty(),
-                                peerId = peerId,
-                                peerName = sender?.name ?: "伙伴",
-                                transferId = info.transferId,
-                                fileName = info.fileName,
-                                fileSize = info.fileSize,
-                            )
-                        } else if (!_uiState.value.isAppForeground && autoAccept) {
+                        if (!autoAccept) {
+                            // 例外规则：需要手动确认的文件传输请求在免打扰房间仍保持提醒与系统通知
+                            playSoundIfEnabled { playMessageIn() }
+                            recordUnreadArrival(itemId = incomingItem.id, mentionedMe = false)
+                            if (!_uiState.value.isAppForeground) {
+                                IncomingNotificationHelper.showIncomingOfferNotification(
+                                    context = appContext,
+                                    roomCode = roomCode,
+                                    peerId = peerId,
+                                    peerName = sender?.name ?: "伙伴",
+                                    transferId = info.transferId,
+                                    fileName = info.fileName,
+                                    fileSize = info.fileSize,
+                                )
+                            }
+                        } else {
                             val label = when {
                                 info.isImage -> "[图片] ${info.fileName}"
                                 info.isAudio -> "[语音消息]"
                                 else -> "[文件] ${info.fileName}"
                             }
-                            notifyIfBackgroundMessage(sender?.name ?: "伙伴", label)
+                            handleIncomingMessageArrived(
+                                item = incomingItem,
+                                fromCache = false,
+                                roomCode = roomCode,
+                                previewText = label,
+                            )
                         }
                     }
                 }
 
                 override fun onTransferUpdate(info: FileTransferInfo) {
-                    updateRoom { r ->
-                        r.copy(
-                            messages = r.messages.map { item ->
-                                if (item.transfer?.transferId != info.transferId) {
-                                    item
-                                } else {
-                                    item.copy(
-                                        imageUrl = if (info.isImage && !info.localPath.isNullOrBlank()) info.localPath else item.imageUrl,
-                                        localFilePath = info.localPath ?: item.localFilePath,
-                                        transfer = info.copy(
-                                            targetPeerName = item.transfer.targetPeerName ?: info.targetPeerName,
-                                            cachedDownloadUrl = info.cachedDownloadUrl ?: item.transfer.cachedDownloadUrl,
-                                            cloudStatus = if (info.cloudStatus != CloudUploadStatus.NONE) info.cloudStatus else item.transfer.cloudStatus,
-                                            cloudError = info.cloudError ?: item.transfer.cloudError,
-                                        ),
-                                    )
-                                }
-                            }
+                    if (info.status == TransferStatus.TRANSFERRING) {
+                        val snapshot = TransferProgressSnapshot(
+                            transferredBytes = info.transferredBytes,
+                            totalBytes = info.fileSize,
+                            speedBps = info.speedBps.toLong(),
+                            etaSeconds = info.etaSeconds.toInt().coerceAtLeast(0),
                         )
+                        val existingTransfer = _uiState.value.activeRoom?.messages
+                            ?.firstOrNull { it.transfer?.transferId == info.transferId }
+                            ?.transfer
+                        val needsListUpdate = existingTransfer == null ||
+                            existingTransfer.status != TransferStatus.TRANSFERRING ||
+                            (info.cloudStatus != CloudUploadStatus.NONE && existingTransfer.cloudStatus != info.cloudStatus) ||
+                            (info.cachedDownloadUrl != null && existingTransfer.cachedDownloadUrl != info.cachedDownloadUrl) ||
+                            (info.localPath != null && existingTransfer.localPath != info.localPath)
+                        if (needsListUpdate) {
+                            _uiState.update { st ->
+                                val room = st.activeRoom
+                                val nextRoom = room?.copy(
+                                    messages = room.messages.map { item ->
+                                        if (item.transfer?.transferId != info.transferId) {
+                                            item
+                                        } else {
+                                            item.copy(
+                                                imageUrl = if (info.isImage && !info.localPath.isNullOrBlank()) info.localPath else item.imageUrl,
+                                                localFilePath = info.localPath ?: item.localFilePath,
+                                                transfer = info.copy(
+                                                    targetPeerName = item.transfer.targetPeerName ?: info.targetPeerName,
+                                                    cachedDownloadUrl = info.cachedDownloadUrl ?: item.transfer.cachedDownloadUrl,
+                                                    cloudStatus = if (info.cloudStatus != CloudUploadStatus.NONE) info.cloudStatus else item.transfer.cloudStatus,
+                                                    cloudError = info.cloudError ?: item.transfer.cloudError,
+                                                ),
+                                            )
+                                        }
+                                    }
+                                )
+                                st.copy(
+                                    activeRoom = nextRoom,
+                                    transferProgress = st.transferProgress + (info.transferId to snapshot),
+                                )
+                            }
+                        } else {
+                            // UX-19：高频 200ms 传输进度仅刷新 transferProgress Map，避免全消息列表频繁重组
+                            _uiState.update { st ->
+                                st.copy(transferProgress = st.transferProgress + (info.transferId to snapshot))
+                            }
+                        }
+                    } else {
+                        val isTerminal = info.status == TransferStatus.COMPLETED ||
+                            info.status == TransferStatus.ERROR ||
+                            info.status == TransferStatus.CANCELLED ||
+                            info.status == TransferStatus.REJECTED
+                        _uiState.update { st ->
+                            val room = st.activeRoom
+                            val nextRoom = room?.copy(
+                                messages = room.messages.map { item ->
+                                    if (item.transfer?.transferId != info.transferId) {
+                                        item
+                                    } else {
+                                        item.copy(
+                                            imageUrl = if (info.isImage && !info.localPath.isNullOrBlank()) info.localPath else item.imageUrl,
+                                            localFilePath = info.localPath ?: item.localFilePath,
+                                            transfer = info.copy(
+                                                targetPeerName = item.transfer.targetPeerName ?: info.targetPeerName,
+                                                cachedDownloadUrl = info.cachedDownloadUrl ?: item.transfer.cachedDownloadUrl,
+                                                cloudStatus = if (info.cloudStatus != CloudUploadStatus.NONE) info.cloudStatus else item.transfer.cloudStatus,
+                                                cloudError = info.cloudError ?: item.transfer.cloudError,
+                                            ),
+                                        )
+                                    }
+                                }
+                            )
+                            st.copy(
+                                activeRoom = nextRoom,
+                                transferProgress = if (isTerminal) st.transferProgress - info.transferId else st.transferProgress,
+                            )
+                        }
                     }
 
                     if (info.status == TransferStatus.TRANSFERRING && info.fileSize > 0) {
@@ -2044,7 +2340,9 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                                     )
                                 }
                             } else {
-                                playSoundIfEnabled { playTransferDone() }
+                                if (!isRoomMuted(roomCode)) {
+                                    playSoundIfEnabled { playTransferDone() }
+                                }
                                 showToast(
                                     if (info.verified) "已保存至 ${info.savedDisplayPath ?: "下载目录"}（SHA-256 校验通过）"
                                     else "已保存至 ${info.savedDisplayPath ?: "下载目录"}"
@@ -2097,10 +2395,19 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
             ownerToken = resolvedOwnerToken,
             callbacks = object : SignalingCallbacks {
                 override fun onConnectionState(connected: Boolean) {
+                    if (!connected && hasJoinedRoomOnce) {
+                        hadRoomWsDisconnect = true
+                    }
                     updateRoom { it.copy(wsConnected = connected) }
                 }
 
                 override fun onJoined(env: SignalEnvelope) {
+                    val wasReconnected = hasJoinedRoomOnce && hadRoomWsDisconnect
+                    hasJoinedRoomOnce = true
+                    hadRoomWsDisconnect = false
+                    if (wasReconnected) {
+                        showToast("网络已恢复，已重新连接")
+                    }
                     if (joinSoundPlayed.compareAndSet(false, true)) {
                         playSoundIfEnabled { playRoomJoin() }
                     }
@@ -2118,9 +2425,32 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                             isOwner = joinedIsOwner,
                         )
                     }
-                    env.messages.orEmpty().forEach { mergeCachedMessage(it, fromCache = true) }
+                    val isInitialHistorySync = awaitingInitialHistorySync
+                    awaitingInitialHistorySync = false
+                    var firstHistoryUnreadId: String? = null
+                    val initialMentionIds = mutableListOf<String>()
+                    env.messages.orEmpty().forEach { cm ->
+                        val insertedItem = mergeCachedMessage(cm, fromCache = true)
+                        if (isInitialHistorySync && insertedItem != null && !insertedItem.isSelf && insertedItem.kind != ChatKind.SYSTEM) {
+                            if (firstHistoryUnreadId == null) {
+                                firstHistoryUnreadId = insertedItem.id
+                            }
+                            if (insertedItem.mentionedMe) {
+                                initialMentionIds.add(insertedItem.id)
+                            }
+                        }
+                    }
+                    if (firstHistoryUnreadId != null || initialMentionIds.isNotEmpty()) {
+                        _uiState.update { st ->
+                            st.copy(
+                                firstUnreadMessageId = st.firstUnreadMessageId ?: firstHistoryUnreadId,
+                                unreadMentionMessageIds = (st.unreadMentionMessageIds + initialMentionIds).distinct(),
+                            )
+                        }
+                    }
                     newMesh.syncPeers(peerMap.keys.toList())
                     refreshForegroundBanner()
+                    maybeRecoverPendingCameraCapture(code)
                 }
 
                 override fun onPeerJoined(profile: PeerProfile) {
@@ -2240,25 +2570,61 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                             )
                         )
                     }
+                    _uiState.update {
+                        it.copy(
+                            firstUnreadMessageId = null,
+                            unreadMentionMessageIds = emptyList(),
+                        )
+                    }
                     showToast("服务器聊天缓存已清空")
                 }
 
                 override fun onRoomDestroyed(reason: String) {
                     store.clearLastActiveRoom()
+                    outgoingInvitePollingJob?.cancel()
+                    outgoingInvitePollingJob = null
                     tearDownSession(stopService = true)
-                    _uiState.update { it.copy(activeRoom = null, lobbyError = reason) }
+                    _uiState.update {
+                        it.copy(
+                            activeRoom = null,
+                            roomMinimized = false,
+                            unreadCount = 0,
+                            playedVoiceIds = emptySet(),
+                            firstUnreadMessageId = null,
+                            unreadMentionMessageIds = emptyList(),
+                            outgoingNearbyInvite = null,
+                            transferProgress = emptyMap(),
+                            lobbyError = reason,
+                        )
+                    }
                 }
 
                 override fun onError(code: String, message: String) {
-                    if (code in setOf("ROOM_NOT_FOUND", "ROOM_EXPIRED", "WRONG_PASSWORD", "ROOM_FULL", "INVALID_JOIN")) {
+                    if (code == "RECALL_EXPIRED") {
+                        showToast("已超过 2 分钟，无法撤回")
+                    } else if (code in setOf("ROOM_NOT_FOUND", "ROOM_EXPIRED", "WRONG_PASSWORD", "ROOM_FULL", "INVALID_JOIN")) {
                         if (code == "ROOM_NOT_FOUND" || code == "ROOM_EXPIRED") {
                             val nextRecent = store.removeRecentRoom(code = _uiState.value.activeRoom?.roomCode.orEmpty())
                             val nextSaved = store.removeSavedRoom(code = _uiState.value.activeRoom?.roomCode.orEmpty())
                             _uiState.update { it.copy(recentRooms = nextRecent, savedRooms = nextSaved) }
                         }
                         store.clearLastActiveRoom()
+                        outgoingInvitePollingJob?.cancel()
+                        outgoingInvitePollingJob = null
                         tearDownSession(stopService = true)
-                        _uiState.update { it.copy(activeRoom = null, lobbyError = message) }
+                        _uiState.update {
+                            it.copy(
+                                activeRoom = null,
+                                roomMinimized = false,
+                                unreadCount = 0,
+                                playedVoiceIds = emptySet(),
+                                firstUnreadMessageId = null,
+                                unreadMentionMessageIds = emptyList(),
+                                outgoingNearbyInvite = null,
+                                transferProgress = emptyMap(),
+                                lobbyError = message,
+                            )
+                        }
                     } else {
                         showToast(message)
                     }
@@ -2273,18 +2639,76 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    private fun notifyIfBackgroundMessage(senderName: String, preview: String) {
-        if (_uiState.value.isAppForeground) return
-        val roomCode = _uiState.value.activeRoom?.roomCode ?: return
-        val nextUnread = _uiState.value.unreadCount + 1
-        _uiState.update { it.copy(unreadCount = nextUnread) }
-        IncomingNotificationHelper.showBackgroundMessageNotification(
-            context = appContext,
-            roomCode = roomCode,
-            unreadCount = nextUnread,
-            senderName = senderName,
-            previewText = preview,
-        )
+    private fun isRoomMuted(roomCode: String?): Boolean {
+        val clean = roomCode?.trim()?.uppercase().orEmpty()
+        return clean.isNotEmpty() && clean in _uiState.value.mutedRooms
+    }
+
+    // 检测他人文本正文中是否包含 @当前用户昵称（区分空格、常见标点或字符串边界）
+    private fun isTextMentioningMe(text: String?): Boolean {
+        val myName = _uiState.value.profile.name.trim()
+        if (myName.isEmpty() || text.isNullOrBlank()) return false
+        val target = "@$myName"
+        var searchFrom = 0
+        while (searchFrom <= text.length - target.length) {
+            val idx = text.indexOf(target, startIndex = searchFrom, ignoreCase = true)
+            if (idx < 0) return false
+            val afterIdx = idx + target.length
+            val endBoundaryOk = if (afterIdx >= text.length) {
+                true
+            } else {
+                val nextCh = text[afterIdx]
+                nextCh.isWhitespace() || nextCh in MENTION_BOUNDARY_CHARS
+            }
+            if (endBoundaryOk) return true
+            searchFrom = idx + 1
+        }
+        return false
+    }
+
+    // 记录后台/挂起期间的未读数、首条未读定位标记与待跳转 @我 消息
+    private fun recordUnreadArrival(itemId: String, mentionedMe: Boolean) {
+        _uiState.update { st ->
+            val awayFromRoom = !st.isAppForeground || st.roomMinimized
+            val nextUnread = if (awayFromRoom) st.unreadCount + 1 else st.unreadCount
+            val nextFirstUnread = if (awayFromRoom && st.firstUnreadMessageId == null) itemId else st.firstUnreadMessageId
+            val nextMentions = if (mentionedMe && itemId !in st.unreadMentionMessageIds) {
+                st.unreadMentionMessageIds + itemId
+            } else {
+                st.unreadMentionMessageIds
+            }
+            st.copy(
+                unreadCount = nextUnread,
+                firstUnreadMessageId = nextFirstUnread,
+                unreadMentionMessageIds = nextMentions,
+            )
+        }
+    }
+
+    // 统一处理实时新到达的普通消息（音效、未读计数、未读定位、@我 标记及后台通知）
+    private fun handleIncomingMessageArrived(
+        item: ChatItem,
+        fromCache: Boolean,
+        roomCode: String,
+        previewText: String,
+    ) {
+        if (fromCache || item.isSelf) return
+        val muted = isRoomMuted(roomCode)
+        if (!muted) {
+            playSoundIfEnabled { playMessageIn() }
+        }
+        recordUnreadArrival(itemId = item.id, mentionedMe = item.mentionedMe)
+        if (!_uiState.value.isAppForeground && !muted && roomCode.isNotBlank()) {
+            val unread = _uiState.value.unreadCount.coerceAtLeast(1)
+            IncomingNotificationHelper.showBackgroundMessageNotification(
+                context = appContext,
+                roomCode = roomCode,
+                unreadCount = unread,
+                senderName = item.senderName,
+                previewText = previewText,
+                mentionedMe = item.mentionedMe,
+            )
+        }
     }
 
     private fun refreshForegroundBanner() {
@@ -2378,6 +2802,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
             )
         )
         updateRoom { it.copy(replyingTo = null) }
+        updateDraft(room.roomCode, "")
         signaling?.recordActivity("message", 0)
     }
 
@@ -2406,8 +2831,20 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    // B17/G4：重发失败的文本消息或文件/图片传输
+    // UX-5：对同一消息 ID 600ms 内连续触发的重发请求去重防连点
+    private fun acquireResendDebounce(id: String): Boolean {
+        val now = System.currentTimeMillis()
+        val prev = lastResendActionAt[id]
+        if (prev != null && now - prev < RESEND_DEBOUNCE_MS) {
+            return false
+        }
+        lastResendActionAt[id] = now
+        return true
+    }
+
+    // B17/G4/UX-5：重发失败的文本消息或文件/图片传输
     fun retrySend(messageId: String) {
+        if (!acquireResendDebounce(messageId)) return
         val room = _uiState.value.activeRoom ?: return
         val item = room.messages.firstOrNull { it.id == messageId } ?: return
         if (item.kind == ChatKind.TEXT && !item.text.isNullOrBlank()) {
@@ -2436,10 +2873,15 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
             updateMessageSendStatus(item.id, nextStatus)
             return
         }
-        requestResend(messageId)
+        requestResendInternal(messageId)
     }
 
     fun requestResend(itemId: String) {
+        if (!acquireResendDebounce(itemId)) return
+        requestResendInternal(itemId)
+    }
+
+    private fun requestResendInternal(itemId: String) {
         val room = _uiState.value.activeRoom ?: return
         val item = room.messages.firstOrNull { it.id == itemId } ?: return
         if (item.isSelf) {
@@ -2486,15 +2928,24 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         val room = _uiState.value.activeRoom ?: return
         if (uris.isEmpty()) return
 
+        // UX-10：若待发送队列中包含已持久化记录的相机拍照 URI，及时消费清理
+        val pendingCamera = store.peekPendingCameraCapture(room.roomCode)
+        if (pendingCamera != null && uris.any { it.toString() == pendingCamera }) {
+            store.consumePendingCameraCapture(room.roomCode)
+        }
+
         viewModelScope.launch {
             val connectedPeers = mesh?.getConnectedPeerCount() ?: 0
             val limitMB = effectiveMaxFileMB()
             val profile = _uiState.value.profile
+            var skippedCount = 0
+            var lastSkipReason: String? = null
 
             for (uri in uris) {
                 val meta = withContext(Dispatchers.IO) { MediaDownloadHelper.queryUriMeta(appContext, uri) }
                 if (limitMB > 0 && meta.fileSize > limitMB.toLong() * 1024L * 1024L) {
-                    showToast("「${meta.fileName}」超出当前附件上限 ${FormatUtils.formatLimitMB(limitMB)}")
+                    skippedCount++
+                    lastSkipReason = "「${meta.fileName}」超出当前附件上限 ${FormatUtils.formatLimitMB(limitMB)}"
                     continue
                 }
 
@@ -2513,10 +2964,12 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                 val wantCloudBackup = canCloudCache && shouldUploadCloudBackup(connectedPeers, retention)
 
                 if (connectedPeers == 0 && !canCloudCache) {
-                    showToast(
-                        if (retention <= 0) "当前为阅后即焚模式，大文件直传需等伙伴进房后发送"
-                        else "超过 ${FormatUtils.formatBytes(maxCacheFileBytes)} 的超大文件仅走 P2P 直传，请等伙伴进房后发送"
-                    )
+                    skippedCount++
+                    lastSkipReason = if (retention <= 0) {
+                        "当前为阅后即焚模式，大文件直传需等伙伴进房后发送"
+                    } else {
+                        "超过 ${FormatUtils.formatBytes(maxCacheFileBytes)} 的超大文件仅走 P2P 直传，请等伙伴进房后发送"
+                    }
                     continue
                 }
 
@@ -2614,6 +3067,12 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                         noticeOnlyMode = true,
                     )
                 }
+            }
+
+            if (skippedCount == 1 && !lastSkipReason.isNullOrBlank()) {
+                showToast(lastSkipReason)
+            } else if (skippedCount > 1) {
+                showToast("已跳过 $skippedCount 个不支持或超限文件")
             }
         }
     }
@@ -2998,13 +3457,131 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         }.getOrNull()
     }
 
-    // 生成供系统相机 TakePicture / CaptureVideo 写入的临时 FileProvider URI
+    // 生成供系统相机 TakePicture / CaptureVideo 写入的临时 FileProvider URI，并持久化记录防低内存杀进程丢失
     fun createCameraUri(isVideo: Boolean = false): Uri {
         val dir = File(appContext.cacheDir, "camera_captures").apply { mkdirs() }
         val ext = if (isVideo) "mp4" else "jpg"
         val prefix = if (isVideo) "VID" else "IMG"
         val file = File(dir, "${prefix}_${System.currentTimeMillis()}.$ext")
-        return FileProvider.getUriForFile(appContext, "${appContext.packageName}.fileprovider", file)
+        val uri = FileProvider.getUriForFile(appContext, "${appContext.packageName}.fileprovider", file)
+        val uriStr = uri.toString()
+        currentProcessCameraUris.add(uriStr)
+        _uiState.value.activeRoom?.roomCode?.let { code ->
+            store.savePendingCameraCapture(code, uriStr)
+        }
+        return uri
+    }
+
+    // UX-10：供 UI 或进程冷启动恢复后消费并清理未发出的相机拍照 URI
+    fun consumePendingCameraCapture(roomCode: String): String? {
+        return store.consumePendingCameraCapture(roomCode)
+    }
+
+    // UX-10：冷启动恢复进原房间时，若发现上一进程未消费且非空的相机拍摄文件，自动恢复发送并清理
+    private fun maybeRecoverPendingCameraCapture(roomCode: String) {
+        if (pendingRestoreCaptureChecked) return
+        pendingRestoreCaptureChecked = true
+        val pendingUriStr = store.peekPendingCameraCapture(roomCode) ?: return
+        if (pendingUriStr in currentProcessCameraUris) return
+        viewModelScope.launch {
+            val uri = runCatching { Uri.parse(pendingUriStr) }.getOrNull()
+            val nonEmpty = withContext(Dispatchers.IO) {
+                uri != null && runCatching {
+                    appContext.contentResolver.openAssetFileDescriptor(uri, "r")?.use { afd ->
+                        afd.length > 0L || (afd.parcelFileDescriptor.statSize > 0L)
+                    } ?: false
+                }.getOrDefault(false)
+            }
+            store.consumePendingCameraCapture(roomCode)
+            if (nonEmpty && uri != null && _uiState.value.activeRoom?.roomCode.equals(roomCode, ignoreCase = true)) {
+                sendUris(listOf(uri))
+                showToast("已恢复发送上次未完成的相机拍摄")
+            }
+        }
+    }
+
+    // 录音音频焦点变化监听（来电或其它应用抢占焦点时立即停止并释放麦克风）
+    private val recordAudioFocusListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
+        when (focusChange) {
+            AudioManager.AUDIOFOCUS_LOSS,
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                viewModelScope.launch(Dispatchers.Main.immediate) {
+                    if (_uiState.value.isRecordingVoice) {
+                        cancelVoiceRecording()
+                        showToast("音频焦点被占用，已自动停止录音")
+                    }
+                }
+            }
+        }
+    }
+
+    // 放音音频焦点变化监听（来电或其它媒体抢占焦点时安全停止或降低音量）
+    private val playbackAudioFocusListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
+        when (focusChange) {
+            AudioManager.AUDIOFOCUS_LOSS,
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                viewModelScope.launch(Dispatchers.Main.immediate) {
+                    if (_uiState.value.voicePlayback.activeItemId != null || mediaPlayer != null) {
+                        stopVoicePlayback()
+                    }
+                }
+            }
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                runCatching { mediaPlayer?.setVolume(0.25f, 0.25f) }
+            }
+            AudioManager.AUDIOFOCUS_GAIN -> {
+                runCatching { mediaPlayer?.setVolume(1f, 1f) }
+            }
+        }
+    }
+
+    private fun requestRecordAudioFocus() {
+        val am = audioManager ?: return
+        runCatching {
+            val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+                .setOnAudioFocusChangeListener(recordAudioFocusListener)
+                .build()
+            recordAudioFocusRequest = req
+            am.requestAudioFocus(req)
+        }
+    }
+
+    private fun abandonRecordAudioFocus() {
+        val am = audioManager ?: return
+        val req = recordAudioFocusRequest ?: return
+        recordAudioFocusRequest = null
+        runCatching { am.abandonAudioFocusRequest(req) }
+    }
+
+    private fun requestPlaybackAudioFocus() {
+        val am = audioManager ?: return
+        runCatching {
+            val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+                .setOnAudioFocusChangeListener(playbackAudioFocusListener)
+                .build()
+            playbackAudioFocusRequest = req
+            am.requestAudioFocus(req)
+        }
+    }
+
+    private fun abandonPlaybackAudioFocus() {
+        val am = audioManager ?: return
+        val req = playbackAudioFocusRequest ?: return
+        playbackAudioFocusRequest = null
+        runCatching { am.abandonAudioFocusRequest(req) }
     }
 
     // G10：语音对讲录制（AAC/m4a，最长 60s）与内联播放进度控制
@@ -3045,22 +3622,32 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                     }
                 }
                 prepare()
+                requestRecordAudioFocus()
                 start()
             }
             mediaRecorder = recorder
             voiceOutputFile = outFile
             voiceRecordStartAt = System.currentTimeMillis()
-            _uiState.update { it.copy(isRecordingVoice = true, voiceRecordDurationMs = 0L) }
+            _uiState.update { it.copy(isRecordingVoice = true, voiceRecordDurationMs = 0L, voiceAmplitude = 0f) }
             voiceRecordTickerJob?.cancel()
             voiceRecordTickerJob = viewModelScope.launch {
                 while (isActive && _uiState.value.isRecordingVoice) {
                     val elapsed = System.currentTimeMillis() - voiceRecordStartAt
-                    _uiState.update { it.copy(voiceRecordDurationMs = elapsed) }
+                    val rawAmp = runCatching { mediaRecorder?.maxAmplitude ?: 0 }.getOrDefault(0)
+                    val amp = (rawAmp / 32767f).coerceIn(0f, 1f)
+                    val prevAmp = _uiState.value.voiceAmplitude
+                    val smooth = (prevAmp * 0.6f + amp * 0.4f).coerceIn(0f, 1f)
+                    _uiState.update {
+                        it.copy(
+                            voiceRecordDurationMs = elapsed,
+                            voiceAmplitude = smooth,
+                        )
+                    }
                     if (elapsed >= MAX_VOICE_DURATION_MS) {
                         stopVoiceRecording(send = true)
                         break
                     }
-                    delay(200L)
+                    delay(100L)
                 }
             }
             true
@@ -3079,12 +3666,12 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         val file = voiceOutputFile
         runCatching { mediaRecorder?.stop() }
         releaseVoiceRecorder()
-        _uiState.update { it.copy(isRecordingVoice = false, voiceRecordDurationMs = 0L) }
+        _uiState.update { it.copy(isRecordingVoice = false, voiceRecordDurationMs = 0L, voiceAmplitude = 0f) }
 
-        if (!send || file == null || !file.exists() || file.length() == 0L || elapsedMs < 800L) {
+        if (!send || file == null || !file.exists() || file.length() == 0L || elapsedMs < MIN_VOICE_DURATION_MS) {
             runCatching { file?.delete() }
-            if (send && elapsedMs < 800L) {
-                showToast("录音时间太短，已取消")
+            if (send && elapsedMs < MIN_VOICE_DURATION_MS) {
+                showToast("说话时间太短")
             }
             return
         }
@@ -3167,6 +3754,35 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         runCatching { mediaRecorder?.release() }
         mediaRecorder = null
         voiceOutputFile = null
+        abandonRecordAudioFocus()
+        _uiState.update { it.copy(voiceAmplitude = 0f) }
+    }
+
+    // 判断语音条目是否具备可直接播放的本地文件或已缓存媒体来源，避免连播时触发空放
+    private fun hasPlayableVoiceSource(item: ChatItem): Boolean {
+        val localOk = item.localFilePath?.let { File(it).exists() } == true ||
+            item.transfer?.localPath?.let { File(it).exists() } == true
+        val contentOk = !item.transfer?.contentUri.isNullOrBlank()
+        val mediaOk = !item.mediaId.isNullOrBlank() && _uiState.value.activeRoom != null
+        return localOk || contentOk || mediaOk
+    }
+
+    // 查找当前语音之后下一条未播放的对方语音（用于微信式自动连播）
+    private fun findNextUnplayedPeerVoice(current: ChatItem): ChatItem? {
+        val messages = _uiState.value.activeRoom?.messages ?: return null
+        val played = _uiState.value.playedVoiceIds
+        val idx = messages.indexOfFirst { it.id == current.id }
+        val candidates = if (idx >= 0) {
+            messages.drop(idx + 1)
+        } else {
+            messages.filter { it.timestamp > current.timestamp }
+        }
+        return candidates.firstOrNull { m ->
+            !m.isSelf &&
+                m.kind == ChatKind.AUDIO &&
+                m.id !in played &&
+                hasPlayableVoiceSource(m)
+        }
     }
 
     fun toggleVoicePlayback(item: ChatItem) {
@@ -3175,10 +3791,17 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         if (cur.activeItemId == item.id && player != null) {
             if (cur.isPlaying) {
                 runCatching { player.pause() }
+                abandonPlaybackAudioFocus()
                 _uiState.update { it.copy(voicePlayback = it.voicePlayback.copy(isPlaying = false)) }
             } else {
+                requestPlaybackAudioFocus()
                 runCatching { player.start() }
-                _uiState.update { it.copy(voicePlayback = it.voicePlayback.copy(isPlaying = true)) }
+                _uiState.update {
+                    it.copy(
+                        voicePlayback = it.voicePlayback.copy(isPlaying = true),
+                        playedVoiceIds = it.playedVoiceIds + item.id,
+                    )
+                }
                 startVoicePlaybackTicker()
             }
             return
@@ -3192,6 +3815,10 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         val remoteUrl = item.mediaId?.takeIf { it.isNotBlank() }?.let { mid ->
             room?.let { api.buildCachedMediaUrl(it.roomCode, mid) }
         }
+
+        // 标记该条语音为已播放（用于隐藏未读红点与连播跳过）
+        _uiState.update { it.copy(playedVoiceIds = it.playedVoiceIds + item.id) }
+        requestPlaybackAudioFocus()
 
         runCatching {
             val mp = MediaPlayer().apply {
@@ -3223,6 +3850,12 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                 }
                 setOnCompletionListener {
                     stopVoicePlayback()
+                    // 对方发来的语音播完后，自动连续播放后续下一条未播的对方语音
+                    if (!item.isSelf && item.kind == ChatKind.AUDIO) {
+                        findNextUnplayedPeerVoice(item)?.let { nextItem ->
+                            toggleVoicePlayback(nextItem)
+                        }
+                    }
                 }
                 setOnErrorListener { _, _, _ ->
                     stopVoicePlayback()
@@ -3255,6 +3888,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         runCatching { mediaPlayer?.stop() }
         runCatching { mediaPlayer?.release() }
         mediaPlayer = null
+        abandonPlaybackAudioFocus()
         _uiState.update { it.copy(voicePlayback = VoicePlaybackState()) }
     }
 
@@ -3354,6 +3988,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun lookupPickup(code: String, password: String = "") {
+        if (_uiState.value.pickupBusy) return
         val cleanCode = code.trim()
         if (cleanCode.isBlank()) {
             showToast("请输入取件码")
@@ -3483,38 +4118,44 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    // 附近设备发现（前台大厅 5s 心跳 + 房内 3s 邀请状态轮询）
+    // UX-9/UX-15：附近设备发现仅由前后台与 nearbyDiscoverable 开关控制，切 Tab 不再停表，心跳同步更新网络类型
     fun startNearbyPolling() {
-        if (!_uiState.value.privacyAccepted || !_uiState.value.isAppForeground) return
+        val stNow = _uiState.value
+        if (!stNow.privacyAccepted || !stNow.isAppForeground || !stNow.prefs.nearbyDiscoverable) return
         if (nearbyPollingJob?.isActive == true) return
         nearbyPollingJob = viewModelScope.launch {
-            while (isActive && _uiState.value.isAppForeground && _uiState.value.privacyAccepted) {
+            while (isActive) {
                 val st = _uiState.value
+                if (!st.isAppForeground || !st.privacyAccepted || !st.prefs.nearbyDiscoverable) break
+                val netType = detectNearbyNetworkType()
+                if (st.nearbyNetworkType != netType) {
+                    _uiState.update { it.copy(nearbyNetworkType = netType) }
+                }
                 val inLobby = st.activeRoom == null || st.roomMinimized
+                val hasActiveInvite = st.incomingNearbyInvites.isNotEmpty() || st.outgoingNearbyInvite != null
                 runCatching {
-                    if (st.prefs.nearbyDiscoverable) {
-                        val resp = nearbyApi.heartbeat(
-                            NearbyHeartbeatRequest(
-                                clientId = st.profile.clientId,
-                                name = st.profile.name,
-                                avatar = st.profile.avatar,
-                                device = "android",
-                                network = detectNearbyNetworkType(),
-                            )
+                    val resp = nearbyApi.heartbeat(
+                        NearbyHeartbeatRequest(
+                            clientId = st.profile.clientId,
+                            name = st.profile.name,
+                            avatar = st.profile.avatar,
+                            device = "android",
+                            network = netType,
                         )
-                        _uiState.update {
-                            it.copy(
-                                nearbyPeers = resp.devices.filterNot { p ->
-                                    p.clientId == st.profile.clientId || isPeerBlockedInternal(null, p.clientId, p.name)
-                                },
-                                incomingNearbyInvites = resp.invites.filterNot { inv ->
-                                    isPeerBlockedInternal(null, inv.fromClientId, inv.fromName)
-                                },
-                            )
-                        }
+                    )
+                    _uiState.update {
+                        it.copy(
+                            nearbyNetworkType = netType,
+                            nearbyPeers = resp.devices.filterNot { p ->
+                                p.clientId == st.profile.clientId || isPeerBlockedInternal(null, p.clientId, p.name)
+                            },
+                            incomingNearbyInvites = resp.invites.filterNot { inv ->
+                                isPeerBlockedInternal(null, inv.fromClientId, inv.fromName)
+                            },
+                        )
                     }
                 }
-                delay(if (inLobby) NEARBY_LOBBY_HEARTBEAT_MS else NEARBY_ROOM_POLL_MS)
+                delay(if (inLobby || !hasActiveInvite) NEARBY_LOBBY_HEARTBEAT_MS else NEARBY_ROOM_POLL_MS)
             }
         }
     }
@@ -3524,11 +4165,14 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         nearbyPollingJob = null
     }
 
+    // UX-4/UX-15：加并发邀请锁防连点，并在发出邀请后开启 3 秒邀请状态轮询
     fun inviteNearby(target: NearbyPeer) {
+        if (_uiState.value.invitingNearbyClientId != null) return
+        _uiState.update { it.copy(invitingNearbyClientId = target.clientId) }
         viewModelScope.launch {
-            val profile = _uiState.value.profile
-            runCatching {
-                nearbyApi.sendInvite(
+            try {
+                val profile = _uiState.value.profile
+                val resp = nearbyApi.sendInvite(
                     NearbyInviteRequest(
                         fromClientId = profile.clientId,
                         toClientId = target.clientId,
@@ -3536,7 +4180,6 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                         fromAvatar = profile.avatar,
                     )
                 )
-            }.onSuccess { resp ->
                 val targetRoom = resp.room
                 if (targetRoom != null) {
                     if (_uiState.value.activeRoom != null) {
@@ -3546,14 +4189,126 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                     recordRecentRoom(targetRoom.code, targetRoom.mode, false, "", resp.ownerToken)
                     enterRoomInternal(targetRoom.code, "", targetRoom, ownerToken = resp.ownerToken)
                 }
+                val roomCode = targetRoom?.code.orEmpty()
+                if (resp.inviteId.isNotBlank()) {
+                    _uiState.update {
+                        it.copy(
+                            outgoingNearbyInvite = OutgoingNearbyInvite(
+                                inviteId = resp.inviteId,
+                                toName = target.name,
+                                roomCode = roomCode,
+                                status = "waiting",
+                            )
+                        )
+                    }
+                    startOutgoingInvitePolling(resp.inviteId, target.name, roomCode)
+                }
                 showToast("已向附近设备「${target.name}」发送直连邀请")
-            }.onFailure { err ->
+            } catch (err: Exception) {
                 showToast(err.message ?: "发送附近邀请失败")
+            } finally {
+                _uiState.update { it.copy(invitingNearbyClientId = null) }
             }
         }
     }
 
+    // UX-15：3 秒轮询发出的附近邀请状态（accepted / declined / expired）
+    private fun startOutgoingInvitePolling(inviteId: String, toName: String, roomCode: String) {
+        outgoingInvitePollingJob?.cancel()
+        outgoingInvitePollingJob = viewModelScope.launch {
+            val startedAt = System.currentTimeMillis()
+            while (isActive) {
+                delay(OUTGOING_INVITE_POLL_MS)
+                val current = _uiState.value.outgoingNearbyInvite ?: break
+                if (current.inviteId != inviteId) break
+                val status = runCatching { nearbyApi.getInviteStatus(inviteId) }.getOrNull().orEmpty().lowercase()
+                when (status) {
+                    "accepted" -> {
+                        _uiState.update {
+                            it.copy(
+                                outgoingNearbyInvite = OutgoingNearbyInvite(
+                                    inviteId = inviteId,
+                                    toName = toName,
+                                    roomCode = roomCode,
+                                    status = "accepted",
+                                )
+                            )
+                        }
+                        showToast("$toName 已接受邀请，正在加入房间")
+                        break
+                    }
+                    "declined" -> {
+                        _uiState.update {
+                            it.copy(
+                                outgoingNearbyInvite = OutgoingNearbyInvite(
+                                    inviteId = inviteId,
+                                    toName = toName,
+                                    roomCode = roomCode,
+                                    status = "declined",
+                                )
+                            )
+                        }
+                        showToast("$toName 婉拒了你的附近邀请")
+                        break
+                    }
+                    "expired" -> {
+                        _uiState.update {
+                            it.copy(
+                                outgoingNearbyInvite = OutgoingNearbyInvite(
+                                    inviteId = inviteId,
+                                    toName = toName,
+                                    roomCode = roomCode,
+                                    status = "expired",
+                                )
+                            )
+                        }
+                        showToast("发给「$toName」的附近邀请已超时")
+                        break
+                    }
+                }
+                if (System.currentTimeMillis() - startedAt > OUTGOING_INVITE_MAX_WAIT_MS) {
+                    _uiState.update {
+                        it.copy(
+                            outgoingNearbyInvite = OutgoingNearbyInvite(
+                                inviteId = inviteId,
+                                toName = toName,
+                                roomCode = roomCode,
+                                status = "expired",
+                            )
+                        )
+                    }
+                    showToast("发给「$toName」的附近邀请已超时")
+                    break
+                }
+            }
+            outgoingInvitePollingJob = null
+        }
+    }
+
+    fun dismissOutgoingInviteBanner() {
+        outgoingInvitePollingJob?.cancel()
+        outgoingInvitePollingJob = null
+        if (_uiState.value.outgoingNearbyInvite != null) {
+            _uiState.update { it.copy(outgoingNearbyInvite = null) }
+        }
+    }
+
+    // UX-15：若当前已在房间且需要弹切换确认框，则先暂存邀请，待确认切换时再回复服务端与移除横幅
     fun respondNearbyInvite(invite: NearbyInvite, accept: Boolean) {
+        val current = _uiState.value.activeRoom
+        if (accept && current != null && !current.roomCode.equals(invite.roomCode, ignoreCase = true)) {
+            _uiState.update {
+                it.copy(
+                    pendingSwitchRoom = PendingSwitchRoom(
+                        targetCode = invite.roomCode,
+                        password = "",
+                        source = "附近邀请（${invite.fromName}）",
+                        pendingNearbyInvite = invite,
+                    )
+                )
+            }
+            return
+        }
         _uiState.update { st ->
             st.copy(incomingNearbyInvites = st.incomingNearbyInvites.filterNot { it.inviteId == invite.inviteId })
         }
@@ -3563,20 +4318,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
             }.getOrNull()
             if (accept) {
                 val roomCode = resp?.roomCode?.takeIf { it.isNotBlank() } ?: invite.roomCode
-                val current = _uiState.value.activeRoom
-                if (current != null && !current.roomCode.equals(roomCode, ignoreCase = true)) {
-                    _uiState.update {
-                        it.copy(
-                            pendingSwitchRoom = PendingSwitchRoom(
-                                targetCode = roomCode,
-                                password = "",
-                                source = "附近邀请（${invite.fromName}）",
-                            )
-                        )
-                    }
-                } else {
-                    joinRoomInternal(roomCode, "")
-                }
+                joinRoomInternal(roomCode, "")
             }
         }
     }
@@ -3617,10 +4359,14 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
             val safeId = itemId.replace(Regex("[^a-zA-Z0-9._-]"), "_")
             val tmpFile = File(tmpDir, "dl_${room.roomCode}_$safeId.part")
             val existingOffset = if (tmpFile.exists()) tmpFile.length().coerceAtLeast(0L) else 0L
+            val progressKey = _uiState.value.activeRoom?.messages
+                ?.firstOrNull { it.id == itemId }
+                ?.transfer?.transferId ?: itemId
 
-            updateRoom { r ->
-                r.copy(
-                    messages = r.messages.map { m ->
+            _uiState.update { st ->
+                val roomCur = st.activeRoom
+                val nextRoom = roomCur?.copy(
+                    messages = roomCur.messages.map { m ->
                         if (m.id == itemId && m.transfer != null) {
                             m.copy(
                                 transfer = m.transfer.copy(
@@ -3632,6 +4378,17 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                             )
                         } else m
                     }
+                )
+                st.copy(
+                    activeRoom = nextRoom,
+                    transferProgress = st.transferProgress + (
+                        progressKey to TransferProgressSnapshot(
+                            transferredBytes = existingOffset,
+                            totalBytes = fileSize,
+                            speedBps = 0L,
+                            etaSeconds = 0,
+                        )
+                    ),
                 )
             }
 
@@ -3645,21 +4402,17 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                     val elapsedSec = ((System.currentTimeMillis() - startAt) / 1000.0).coerceAtLeast(0.1)
                     val speed = ((done - existingOffset).coerceAtLeast(0L)) / elapsedSec
                     val eta = if (speed > 0 && realTotal > done) (realTotal - done) / speed else 0.0
-                    updateRoom { r ->
-                        r.copy(
-                            messages = r.messages.map { m ->
-                                if (m.id == itemId && m.transfer != null) {
-                                    m.copy(
-                                        transfer = m.transfer.copy(
-                                            status = TransferStatus.TRANSFERRING,
-                                            fileSize = if (realTotal > 0L) realTotal else m.transfer.fileSize,
-                                            transferredBytes = done,
-                                            speedBps = speed,
-                                            etaSeconds = eta,
-                                        )
-                                    )
-                                } else m
-                            }
+                    // UX-19：高频进度仅写入 transferProgress，避免触发聊天消息列表全量重组
+                    _uiState.update { st ->
+                        st.copy(
+                            transferProgress = st.transferProgress + (
+                                progressKey to TransferProgressSnapshot(
+                                    transferredBytes = done,
+                                    totalBytes = realTotal,
+                                    speedBps = speed.toLong(),
+                                    etaSeconds = eta.toInt().coerceAtLeast(0),
+                                )
+                            )
                         )
                     }
                 }
@@ -3672,9 +4425,10 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                         keepLocalPreviewCopy = false,
                     )
                 }
-                updateRoom { r ->
-                    r.copy(
-                        messages = r.messages.map { m ->
+                _uiState.update { st ->
+                    val roomCur = st.activeRoom
+                    val nextRoom = roomCur?.copy(
+                        messages = roomCur.messages.map { m ->
                             if (m.id == itemId && m.transfer != null) {
                                 m.copy(
                                     localFilePath = saved.previewPath,
@@ -3690,6 +4444,10 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                                 )
                             } else m
                         }
+                    )
+                    st.copy(
+                        activeRoom = nextRoom,
+                        transferProgress = st.transferProgress - progressKey,
                     )
                 }
                 val rec = TransferRecord(
@@ -3707,9 +4465,10 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                 playSoundIfEnabled { playTransferDone() }
                 showToast("已下载历史附件至 ${saved.displayPath}")
             } catch (err: Exception) {
-                updateRoom { r ->
-                    r.copy(
-                        messages = r.messages.map { m ->
+                _uiState.update { st ->
+                    val roomCur = st.activeRoom
+                    val nextRoom = roomCur?.copy(
+                        messages = roomCur.messages.map { m ->
                             if (m.id == itemId && m.transfer != null) {
                                 m.copy(
                                     transfer = m.transfer.copy(
@@ -3719,6 +4478,10 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                                 )
                             } else m
                         }
+                    )
+                    st.copy(
+                        activeRoom = nextRoom,
+                        transferProgress = st.transferProgress - progressKey,
                     )
                 }
                 showToast(err.message ?: "历史附件下载失败")
@@ -3750,10 +4513,91 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun recallMessage(msgId: String) {
+        val room = _uiState.value.activeRoom ?: return
+        val target = room.messages.firstOrNull { it.id == msgId } ?: return
+        if (!target.isSelf) return
+        if (System.currentTimeMillis() - target.timestamp > RECALL_WINDOW_MS) {
+            showToast("已超过 2 分钟，无法撤回")
+            return
+        }
         applyMessageRecalled(msgId, selfPeerId, _uiState.value.profile.name)
         mesh?.broadcastRecall(msgId)
         signaling?.recallMessage(msgId)
         showToast("已撤回消息")
+    }
+
+    // 仅在本地移除指定消息（不动服务端与同伴），若正在播放对应语音则停止
+    fun deleteMessageLocally(msgId: String) {
+        if (_uiState.value.voicePlayback.activeItemId == msgId) {
+            stopVoicePlayback()
+        }
+        _uiState.update { st ->
+            val room = st.activeRoom ?: return@update st
+            val idx = room.messages.indexOfFirst { it.id == msgId }
+            if (idx < 0) return@update st
+            val remaining = room.messages.filterNot { it.id == msgId }
+            val nextFirstUnread = if (st.firstUnreadMessageId == msgId) {
+                remaining.drop(idx).firstOrNull { !it.isSelf && it.kind != ChatKind.SYSTEM }?.id
+            } else {
+                st.firstUnreadMessageId
+            }
+            st.copy(
+                activeRoom = room.copy(
+                    messages = remaining,
+                    replyingTo = if (room.replyingTo?.id == msgId) null else room.replyingTo,
+                ),
+                firstUnreadMessageId = nextFirstUnread,
+                unreadMentionMessageIds = st.unreadMentionMessageIds.filterNot { it == msgId },
+            )
+        }
+    }
+
+    // 按房间更新输入草稿（空字符串自动移除 key，最多保留最近 20 个房间）
+    fun updateDraft(code: String, text: String) {
+        val key = code.trim().uppercase()
+        if (key.isEmpty()) return
+        val next = store.saveRoomDraft(key, text)
+        _uiState.update { it.copy(draftsByRoom = next) }
+    }
+
+    // 读取指定房间的已保存输入草稿
+    fun draftFor(code: String): String {
+        val key = code.trim().uppercase()
+        if (key.isEmpty()) return ""
+        return _uiState.value.draftsByRoom[key].orEmpty()
+    }
+
+    // 按房间设置消息免打扰开关（roomCode 统一大写持久化）
+    fun setRoomMuted(code: String, muted: Boolean) {
+        val key = code.trim().uppercase()
+        if (key.isEmpty()) return
+        val next = store.setRoomMuted(key, muted)
+        _uiState.update { it.copy(mutedRooms = next) }
+        showToast(if (muted) "已开启消息免打扰" else "已关闭消息免打扰")
+    }
+
+    // 清除「以下为新消息」未读定位标记
+    fun clearFirstUnreadMarker() {
+        if (_uiState.value.firstUnreadMessageId == null) return
+        _uiState.update { it.copy(firstUnreadMessageId = null) }
+    }
+
+    // 忽略当前所有 @我 提醒横幅
+    fun dismissMentionBanner() {
+        if (_uiState.value.unreadMentionMessageIds.isEmpty()) return
+        _uiState.update { it.copy(unreadMentionMessageIds = emptyList()) }
+    }
+
+    // 处理完成 @我 跳转后清理对应或全部未读提及记录
+    fun jumpToMentionHandled(messageId: String? = null) {
+        _uiState.update { st ->
+            val next = if (messageId != null) {
+                st.unreadMentionMessageIds.filterNot { it == messageId }
+            } else {
+                emptyList()
+            }
+            st.copy(unreadMentionMessageIds = next)
+        }
     }
 
     fun reactMessage(msgId: String, emoji: String) {
@@ -3932,6 +4776,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun minimizeRoom() {
+        cancelVoiceRecording()
         if (_uiState.value.activeRoom != null) {
             _uiState.update { it.copy(roomMinimized = true) }
             showToast("房间已在后台保持连接与传输")
@@ -3945,6 +4790,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun switchToRecentRoom(item: RecentRoom) {
+        cancelVoiceRecording()
         val current = _uiState.value.activeRoom
         if (current != null && !current.roomCode.equals(item.code, ignoreCase = true)) {
             _uiState.update {
@@ -3962,6 +4808,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun leaveRoom() {
+        cancelVoiceRecording()
         val room = _uiState.value.activeRoom
         // B15：最后一人主动离开临时房时清理过期最近记录
         if (room != null && room.isEphemeral && room.peers.isEmpty()) {
@@ -3969,15 +4816,31 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         }
         store.clearLastActiveRoom()
         signaling?.leaveRoom()
+        outgoingInvitePollingJob?.cancel()
+        outgoingInvitePollingJob = null
         tearDownSession(stopService = true)
-        _uiState.update { it.copy(activeRoom = null, roomMinimized = false, unreadCount = 0) }
+        _uiState.update {
+            it.copy(
+                activeRoom = null,
+                roomMinimized = false,
+                unreadCount = 0,
+                playedVoiceIds = emptySet(),
+                firstUnreadMessageId = null,
+                unreadMentionMessageIds = emptyList(),
+                outgoingNearbyInvite = null,
+                transferProgress = emptyMap(),
+            )
+        }
     }
 
     fun destroyRoom() {
         val room = requireRoomOwner() ?: return
+        cancelVoiceRecording()
         val curCode = room.roomCode
         store.clearLastActiveRoom()
         signaling?.destroyRoom()
+        outgoingInvitePollingJob?.cancel()
+        outgoingInvitePollingJob = null
         if (room.ownerToken.isNotBlank()) {
             viewModelScope.launch {
                 runCatching {
@@ -3998,6 +4861,11 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                 activeRoom = null,
                 roomMinimized = false,
                 unreadCount = 0,
+                playedVoiceIds = emptySet(),
+                firstUnreadMessageId = null,
+                unreadMentionMessageIds = emptyList(),
+                outgoingNearbyInvite = null,
+                transferProgress = emptyMap(),
                 recentRooms = nextRecent,
                 savedRooms = nextSaved,
             )
@@ -4005,10 +4873,10 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         showToast("房间与服务器缓存已彻底销毁")
     }
 
-    private fun mergeCachedMessage(cm: CachedMessage, fromCache: Boolean) {
-        val room = _uiState.value.activeRoom ?: return
+    private fun mergeCachedMessage(cm: CachedMessage, fromCache: Boolean): ChatItem? {
+        val room = _uiState.value.activeRoom ?: return null
         val isSelf = cm.senderId == selfPeerId
-        if (!isSelf && isPeerBlockedInternal(cm.senderId, null, cm.senderName)) return
+        if (!isSelf && isPeerBlockedInternal(cm.senderId, null, cm.senderName)) return null
         val item = when (cm.kind) {
             "image" -> if (!cm.mediaId.isNullOrBlank()) {
                 ChatItem(
@@ -4024,7 +4892,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                     mediaId = cm.mediaId,
                     fromCache = fromCache,
                 )
-            } else return
+            } else return null
 
             "audio" -> if (!cm.mediaId.isNullOrBlank()) {
                 ChatItem(
@@ -4052,7 +4920,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                         isHistoryRecord = true,
                     ),
                 )
-            } else return
+            } else return null
 
             "file_notice" -> {
                 val cachedUrl = cm.mediaId?.takeIf { it.isNotBlank() }
@@ -4076,7 +4944,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                             )
                         }
                     }
-                    return
+                    return null
                 }
                 ChatItem(
                     id = cm.id,
@@ -4108,6 +4976,8 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                 val quote = if (!cm.replyToId.isNullOrBlank() && !cm.replyToPreview.isNullOrBlank()) {
                     ReplyQuote(cm.replyToId, cm.replyToSender ?: "伙伴", cm.replyToPreview)
                 } else null
+                val decodedText = FormatUtils.decodeLegacySecret(cm.text)
+                val mentioned = !isSelf && isTextMentioningMe(decodedText)
                 ChatItem(
                     id = cm.id,
                     kind = ChatKind.TEXT,
@@ -4116,35 +4986,81 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                     senderAvatar = cm.senderAvatar,
                     isSelf = isSelf,
                     timestamp = cm.timestamp,
-                    text = FormatUtils.decodeLegacySecret(cm.text),
+                    text = decodedText,
                     replyTo = quote,
                     fromCache = fromCache,
+                    mentionedMe = mentioned,
                 )
             }
         }
         val inserted = appendMessageIfAbsent(item)
-        if (inserted && !fromCache && !isSelf) {
-            playSoundIfEnabled { playMessageIn() }
-            notifyIfBackgroundMessage(item.senderName, item.text ?: "[媒体消息]")
+        if (!inserted) return null
+        if (!fromCache && !isSelf) {
+            handleIncomingMessageArrived(
+                item = item,
+                fromCache = false,
+                roomCode = room.roomCode,
+                previewText = item.text ?: "[媒体消息]",
+            )
         }
+        return item
     }
 
     private fun applyMessageRecalled(msgId: String, actorPeerId: String?, actorName: String?) {
-        updateRoom { r ->
-            val target = r.messages.firstOrNull { it.id == msgId } ?: return@updateRoom r
-            if (actorPeerId != null && target.senderId != actorPeerId) return@updateRoom r
-            val filtered = r.messages.filterNot { it.id == msgId }
-            r.copy(
-                messages = filtered + ChatItem(
-                    id = "recalled_$msgId",
-                    kind = ChatKind.SYSTEM,
-                    senderId = "system",
-                    senderName = "系统",
-                    isSelf = false,
-                    timestamp = System.currentTimeMillis(),
-                    text = "↩ ${actorName ?: target.senderName} 撤回了一条消息",
+        if (_uiState.value.voicePlayback.activeItemId == msgId) {
+            stopVoicePlayback()
+        }
+        _uiState.update { st ->
+            val r = st.activeRoom ?: return@update st
+            val targetIdx = r.messages.indexOfFirst { it.id == msgId }
+            if (targetIdx < 0) return@update st
+            val target = r.messages[targetIdx]
+            if (actorPeerId != null && target.senderId != actorPeerId) return@update st
+            // 接收端防篡改校验：超过 2 分钟 + 60 秒时钟偏差容忍上限时直接忽略撤回
+            if (System.currentTimeMillis() - target.timestamp > RECALL_WINDOW_MS + 60_000L) {
+                return@update st
+            }
+            val isSelfRecall = target.isSelf || (actorPeerId != null && actorPeerId == selfPeerId)
+            val recalledText = if (isSelfRecall && target.kind == ChatKind.TEXT) target.text else null
+            val senderDisplay = actorName?.takeIf { it.isNotBlank() } ?: target.senderName
+            val recallNoticeText = if (isSelfRecall) {
+                "你撤回了一条消息"
+            } else {
+                "\"${senderDisplay}\" 撤回了一条消息"
+            }
+            val recallItem = ChatItem(
+                id = "recalled_$msgId",
+                kind = ChatKind.SYSTEM,
+                senderId = "system",
+                senderName = "系统",
+                isSelf = false,
+                timestamp = target.timestamp,
+                text = recallNoticeText,
+                isSelfRecall = isSelfRecall,
+                recalledText = recalledText,
+            )
+            // 在原位替换为撤回系统提示，并同步将所有引用该消息的 replyToPreview 刷新为已撤回提示
+            val updatedMessages = r.messages.map { m ->
+                when {
+                    m.id == msgId -> recallItem
+                    m.replyTo?.id == msgId -> m.copy(
+                        replyTo = m.replyTo.copy(preview = "该引用内容已撤回")
+                    )
+                    else -> m
+                }
+            }
+            val nextFirstUnread = if (st.firstUnreadMessageId == msgId) {
+                updatedMessages.drop(targetIdx + 1).firstOrNull { !it.isSelf && it.kind != ChatKind.SYSTEM }?.id
+            } else {
+                st.firstUnreadMessageId
+            }
+            st.copy(
+                activeRoom = r.copy(
+                    messages = updatedMessages,
+                    replyingTo = if (r.replyingTo?.id == msgId) null else r.replyingTo,
                 ),
-                replyingTo = if (r.replyingTo?.id == msgId) null else r.replyingTo,
+                firstUnreadMessageId = nextFirstUnread,
+                unreadMentionMessageIds = st.unreadMentionMessageIds.filterNot { it == msgId },
             )
         }
     }
@@ -4220,6 +5136,8 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
 
     override fun onCleared() {
         stopNearbyPolling()
+        outgoingInvitePollingJob?.cancel()
+        outgoingInvitePollingJob = null
         networkCallback?.let { cb ->
             runCatching { connectivityManager?.unregisterNetworkCallback(cb) }
         }
@@ -4238,10 +5156,21 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         private const val LAST_ROOM_RECOVER_TTL_MS = 10L * 60L * 1000L
         // B20：正在输入状态 6 秒自动超时清除
         private const val TYPING_TIMEOUT_MS = 6_000L
-        // 最长语音消息录制时长（60 秒）
+        // 最短与最长语音消息录制时长（1 秒 ~ 60 秒）
+        private const val MIN_VOICE_DURATION_MS = 1_000L
         private const val MAX_VOICE_DURATION_MS = 60_000L
+        // 消息撤回有效时间窗口（2 分钟）
+        const val RECALL_WINDOW_MS = 120_000L
+        // @提及 后缀允许的常见分隔标点符号
+        private val MENTION_BOUNDARY_CHARS = setOf(',', '.', ':', ';', '!', '?', '，', '。', '：', '；', '！', '？', ')', '）', ']', '】')
+        // 同一文案 Toast 去重时间窗口（3 秒）
+        private const val TOAST_DEDUP_WINDOW_MS = 3_000L
+        // 重发/续传动作去重防连点窗口（600 毫秒）
+        private const val RESEND_DEBOUNCE_MS = 600L
         // 附近设备心跳与房内邀请轮询间隔
         private const val NEARBY_LOBBY_HEARTBEAT_MS = 5_000L
         private const val NEARBY_ROOM_POLL_MS = 3_000L
+        private const val OUTGOING_INVITE_POLL_MS = 3_000L
+        private const val OUTGOING_INVITE_MAX_WAIT_MS = 70_000L
     }
 }

@@ -571,4 +571,9 @@ data class ChatItem(
     val fromCache: Boolean = false,
     val sendStatus: MessageSendStatus = MessageSendStatus.SENT,
     val transfer: FileTransferInfo? = null,
+    // 自己撤回标记与可重新编辑的纯文本内容（仅当前会话内存）
+    val isSelfRecall: Boolean = false,
+    val recalledText: String? = null,
+    // 文本消息是否 @ 提及了当前用户
+    val mentionedMe: Boolean = false,
 )

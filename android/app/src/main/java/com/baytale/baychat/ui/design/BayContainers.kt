@@ -1,6 +1,7 @@
 package com.baytale.baychat.ui.design
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -13,19 +14,26 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.baytale.baychat.core.util.BayHaptic
 import com.baytale.baychat.ui.theme.BayShapes
 import com.baytale.baychat.ui.theme.BaySpacing
 import com.baytale.baychat.ui.theme.BayTheme
@@ -150,10 +158,27 @@ fun BayListRow(
     modifier: Modifier = Modifier,
 ) {
     val colors = BayTheme.colors
-    val rowModifier = if (onClick != null) {
-        modifier.bayClickable(onClick = onClick)
-    } else {
-        modifier
+    val haptic = LocalHapticFeedback.current
+    val isRowToggleable = trailing is RowTrailing.Switch && onClick == null
+    val rowModifier = when {
+        onClick != null -> modifier.bayClickable(onClick = onClick)
+        isRowToggleable -> {
+            val switchTrailing = trailing as RowTrailing.Switch
+            val interactionSource = remember { MutableInteractionSource() }
+            modifier
+                .semantics(mergeDescendants = true) {}
+                .toggleable(
+                    value = switchTrailing.checked,
+                    interactionSource = interactionSource,
+                    indication = null,
+                    role = Role.Switch,
+                    onValueChange = { next ->
+                        BayHaptic.tap(haptic, enabled = true)
+                        switchTrailing.onChange(next)
+                    },
+                )
+        }
+        else -> modifier
     }
 
     Column(modifier = rowModifier.fillMaxWidth()) {
@@ -233,6 +258,7 @@ fun BayListRow(
                     BaySwitch(
                         checked = trailing.checked,
                         onCheckedChange = trailing.onChange,
+                        modifier = if (isRowToggleable) Modifier.clearAndSetSemantics {} else Modifier,
                     )
                 }
                 is RowTrailing.Custom -> {
