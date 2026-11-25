@@ -10,6 +10,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -42,6 +43,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -74,13 +76,23 @@ import com.baytale.baychat.ui.theme.LocalBayColors
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 
-// BayChat 主 Activity：处理沉浸式界面、深链进房、系统「分享到 BayChat」、原生扫码与隐私合规门禁
+// 湾聊（BayChat）主 Activity：处理沉浸式深浅状态栏自适应、深链进房、系统分享、原生扫码与隐私合规门禁
 class MainActivity : ComponentActivity() {
     private val viewModel: BayChatViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        // 默认开启浅色背景深色图标状态栏，配合 BayChatTheme 动态切换，彻底避免澎湃 OS 状态栏白字隐身
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.light(
+                android.graphics.Color.TRANSPARENT,
+                android.graphics.Color.TRANSPARENT,
+            ),
+            navigationBarStyle = SystemBarStyle.light(
+                android.graphics.Color.TRANSPARENT,
+                android.graphics.Color.TRANSPARENT,
+            ),
+        )
         parseIncomingIntent(intent)
 
         setContent {
@@ -88,12 +100,10 @@ class MainActivity : ComponentActivity() {
             val snackbarHostState = remember { SnackbarHostState() }
             var showLeaveConfirm by remember { mutableStateOf(false) }
 
-            // Android 13+ 仅在进房时请求通知权限，用于前台保活显示传输进度
             val notificationPermLauncher = rememberLauncherForActivityResult(
                 contract = ActivityResultContracts.RequestPermission()
             ) { /* 拒绝也不阻断应用使用 */ }
 
-            // 竖屏原生二维码扫描
             val qrScanLauncher = rememberLauncherForActivityResult(
                 contract = ScanContract()
             ) { result ->
@@ -107,7 +117,7 @@ class MainActivity : ComponentActivity() {
                 val opts = ScanOptions().apply {
                     setCaptureActivity(PortraitCaptureActivity::class.java)
                     setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-                    setPrompt("对准电脑或好友手机上的 BayChat 房间二维码")
+                    setPrompt("对准电脑或好友手机上的湾聊房间二维码")
                     setBeepEnabled(true)
                     setOrientationLocked(true)
                     setBarcodeImageEnabled(false)
@@ -115,7 +125,6 @@ class MainActivity : ComponentActivity() {
                 qrScanLauncher.launch(opts)
             }
 
-            // 首次进入房间时请求通知权限（仅 Android 13+ 且尚未授权时）
             LaunchedEffect(uiState.activeRoom?.roomCode) {
                 if (uiState.activeRoom != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     val granted = ContextCompat.checkSelfPermission(
@@ -128,7 +137,6 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            // 统一全局轻提示展示
             LaunchedEffect(uiState.toastMessage) {
                 val msg = uiState.toastMessage
                 if (!msg.isNullOrBlank()) {
@@ -140,7 +148,6 @@ class MainActivity : ComponentActivity() {
             BayChatTheme(themeMode = uiState.themeMode) {
                 val colors = LocalBayColors.current
 
-                // 在房间内按系统返回键时弹出「挂起保持连接」或「彻底离开」选项
                 BackHandler(enabled = uiState.activeRoom != null && !uiState.roomMinimized) {
                     showLeaveConfirm = true
                 }
@@ -150,10 +157,22 @@ class MainActivity : ComponentActivity() {
                     if (activeRoom == null || uiState.roomMinimized) {
                         LobbyScreen(
                             state = uiState,
-                            onCreateRoom = { mode, customCode, pwd, pairOnly, days, mb, saveFav ->
-                                viewModel.createAndEnterRoom(mode, customCode, pwd, pairOnly, days, mb, saveFav)
+                            onCreateRoom = { mode, customCode, pwd, pairOnly, days, mb, saveFav, allowRandom, topic ->
+                                viewModel.createAndEnterRoom(
+                                    mode = mode,
+                                    customCode = customCode,
+                                    password = pwd,
+                                    privatePairOnly = pairOnly,
+                                    retentionDays = days,
+                                    maxFileSizeMB = mb,
+                                    saveFixedFavorite = saveFav,
+                                    allowRandom = allowRandom,
+                                    topic = topic,
+                                )
                             },
                             onJoinRoom = { raw, pwd -> viewModel.joinRoom(raw, pwd) },
+                            onRandomJoinRoom = { viewModel.joinRandomPublicRoom(excludeCurrent = false) },
+                            onRefreshPublicRooms = { viewModel.refreshPublicRooms() },
                             onRequestQrScan = { launchQrScanner() },
                             onRemoveSavedRoom = { viewModel.removeSavedRoom(it) },
                             onRemoveRecentRoom = { viewModel.removeRecentRoom(it) },
@@ -164,83 +183,110 @@ class MainActivity : ComponentActivity() {
                             onClearPendingShare = { viewModel.clearPendingShare() },
                             onCopyInviteUrl = { code ->
                                 val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                                cm?.setPrimaryClip(ClipData.newPlainText("BayChat", viewModel.buildInviteUrl(code)))
+                                cm?.setPrimaryClip(ClipData.newPlainText("湾聊 BayChat", viewModel.buildInviteUrl(code)))
                                 viewModel.showToast("已复制 #$code 邀请链接")
                             },
+                            onRefreshTransfers = { viewModel.refreshTransferCenter() },
+                            onDeletePartialTransfer = { viewModel.deletePartialTransfer(it) },
+                            onClearAllPartialTransfers = { viewModel.clearAllPartialTransfers() },
+                            onRemoveTransferRecord = { viewModel.removeTransferRecord(it) },
+                            onClearTransferRecords = { viewModel.clearTransferRecords() },
+                            onCheckAppUpdate = { viewModel.checkForAppUpdate(manual = true) },
+                            onDownloadAppUpdate = { viewModel.downloadAndInstallUpdate() },
+                            onToast = { viewModel.showToast(it) },
                             onClearError = { viewModel.clearLobbyError() },
                             onConsumePendingJoin = { viewModel.consumePendingJoinCode() },
                         )
 
-                        // 最小化后台挂起浮窗胶囊：人退回大厅逛一圈，房间连线与大文件传输持续不断！
+                        // 最小化后台挂起浮窗胶囊：位于底部三 Tab 导航栏上方，切出来逛发现广场/传输中心时传输不断线
                         if (activeRoom != null && uiState.roomMinimized) {
                             val activeTransfer = activeRoom.messages.lastOrNull {
                                 it.transfer?.status == TransferStatus.TRANSFERRING
                             }?.transfer
+                            val progressFraction = if (activeTransfer != null && activeTransfer.fileSize > 0) {
+                                (activeTransfer.transferredBytes.toFloat() / activeTransfer.fileSize.toFloat()).coerceIn(0.02f, 1f)
+                            } else null
                             val statusLine = when {
                                 activeTransfer != null && activeTransfer.fileSize > 0 -> {
                                     val pct = ((activeTransfer.transferredBytes * 100.0) / activeTransfer.fileSize).coerceIn(0.0, 100.0)
-                                    String.format(java.util.Locale.US, "传输中 %.1f%% · %s", pct, activeTransfer.fileName)
+                                    String.format(java.util.Locale.US, "后台直传 %.1f%% · %s", pct, activeTransfer.fileName)
                                 }
                                 activeRoom.peers.isNotEmpty() -> "后台在线 · ${activeRoom.peers.size + 1} 人已连线"
                                 else -> "后台挂起等待伙伴加入..."
                             }
 
                             Card(
-                                shape = RoundedCornerShape(20.dp),
+                                shape = RoundedCornerShape(18.dp),
                                 colors = CardDefaults.cardColors(containerColor = colors.surface),
                                 border = BorderStroke(1.5.dp, colors.accent.copy(alpha = 0.55f)),
                                 elevation = CardDefaults.cardElevation(defaultElevation = 10.dp),
                                 modifier = Modifier
                                     .align(Alignment.BottomCenter)
                                     .navigationBarsPadding()
-                                    .padding(horizontal = 14.dp, vertical = 12.dp)
+                                    .padding(start = 14.dp, end = 14.dp, bottom = 86.dp)
                                     .fillMaxWidth()
                                     .clickable { viewModel.restoreRoom() },
                             ) {
-                                Row(
+                                Column(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .padding(horizontal = 14.dp, vertical = 10.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                        .padding(horizontal = 14.dp, vertical = 9.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp),
                                 ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(10.dp)
-                                            .clip(CircleShape)
-                                            .background(colors.emerald),
-                                    )
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = "房间 #${activeRoom.roomCode} 后台运行中",
-                                            fontFamily = FontFamily.Monospace,
-                                            fontWeight = FontWeight.ExtraBold,
-                                            fontSize = 13.5.sp,
-                                            color = colors.textMain,
-                                            maxLines = 1,
-                                        )
-                                        Text(
-                                            text = statusLine,
-                                            fontSize = 11.5.sp,
-                                            color = colors.textSub,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
-                                    }
-                                    Button(
-                                        onClick = { viewModel.restoreRoom() },
-                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
-                                        modifier = Modifier.height(32.dp),
-                                        shape = RoundedCornerShape(10.dp),
-                                        colors = ButtonDefaults.buttonColors(containerColor = colors.accent),
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp),
                                     ) {
-                                        Text("回到房间", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                        Box(
+                                            modifier = Modifier
+                                                .size(9.dp)
+                                                .clip(CircleShape)
+                                                .background(colors.emerald),
+                                        )
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = "房间 #${activeRoom.roomCode} 后台运行中",
+                                                fontFamily = FontFamily.Monospace,
+                                                fontWeight = FontWeight.ExtraBold,
+                                                fontSize = 13.sp,
+                                                color = colors.textMain,
+                                                maxLines = 1,
+                                            )
+                                            Text(
+                                                text = statusLine,
+                                                fontSize = 11.5.sp,
+                                                color = colors.textSub,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                        }
+                                        Button(
+                                            onClick = { viewModel.restoreRoom() },
+                                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                                            modifier = Modifier.height(30.dp),
+                                            shape = RoundedCornerShape(9.dp),
+                                            colors = ButtonDefaults.buttonColors(containerColor = colors.accent),
+                                        ) {
+                                            Text("回房", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                        }
+                                        IconButton(
+                                            onClick = { viewModel.leaveRoom() },
+                                            modifier = Modifier.size(28.dp),
+                                        ) {
+                                            Icon(Icons.Rounded.Close, contentDescription = "断开房间", tint = colors.textMuted, modifier = Modifier.size(16.dp))
+                                        }
                                     }
-                                    IconButton(
-                                        onClick = { viewModel.leaveRoom() },
-                                        modifier = Modifier.size(30.dp),
-                                    ) {
-                                        Icon(Icons.Rounded.Close, contentDescription = "断开房间", tint = colors.textMuted, modifier = Modifier.size(17.dp))
+                                    if (progressFraction != null) {
+                                        LinearProgressIndicator(
+                                            progress = { progressFraction },
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .height(4.dp)
+                                                .clip(RoundedCornerShape(99.dp)),
+                                            color = colors.accent,
+                                            trackColor = colors.accentSoft,
+                                        )
                                     }
                                 }
                             }
@@ -265,11 +311,15 @@ class MainActivity : ComponentActivity() {
                             onSearchFilterChange = { kw, kind -> viewModel.setSearchFilter(kw, kind) },
                             onUpdateRetention = { days -> viewModel.updateRetentionDays(days) },
                             onUpdateMaxFileMB = { mb -> viewModel.updateRoomMaxFileMB(mb) },
+                            onUpdateAllowRandom = { allow -> viewModel.updateAllowRandom(allow) },
                             onUpdatePrefs = { next -> viewModel.updatePrefs(next) },
                             onSelectTheme = { mode -> viewModel.selectTheme(mode) },
                             onExportLog = { viewModel.exportChatLog() },
                             onClearHistory = { viewModel.clearServerHistory() },
                             onRotateCode = { viewModel.rotateEphemeralCode() },
+                            onRandomSwitchRoom = { viewModel.joinRandomPublicRoom(excludeCurrent = true) },
+                            onBlockPeer = { pid, name -> viewModel.blockPeer(pid, name) },
+                            onReportPeer = { name -> viewModel.reportPeer(name) },
                             onSwitchRecentRoom = { rec -> viewModel.switchToRecentRoom(rec) },
                             onMinimizeRoom = { viewModel.minimizeRoom() },
                             onLeaveRoom = { viewModel.leaveRoom() },
@@ -284,7 +334,7 @@ class MainActivity : ComponentActivity() {
                         modifier = Modifier
                             .align(Alignment.TopCenter)
                             .statusBarsPadding()
-                            .padding(top = 60.dp, start = 16.dp, end = 16.dp),
+                            .padding(top = 58.dp, start = 16.dp, end = 16.dp),
                     ) { data ->
                         Snackbar(
                             snackbarData = data,
@@ -335,7 +385,6 @@ class MainActivity : ComponentActivity() {
         parseIncomingIntent(intent)
     }
 
-    // 解析系统「分享到 BayChat」与深链唤起
     private fun parseIncomingIntent(intent: Intent?) {
         if (intent == null) return
         when (intent.action) {

@@ -20,6 +20,9 @@
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />
 
+    <!-- 仅用于用户主动点击「应用内检查更新」后调起系统包安装器覆盖升级 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
     <application
         android:name=".BayChatApp"
         android:allowBackup="true"

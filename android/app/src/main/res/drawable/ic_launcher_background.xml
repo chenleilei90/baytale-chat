@@ -5,6 +5,7 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+    <!-- 方案 B 清风极简：通透钴蓝至晴空青渐变底 -->
     <path android:pathData="M0,0h108v108h-108z">
         <aapt:attr name="android:fillColor">
             <gradient
@@ -13,8 +14,8 @@
                 android:endX="108"
                 android:endY="108"
                 android:type="linear">
-                <item android:color="#FFFF5487" android:offset="0.0" />
-                <item android:color="#FFFF8B53" android:offset="1.0" />
+                <item android:color="#FF2563EB" android:offset="0.0" />
+                <item android:color="#FF06B6D4" android:offset="1.0" />
             </gradient>
         </aapt:attr>
     </path>

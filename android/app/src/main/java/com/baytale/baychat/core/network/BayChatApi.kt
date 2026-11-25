@@ -1,7 +1,10 @@
 package com.baytale.baychat.core.network
 
+import com.baytale.baychat.core.model.AppReleaseInfo
 import com.baytale.baychat.core.model.CreateRoomRequest
 import com.baytale.baychat.core.model.MediaUploadResponse
+import com.baytale.baychat.core.model.PublicRoomsResponse
+import com.baytale.baychat.core.model.RandomRoomRequest
 import com.baytale.baychat.core.model.RoomSummary
 import com.baytale.baychat.core.model.ServerConfig
 import com.baytale.baychat.core.model.VerifyPasswordRequest
@@ -52,6 +55,32 @@ class BayChatApi(
         val req = Request.Builder()
             .url("${baseUrl()}/api/rooms")
             .post(body)
+            .build()
+        executeJson(req)
+    }
+
+    suspend fun fetchPublicRooms(): PublicRoomsResponse = withContext(Dispatchers.IO) {
+        val req = Request.Builder()
+            .url("${baseUrl()}/api/rooms/public")
+            .get()
+            .build()
+        executeJson(req)
+    }
+
+    suspend fun pickRandomPublicRoom(excludeCode: String = ""): RoomSummary = withContext(Dispatchers.IO) {
+        val body = json.encodeToString(RandomRoomRequest.serializer(), RandomRoomRequest(excludeCode))
+            .toRequestBody(jsonMediaType)
+        val req = Request.Builder()
+            .url("${baseUrl()}/api/rooms/random")
+            .post(body)
+            .build()
+        executeJson(req)
+    }
+
+    suspend fun fetchLatestRelease(): AppReleaseInfo = withContext(Dispatchers.IO) {
+        val req = Request.Builder()
+            .url("${baseUrl()}/apk/version.json?t=${System.currentTimeMillis()}")
+            .get()
             .build()
         executeJson(req)
     }

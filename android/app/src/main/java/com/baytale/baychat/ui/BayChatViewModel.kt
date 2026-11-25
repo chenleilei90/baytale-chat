@@ -4,6 +4,8 @@ import android.app.Application
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.baytale.baychat.BuildConfig
+import com.baytale.baychat.core.model.AppReleaseInfo
 import com.baytale.baychat.core.model.AppThemeMode
 import com.baytale.baychat.core.model.CachedMessage
 import com.baytale.baychat.core.model.ChatItem
@@ -12,6 +14,8 @@ import com.baytale.baychat.core.model.CreateRoomRequest
 import com.baytale.baychat.core.model.FileTransferInfo
 import com.baytale.baychat.core.model.HistoryMeta
 import com.baytale.baychat.core.model.LinkTransportType
+import com.baytale.baychat.core.model.PartialFileMeta
+import com.baytale.baychat.core.model.PartialResumeItem
 import com.baytale.baychat.core.model.PeerLinkStatus
 import com.baytale.baychat.core.model.PeerProfile
 import com.baytale.baychat.core.model.RecentRoom
@@ -22,9 +26,11 @@ import com.baytale.baychat.core.model.SavedFixedRoom
 import com.baytale.baychat.core.model.ServerConfig
 import com.baytale.baychat.core.model.SignalEnvelope
 import com.baytale.baychat.core.model.TransferDirection
+import com.baytale.baychat.core.model.TransferRecord
 import com.baytale.baychat.core.model.TransferStatus
 import com.baytale.baychat.core.model.UserProfile
 import com.baytale.baychat.core.network.ApiException
+import com.baytale.baychat.core.network.AppUpdateManager
 import com.baytale.baychat.core.network.BayChatApi
 import com.baytale.baychat.core.network.SignalingCallbacks
 import com.baytale.baychat.core.network.SignalingClient
@@ -73,12 +79,22 @@ data class PendingExternalShare(
 data class BayChatUiState(
     val privacyAccepted: Boolean = false,
     val profile: UserProfile,
-    val themeMode: AppThemeMode = AppThemeMode.PEACH,
+    val themeMode: AppThemeMode = AppThemeMode.AIR,
     val prefs: AppUserPrefs = AppUserPrefs(),
     val serverConfig: ServerConfig = ServerConfig(),
     val configLoaded: Boolean = false,
     val savedRooms: List<SavedFixedRoom> = emptyList(),
     val recentRooms: List<RecentRoom> = emptyList(),
+    val publicRooms: List<RoomSummary> = emptyList(),
+    val publicRoomsLoading: Boolean = false,
+    val randomJoining: Boolean = false,
+    val transferRecords: List<TransferRecord> = emptyList(),
+    val partialTransfers: List<PartialResumeItem> = emptyList(),
+    val availableUpdate: AppReleaseInfo? = null,
+    val updateChecking: Boolean = false,
+    val updateDownloading: Boolean = false,
+    val updateProgress: Float = 0f,
+    val blockedPeerIds: Set<String> = emptySet(),
     val lobbyBusy: Boolean = false,
     val lobbyError: String? = null,
     val pendingJoinCode: String? = null,
@@ -88,11 +104,12 @@ data class BayChatUiState(
     val toastMessage: String? = null,
 )
 
-// 全局业务控制器：统一管理大厅、房间信令、WebRTC Mesh 传输、系统分享队列与前台保活通知
+// 全局业务控制器：统一管理大厅、发现广场、传输中心、房间信令、WebRTC Mesh 传输、自动更新与前台保活通知
 class BayChatViewModel(application: Application) : AndroidViewModel(application) {
     private val appContext = application.applicationContext
     private val store = AppPrefsStore(appContext)
     private val api = BayChatApi(serverUrlProvider = { _uiState.value.prefs.serverUrl })
+    private val updateManager = AppUpdateManager(appContext, api.okHttpClient)
 
     private val _uiState = MutableStateFlow(
         BayChatUiState(
@@ -102,6 +119,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
             prefs = store.loadPrefs(),
             savedRooms = store.loadSavedRooms(),
             recentRooms = store.loadRecentRooms(),
+            transferRecords = store.loadTransferRecords(),
         )
     )
     val uiState: StateFlow<BayChatUiState> = _uiState.asStateFlow()
@@ -112,8 +130,11 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     private val recordedTransfers = mutableSetOf<String>()
 
     init {
+        refreshTransferCenter()
         if (_uiState.value.privacyAccepted) {
             refreshServerConfig()
+            refreshPublicRooms()
+            checkForAppUpdate(manual = false)
         }
     }
 
@@ -121,6 +142,8 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         store.setPrivacyAccepted(true)
         _uiState.update { it.copy(privacyAccepted = true) }
         refreshServerConfig()
+        refreshPublicRooms()
+        checkForAppUpdate(manual = false)
     }
 
     fun refreshServerConfig() {
@@ -263,7 +286,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
 
     fun buildInviteUrl(code: String): String = api.buildInviteUrl(code)
 
-    // 创建房间并自动进入
+    // 创建房间并自动进入（支持 allowRandom 允许陌生人随机串门 & 可选主题标签）
     fun createAndEnterRoom(
         mode: RoomMode,
         customCode: String,
@@ -272,17 +295,22 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         retentionDays: Int,
         maxFileSizeMB: Int,
         saveFixedFavorite: Boolean,
+        allowRandom: Boolean = true,
+        topic: String = "",
     ) {
         if (_uiState.value.lobbyBusy) return
         _uiState.update { it.copy(lobbyBusy = true, lobbyError = null) }
         viewModelScope.launch {
             try {
                 val maxPeers = if (privatePairOnly) 2 else _uiState.value.serverConfig.maxRoomPeers.coerceAtLeast(2)
+                val cleanPwd = password.trim()
                 val summary = api.createRoom(
                     CreateRoomRequest(
                         mode = mode.wireValue,
                         code = if (mode == RoomMode.FIXED) customCode.trim().takeIf { it.isNotBlank() } else null,
-                        password = password.trim().takeIf { it.isNotBlank() },
+                        password = cleanPwd.takeIf { it.isNotBlank() },
+                        allowRandom = if (cleanPwd.isBlank()) allowRandom else false,
+                        topic = topic.trim().takeIf { it.isNotBlank() },
                         maxPeers = maxPeers,
                         retentionDays = retentionDays,
                         maxFileSizeMB = maxFileSizeMB,
@@ -293,19 +321,187 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                         SavedFixedRoom(
                             code = summary.code,
                             hasPassword = summary.hasPassword,
-                            password = password.trim(),
+                            password = cleanPwd,
                         )
                     )
                     _uiState.update { it.copy(savedRooms = saved) }
                 }
-                recordRecentRoom(summary.code, summary.mode, summary.hasPassword, password.trim())
-                enterRoomInternal(summary.code, password.trim(), summary)
+                recordRecentRoom(summary.code, summary.mode, summary.hasPassword, cleanPwd)
+                enterRoomInternal(summary.code, cleanPwd, summary)
             } catch (e: Exception) {
                 _uiState.update { it.copy(lobbyError = e.message ?: "创建房间失败") }
             } finally {
                 _uiState.update { it.copy(lobbyBusy = false) }
             }
         }
+    }
+
+    // 刷新发现广场中的免密公开房间列表
+    fun refreshPublicRooms() {
+        viewModelScope.launch {
+            _uiState.update { it.copy(publicRoomsLoading = true) }
+            runCatching { api.fetchPublicRooms() }
+                .onSuccess { resp ->
+                    _uiState.update { it.copy(publicRooms = resp.rooms, publicRoomsLoading = false) }
+                }
+                .onFailure {
+                    _uiState.update { it.copy(publicRoomsLoading = false) }
+                }
+        }
+    }
+
+    // 随机进入一间免密公开房间（支持 excludeCurrent=true 实现房内「🎲 换一间」）
+    fun joinRandomPublicRoom(excludeCurrent: Boolean = false) {
+        if (_uiState.value.randomJoining || _uiState.value.lobbyBusy) return
+        val exclude = if (excludeCurrent) _uiState.value.activeRoom?.roomCode.orEmpty() else ""
+        _uiState.update { it.copy(randomJoining = true, lobbyError = null) }
+        viewModelScope.launch {
+            try {
+                val target = api.pickRandomPublicRoom(exclude)
+                if (target.hasPassword) {
+                    showToast("已跳过加密房间")
+                    return@launch
+                }
+                if (excludeCurrent && _uiState.value.activeRoom != null) {
+                    signaling?.leaveRoom()
+                    tearDownSession(stopService = false)
+                }
+                recordRecentRoom(target.code, target.mode, false, "")
+                enterRoomInternal(target.code, "", target)
+                val topicSuffix = if (target.topic.isNotBlank()) " · ${target.topic}" else ""
+                showToast("🎲 已空降免密房间 #${target.code}$topicSuffix")
+            } catch (e: ApiException) {
+                if (e.errorCode == "NO_PUBLIC_ROOM") {
+                    val hint = if (excludeCurrent) "暂无其他免密公开房可切换" else e.message
+                    showToast(hint)
+                } else {
+                    showToast(e.message)
+                }
+                refreshPublicRooms()
+            } catch (e: Exception) {
+                showToast(e.message ?: "随机匹配失败，请稍后重试")
+            } finally {
+                _uiState.update { it.copy(randomJoining = false) }
+            }
+        }
+    }
+
+    // 扫描本地断点缓存 .part 与历史记录，驱动「传输中心」Tab
+    fun refreshTransferCenter() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val dir = WebRtcMeshManager.transferCacheDir(appContext)
+            val metaMap = store.loadPartialMetaMap()
+            val partials = dir.listFiles()
+                ?.filter { it.isFile && it.name.endsWith(".part") && it.length() > 0L }
+                ?.map { f ->
+                    val meta = metaMap[f.name]
+                    PartialResumeItem(
+                        partFileName = f.name,
+                        fileName = meta?.fileName ?: f.name,
+                        savedBytes = f.length(),
+                        totalBytes = meta?.fileSize ?: f.length(),
+                        roomCode = meta?.roomCode ?: "",
+                        peerName = meta?.peerName ?: "",
+                        lastModified = f.lastModified(),
+                    )
+                }
+                ?.sortedByDescending { it.lastModified }
+                .orEmpty()
+            val history = store.loadTransferRecords()
+            _uiState.update { it.copy(partialTransfers = partials, transferRecords = history) }
+        }
+    }
+
+    fun deletePartialTransfer(partFileName: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val f = File(WebRtcMeshManager.transferCacheDir(appContext), partFileName)
+            runCatching { f.delete() }
+            store.removePartialMeta(partFileName)
+            refreshTransferCenter()
+            withContext(Dispatchers.Main) { showToast("已清理该断点缓存") }
+        }
+    }
+
+    fun clearAllPartialTransfers() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val dir = WebRtcMeshManager.transferCacheDir(appContext)
+            dir.listFiles()?.forEach { f ->
+                if (f.isFile && f.name.endsWith(".part")) {
+                    runCatching { f.delete() }
+                    store.removePartialMeta(f.name)
+                }
+            }
+            refreshTransferCenter()
+            withContext(Dispatchers.Main) { showToast("已清空全部未完成断点缓存") }
+        }
+    }
+
+    fun removeTransferRecord(id: String) {
+        val next = store.removeTransferRecord(id)
+        _uiState.update { it.copy(transferRecords = next) }
+    }
+
+    fun clearTransferRecords() {
+        val next = store.clearTransferRecords()
+        _uiState.update { it.copy(transferRecords = next) }
+        showToast("已清空传输记录列表（本地已保存文件不受影响）")
+    }
+
+    // 应用内自动检查更新（对接 chat.baytale.com/apk/version.json）
+    fun checkForAppUpdate(manual: Boolean = false) {
+        if (_uiState.value.updateChecking) return
+        _uiState.update { it.copy(updateChecking = true) }
+        viewModelScope.launch {
+            runCatching { api.fetchLatestRelease() }
+                .onSuccess { rel ->
+                    if (rel.versionCode > BuildConfig.VERSION_CODE) {
+                        _uiState.update { it.copy(availableUpdate = rel, updateChecking = false) }
+                        if (manual) showToast("🚀 发现新版本 v${rel.versionName}，点击即可直连升级")
+                    } else {
+                        _uiState.update { it.copy(availableUpdate = null, updateChecking = false) }
+                        if (manual) showToast("当前已是最新版本 v${BuildConfig.VERSION_NAME}")
+                    }
+                }
+                .onFailure {
+                    _uiState.update { it.copy(updateChecking = false) }
+                    if (manual) showToast("检查更新失败，请检查网络连接")
+                }
+        }
+    }
+
+    fun downloadAndInstallUpdate() {
+        val release = _uiState.value.availableUpdate ?: return
+        if (_uiState.value.updateDownloading) return
+        _uiState.update { it.copy(updateDownloading = true, updateProgress = 0f) }
+        viewModelScope.launch {
+            val outcome = updateManager.downloadAndInstall(release) { done, total ->
+                val pct = if (total > 0L) (done.toFloat() / total.toFloat()).coerceIn(0f, 1f) else 0f
+                _uiState.update { it.copy(updateProgress = pct) }
+            }
+            _uiState.update { it.copy(updateDownloading = false) }
+            when (outcome) {
+                is AppUpdateManager.UpdateInstallOutcome.InstallerLaunched -> {
+                    showToast("安装包已就绪，请按系统提示完成覆盖升级")
+                }
+                is AppUpdateManager.UpdateInstallOutcome.NeedInstallPermission -> {
+                    showToast("请先开启「允许安装未知应用」权限，返回后再点一次「立即更新」")
+                }
+                is AppUpdateManager.UpdateInstallOutcome.Error -> {
+                    showToast("更新失败：${outcome.message}")
+                }
+            }
+        }
+    }
+
+    // 房内安全护栏：本地屏蔽该成员消息 / 记录举报反馈（满足应用商店 UGC 合规要求）
+    fun blockPeer(peerId: String, peerName: String) {
+        if (peerId.isBlank() || peerId == selfPeerId) return
+        _uiState.update { it.copy(blockedPeerIds = it.blockedPeerIds + peerId) }
+        showToast("已屏蔽「$peerName」，不再展示其后续消息")
+    }
+
+    fun reportPeer(peerName: String) {
+        showToast("已提交对「$peerName」的违规反馈，建议屏蔽对方或点击「换一间」离开")
     }
 
     // 通过房间码/邀请链接/扫码结果加入房间
@@ -384,7 +580,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
 
         TransferForegroundService.updateStatus(
             appContext,
-            title = "BayChat 房间 #$code",
+            title = "湾聊房间 #$code",
             text = "正在维持 P2P 闪传通道...",
         )
 
@@ -468,6 +664,19 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                     if (limitMB > 0 && info.fileSize > limitMB.toLong() * 1024L * 1024L) {
                         showToast("⚠️ 收到超大附件「${info.fileName}」，请手动确认接收或婉拒")
                     }
+                    // 提前登记大文件断点续传元数据，中断后可在「传输中心」清晰看到文件名和已接收进度
+                    if (!info.isImage && !info.isAudio && info.fileSize > 0L) {
+                        val partName = WebRtcMeshManager.resumePartFileName(info.fileName, info.fileSize)
+                        store.upsertPartialMeta(
+                            PartialFileMeta(
+                                partFileName = partName,
+                                fileName = info.fileName,
+                                fileSize = info.fileSize,
+                                roomCode = _uiState.value.activeRoom?.roomCode.orEmpty(),
+                                peerName = sender?.name ?: "伙伴",
+                            )
+                        )
+                    }
                     appendMessageIfAbsent(
                         ChatItem(
                             id = itemId,
@@ -513,6 +722,26 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                             progress = pct,
                         )
                     } else if (info.status == TransferStatus.COMPLETED) {
+                        val roomCode = _uiState.value.activeRoom?.roomCode.orEmpty()
+                        val rec = TransferRecord(
+                            id = "${info.transferId}_${info.direction.name}",
+                            fileName = info.fileName,
+                            fileSize = info.fileSize,
+                            mimeType = info.mimeType,
+                            direction = if (info.direction == TransferDirection.SEND) "send" else "receive",
+                            roomCode = roomCode,
+                            peerName = info.targetPeerName.orEmpty(),
+                            savedDisplayPath = info.savedDisplayPath,
+                            localPath = info.localPath,
+                            verified = info.verified,
+                        )
+                        val updatedHistory = store.addTransferRecord(rec)
+                        if (info.direction == TransferDirection.RECEIVE && !info.isImage && !info.isAudio) {
+                            store.removePartialMeta(WebRtcMeshManager.resumePartFileName(info.fileName, info.fileSize))
+                        }
+                        _uiState.update { it.copy(transferRecords = updatedHistory) }
+                        refreshTransferCenter()
+
                         if (!info.isImage && !info.isAudio) {
                             if (info.direction == TransferDirection.SEND) {
                                 val baseKey = info.transferId.substringBeforeLast('_')
@@ -532,6 +761,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                         }
                         refreshForegroundBanner()
                     } else if (info.status == TransferStatus.ERROR || info.status == TransferStatus.CANCELLED) {
+                        refreshTransferCenter()
                         refreshForegroundBanner()
                     }
                 }
@@ -639,9 +869,15 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                 }
 
                 override fun onRoomSettingsUpdated(env: SignalEnvelope) {
-                    val mb = env.maxFileSizeMB ?: return
-                    updateRoom { r -> r.copy(roomInfo = r.roomInfo?.copy(maxFileSizeMB = mb)) }
-                    appendSystemMessage("📦 ${env.actorName ?: "伙伴"} 将附件上限调为：${FormatUtils.formatLimitMB(mb)}")
+                    env.maxFileSizeMB?.let { mb ->
+                        updateRoom { r -> r.copy(roomInfo = r.roomInfo?.copy(maxFileSizeMB = mb)) }
+                        appendSystemMessage("📦 ${env.actorName ?: "伙伴"} 将附件上限调为：${FormatUtils.formatLimitMB(mb)}")
+                    }
+                    env.allowRandom?.let { allow ->
+                        updateRoom { r -> r.copy(roomInfo = r.roomInfo?.copy(allowRandom = allow)) }
+                        val stateDesc = if (allow) "已开启（允许陌生人随机串门）" else "已关闭（仅凭口令进入）"
+                        appendSystemMessage("🌐 ${env.actorName ?: "伙伴"} 修改随机串门状态：$stateDesc")
+                    }
                 }
 
                 override fun onRoomStatsUpdated(env: SignalEnvelope) {
@@ -706,7 +942,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         }
         TransferForegroundService.updateStatus(
             appContext,
-            title = "BayChat 房间 #${room.roomCode}",
+            title = "湾聊房间 #${room.roomCode}",
             text = statusText,
         )
     }
@@ -991,6 +1227,15 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
             return
         }
         signaling?.updateMaxFileSize(mb)
+    }
+
+    fun updateAllowRandom(allowRandom: Boolean) {
+        val room = _uiState.value.activeRoom ?: return
+        if (room.password.isNotBlank() || room.roomInfo?.hasPassword == true) {
+            showToast("加密房间禁止开启随机串门")
+            return
+        }
+        signaling?.updateAllowRandom(allowRandom)
     }
 
     fun clearServerHistory() {

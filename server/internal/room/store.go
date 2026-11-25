@@ -33,6 +33,7 @@ var (
 	ErrWrongPassword      = errors.New("房间密码错误")
 	ErrRoomFull           = errors.New("房间人数已满")
 	ErrInvalidMaxFileSize = errors.New("附件大小上限设置无效")
+	ErrNoPublicRoom       = errors.New("当前暂无可随机进入的免密公开房间，不妨先建一间等伙伴来串门")
 )
 
 const (
@@ -76,6 +77,8 @@ type FixedRoomRecord struct {
 	MaxPeers      int       `json:"maxPeers"`
 	RetentionDays int       `json:"retentionDays"`           // 服务器聊天缓存保留天数（0~7）
 	MaxFileSizeMB *int      `json:"maxFileSizeMB,omitempty"` // 单文件附件上限（MB），0 表示不限制，nil 兼容旧版数据
+	AllowRandom   *bool     `json:"allowRandom,omitempty"`   // 允许陌生人随机串门（仅免密房有效，默认 true）
+	Topic         string    `json:"topic,omitempty"`         // 可选公开房间主题标签
 	Stats         RoomStats `json:"stats,omitempty"`         // 基地成长与连续火花统计
 	CreatedAt     int64     `json:"createdAt"`
 	LastActiveAt  int64     `json:"lastActiveAt"`

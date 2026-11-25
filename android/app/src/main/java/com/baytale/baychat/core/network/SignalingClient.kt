@@ -183,6 +183,10 @@ class SignalingClient(
         send(SignalEnvelope(type = "update_max_file_size", maxFileSizeMB = maxFileSizeMB))
     }
 
+    fun updateAllowRandom(allowRandom: Boolean) {
+        send(SignalEnvelope(type = "update_allow_random", allowRandom = allowRandom))
+    }
+
     fun recordActivity(kind: String, bytes: Long = 0) {
         send(SignalEnvelope(type = "record_activity", activityKind = kind, activityBytes = bytes))
     }

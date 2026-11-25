@@ -71,6 +71,29 @@ func main() {
 		writeJSON(w, http.StatusCreated, summary)
 	})
 
+	// 查询当前可进入的免密公开房间列表（发现广场）
+	mux.HandleFunc("GET /api/rooms/public", func(w http.ResponseWriter, r *http.Request) {
+		rooms := hub.ListPublicRooms()
+		writeJSON(w, http.StatusOK, map[string]any{
+			"rooms": rooms,
+			"count": len(rooms),
+		})
+	})
+
+	// 随机进入一间免密公开房间（支持 excludeCode 避免换一间抽到当前房）
+	mux.HandleFunc("POST /api/rooms/random", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			ExcludeCode string `json:"excludeCode"`
+		}
+		_ = json.NewDecoder(io.LimitReader(r.Body, 4*1024)).Decode(&body)
+		summary, err := hub.PickRandomPublicRoom(body.ExcludeCode)
+		if err != nil {
+			writeRoomError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, summary)
+	})
+
 	// 查询房间元信息
 	mux.HandleFunc("GET /api/rooms/{code}", func(w http.ResponseWriter, r *http.Request) {
 		summary, err := hub.GetRoomInfo(r.PathValue("code"))
@@ -159,29 +182,40 @@ func main() {
 		})
 	})
 
-	// 自助调整房间单文件附件大小上限（MB，0 表示不限制）
+	// 自助调整房间设置（单文件附件大小上限 / 允许陌生人随机串门开关）
 	mux.HandleFunc("PUT /api/rooms/{code}/settings", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			MaxFileSizeMB *int   `json:"maxFileSizeMB"`
+			AllowRandom   *bool  `json:"allowRandom"`
 			Password      string `json:"password"`
 			ActorName     string `json:"actorName"`
 		}
-		if err := json.NewDecoder(io.LimitReader(r.Body, 16*1024)).Decode(&body); err != nil || body.MaxFileSizeMB == nil {
-			writeError(w, http.StatusBadRequest, "INVALID_JSON", "请提供有效的附件大小上限参数")
+		if err := json.NewDecoder(io.LimitReader(r.Body, 16*1024)).Decode(&body); err != nil || (body.MaxFileSizeMB == nil && body.AllowRandom == nil) {
+			writeError(w, http.StatusBadRequest, "INVALID_JSON", "请提供有效的房间设置参数")
 			return
 		}
 		password := body.Password
 		if password == "" {
 			password = extractPassword(r)
 		}
-		updatedMB, err := hub.UpdateMaxFileSize(r.PathValue("code"), password, *body.MaxFileSizeMB, body.ActorName)
-		if err != nil {
-			writeRoomError(w, err)
-			return
+		resp := map[string]any{}
+		if body.MaxFileSizeMB != nil {
+			updatedMB, err := hub.UpdateMaxFileSize(r.PathValue("code"), password, *body.MaxFileSizeMB, body.ActorName)
+			if err != nil {
+				writeRoomError(w, err)
+				return
+			}
+			resp["maxFileSizeMB"] = updatedMB
 		}
-		writeJSON(w, http.StatusOK, map[string]any{
-			"maxFileSizeMB": updatedMB,
-		})
+		if body.AllowRandom != nil {
+			updatedAllow, err := hub.UpdateAllowRandom(r.PathValue("code"), password, *body.AllowRandom, body.ActorName)
+			if err != nil {
+				writeRoomError(w, err)
+				return
+			}
+			resp["allowRandom"] = updatedAllow
+		}
+		writeJSON(w, http.StatusOK, resp)
 	})
 
 	// 上传聊天图片/截图到房间服务器缓存（受限于房间缓存开关与单图体积上限）
@@ -322,6 +356,8 @@ func writeRoomError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusForbidden, "WRONG_PASSWORD", err.Error())
 	case errors.Is(err, room.ErrRoomFull):
 		writeError(w, http.StatusConflict, "ROOM_FULL", err.Error())
+	case errors.Is(err, room.ErrNoPublicRoom):
+		writeError(w, http.StatusNotFound, "NO_PUBLIC_ROOM", err.Error())
 	case errors.Is(err, room.ErrMediaTooLarge):
 		writeError(w, http.StatusRequestEntityTooLarge, "MEDIA_TOO_LARGE", err.Error())
 	case errors.Is(err, room.ErrMediaNotFound):

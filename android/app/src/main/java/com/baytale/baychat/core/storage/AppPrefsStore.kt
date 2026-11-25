@@ -3,11 +3,15 @@ package com.baytale.baychat.core.storage
 import android.content.Context
 import com.baytale.baychat.BuildConfig
 import com.baytale.baychat.core.model.AppThemeMode
+import com.baytale.baychat.core.model.PartialFileMeta
 import com.baytale.baychat.core.model.RecentRoom
 import com.baytale.baychat.core.model.SavedFixedRoom
+import com.baytale.baychat.core.model.TransferRecord
 import com.baytale.baychat.core.model.UserProfile
 import com.baytale.baychat.core.util.FormatUtils
 import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.builtins.MapSerializer
+import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
 
 data class AppUserPrefs(
@@ -17,7 +21,7 @@ data class AppUserPrefs(
     val serverUrl: String = BuildConfig.DEFAULT_SERVER_URL,
 )
 
-// 本地偏好与身份持久化仓库（全部存于应用私有 SharedPreferences，卸载自动清理）
+// 本地偏好、传输记录与身份持久化仓库（全部存于应用私有 SharedPreferences，卸载自动清理）
 class AppPrefsStore(context: Context) {
     private val sp = context.applicationContext.getSharedPreferences("baychat_prefs_v1", Context.MODE_PRIVATE)
     private val json = Json { ignoreUnknownKeys = true }
@@ -47,10 +51,11 @@ class AppPrefsStore(context: Context) {
         sp.edit().putString(KEY_PROFILE, raw).apply()
     }
 
-    fun loadTheme(): AppThemeMode = AppThemeMode.fromId(sp.getString(KEY_THEME, null))
+    // v1.1.0 切换默认主题为方案 B「清风极简 (AIR)」，独立存储键确保老用户升级后立即体验新视觉
+    fun loadTheme(): AppThemeMode = AppThemeMode.fromId(sp.getString(KEY_THEME_V2, null))
 
     fun saveTheme(mode: AppThemeMode) {
-        sp.edit().putString(KEY_THEME, mode.id).apply()
+        sp.edit().putString(KEY_THEME_V2, mode.id).apply()
     }
 
     fun loadPrefs(): AppUserPrefs = AppUserPrefs(
@@ -118,15 +123,66 @@ class AppPrefsStore(context: Context) {
         return emptyList()
     }
 
+    // 传输中心：持久化已完成文件记录
+    fun loadTransferRecords(): List<TransferRecord> {
+        val raw = sp.getString(KEY_TRANSFER_RECORDS, null) ?: return emptyList()
+        return runCatching {
+            json.decodeFromString(ListSerializer(TransferRecord.serializer()), raw)
+                .sortedByDescending { it.timestamp }
+        }.getOrDefault(emptyList())
+    }
+
+    fun addTransferRecord(record: TransferRecord): List<TransferRecord> {
+        val list = loadTransferRecords().filterNot { it.id == record.id }.toMutableList()
+        list.add(0, record)
+        val trimmed = list.take(60)
+        sp.edit().putString(KEY_TRANSFER_RECORDS, json.encodeToString(ListSerializer(TransferRecord.serializer()), trimmed)).apply()
+        return trimmed
+    }
+
+    fun removeTransferRecord(id: String): List<TransferRecord> {
+        val next = loadTransferRecords().filterNot { it.id == id }
+        sp.edit().putString(KEY_TRANSFER_RECORDS, json.encodeToString(ListSerializer(TransferRecord.serializer()), next)).apply()
+        return next
+    }
+
+    fun clearTransferRecords(): List<TransferRecord> {
+        sp.edit().remove(KEY_TRANSFER_RECORDS).apply()
+        return emptyList()
+    }
+
+    // 记录断点续传 .part 文件的原始文件名与房间信息，便于在「传输中心」清晰展示
+    fun loadPartialMetaMap(): Map<String, PartialFileMeta> {
+        val raw = sp.getString(KEY_PARTIAL_META, null) ?: return emptyMap()
+        return runCatching {
+            json.decodeFromString(MapSerializer(String.serializer(), PartialFileMeta.serializer()), raw)
+        }.getOrDefault(emptyMap())
+    }
+
+    fun upsertPartialMeta(meta: PartialFileMeta) {
+        val map = loadPartialMetaMap().toMutableMap()
+        map[meta.partFileName] = meta
+        sp.edit().putString(KEY_PARTIAL_META, json.encodeToString(MapSerializer(String.serializer(), PartialFileMeta.serializer()), map)).apply()
+    }
+
+    fun removePartialMeta(partFileName: String) {
+        val map = loadPartialMetaMap().toMutableMap()
+        if (map.remove(partFileName) != null) {
+            sp.edit().putString(KEY_PARTIAL_META, json.encodeToString(MapSerializer(String.serializer(), PartialFileMeta.serializer()), map)).apply()
+        }
+    }
+
     companion object {
         private const val KEY_PRIVACY_ACCEPTED = "privacy_accepted_v1"
         private const val KEY_PROFILE = "user_profile"
-        private const val KEY_THEME = "theme_mode"
+        private const val KEY_THEME_V2 = "theme_mode_v2"
         private const val KEY_AUTO_ACCEPT = "auto_accept_small"
         private const val KEY_AUTO_ACCEPT_MB = "auto_accept_max_mb"
         private const val KEY_IMAGE_ORIGINAL = "image_original"
         private const val KEY_SERVER_URL = "server_url"
         private const val KEY_SAVED_ROOMS = "saved_fixed_rooms"
         private const val KEY_RECENT_ROOMS = "recent_rooms_v1"
+        private const val KEY_TRANSFER_RECORDS = "transfer_records_v1"
+        private const val KEY_PARTIAL_META = "partial_meta_v1"
     }
 }

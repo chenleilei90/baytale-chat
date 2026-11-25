@@ -108,6 +108,8 @@ export interface RoomSummary {
   code: string;
   mode: RoomMode;
   hasPassword: boolean;
+  allowRandom?: boolean; // 是否允许陌生人随机进入（仅无密码房有效）
+  topic?: string; // 可选房间主题标签
   maxPeers: number;
   peerCount: number;
   retentionDays: number;
@@ -264,6 +266,8 @@ export interface SignalEnvelope {
   activityBytes?: number;
   retentionDays?: number;
   maxFileSizeMB?: number;
+  allowRandom?: boolean;
+  topic?: string;
   reason?: string;
   errorCode?: string;
   error?: string;

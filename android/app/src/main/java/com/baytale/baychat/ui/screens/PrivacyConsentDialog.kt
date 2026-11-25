@@ -33,7 +33,7 @@ fun PrivacyConsentDialog(
         containerColor = colors.surface,
         title = {
             Text(
-                text = "欢迎使用 BayChat 闪传",
+                text = "欢迎使用 湾聊 (BayChat)",
                 fontWeight = FontWeight.ExtraBold,
                 fontSize = 19.sp,
                 color = colors.textMain,

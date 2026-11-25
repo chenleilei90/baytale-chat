@@ -92,6 +92,16 @@ class WebRtcMeshManager(
 
         private val factoryInitialized = AtomicBoolean(false)
 
+        fun transferCacheDir(context: Context): File =
+            File(context.applicationContext.cacheDir, "baychat_transfers").apply { mkdirs() }
+
+        fun resumePartFileName(fileName: String, fileSize: Long): String {
+            val keyHash = FormatUtils.bytesToHex(
+                MessageDigest.getInstance("SHA-256").digest("$fileName::$fileSize".toByteArray(Charsets.UTF_8))
+            ).take(20)
+            return "resume_$keyHash.part"
+        }
+
         fun ensureWebRtcInitialized(context: Context) {
             if (factoryInitialized.compareAndSet(false, true)) {
                 PeerConnectionFactory.initialize(
@@ -507,7 +517,7 @@ class WebRtcMeshManager(
     }
 
     private fun transferCacheDir(): File {
-        val dir = File(appContext.cacheDir, "baychat_transfers").apply { mkdirs() }
+        val dir = Companion.transferCacheDir(appContext)
         // 自动清理超过 24 小时的陈旧断点碎片，防止长期占用手机存储
         val expireAt = System.currentTimeMillis() - 24L * 3600L * 1000L
         dir.listFiles()?.forEach { f ->
@@ -519,10 +529,7 @@ class WebRtcMeshManager(
     }
 
     private fun resumePartFile(fileName: String, fileSize: Long): File {
-        val keyHash = FormatUtils.bytesToHex(
-            MessageDigest.getInstance("SHA-256").digest("$fileName::$fileSize".toByteArray(Charsets.UTF_8))
-        ).take(20)
-        return File(transferCacheDir(), "resume_$keyHash.part")
+        return File(transferCacheDir(), Companion.resumePartFileName(fileName, fileSize))
     }
 
     fun acceptIncomingTransfer(peerId: String, transferId: String, resumeIfAvailable: Boolean = true): Boolean {

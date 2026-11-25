@@ -27,6 +27,7 @@ import {
   createRoom,
   extractRoomCodeInput,
   fetchRoomInfo,
+  pickRandomPublicRoom,
   verifyRoomPassword,
 } from '../lib/signaling';
 import { copyTextToClipboard, formatRelativeTime } from '../lib/platform';
@@ -92,6 +93,7 @@ export const Lobby: React.FC<LobbyProps> = ({
   const [mode, setMode] = useState<RoomMode>('ephemeral');
   const [customCode, setCustomCode] = useState('');
   const [createPassword, setCreatePassword] = useState('');
+  const [allowRandom, setAllowRandom] = useState(true); // 默认允许陌生人随机串门（有密码时自动失效）
   const [privatePairOnly, setPrivatePairOnly] = useState(false);
   const [retentionDays, setRetentionDays] = useState(1);
   const [maxFileSizeMB, setMaxFileSizeMB] = useState<number>(
@@ -99,6 +101,7 @@ export const Lobby: React.FC<LobbyProps> = ({
   );
   const [saveToFavorites, setSaveToFavorites] = useState(true);
   const [creating, setCreating] = useState(false);
+  const [randomJoining, setRandomJoining] = useState(false);
 
   useEffect(() => {
     if (serverConfig && typeof serverConfig.defaultRoomMaxFileMB === 'number') {
@@ -149,17 +152,19 @@ export const Lobby: React.FC<LobbyProps> = ({
     setCreating(true);
     try {
       const maxLimit = serverConfig?.maxRoomPeers || 6;
+      const cleanPwd = createPassword.trim();
       const summary = await createRoom({
         mode,
         code: mode === 'fixed' ? customCode.trim() : undefined,
-        password: createPassword.trim() || undefined,
+        password: cleanPwd || undefined,
+        allowRandom: cleanPwd ? false : allowRandom,
         maxPeers: privatePairOnly ? 2 : maxLimit,
         retentionDays,
         maxFileSizeMB,
       });
       onEnterRoom(
         summary.code,
-        createPassword.trim(),
+        cleanPwd,
         summary.mode,
         mode === 'fixed' && saveToFavorites
       );
@@ -167,6 +172,20 @@ export const Lobby: React.FC<LobbyProps> = ({
       setErrorText(err instanceof Error ? err.message : '创建房间失败');
     } finally {
       setCreating(false);
+    }
+  };
+
+  const handleRandomJoin = async () => {
+    setErrorText('');
+    setRandomJoining(true);
+    try {
+      const target = await pickRandomPublicRoom();
+      onToast(`🎲 已为你空降免密房间 #${target.code}`);
+      onEnterRoom(target.code, '', target.mode, false);
+    } catch (err) {
+      setErrorText(err instanceof Error ? err.message : '当前暂无可随机进入的免密公开房间');
+    } finally {
+      setRandomJoining(false);
     }
   };
 
@@ -282,9 +301,9 @@ export const Lobby: React.FC<LobbyProps> = ({
             <Send size={18} />
           </div>
           <div>
-            <div className="brand-title-text">BayChat</div>
+            <div className="brand-title-text">湾聊 · BayChat</div>
             <div className="brand-subtitle">
-              {domainDisplay} · 闪传对讲屋
+              {domainDisplay} · 跨端 P2P 直传
             </div>
           </div>
         </div>
@@ -533,6 +552,19 @@ export const Lobby: React.FC<LobbyProps> = ({
                   </div>
                 </div>
 
+                {createPassword.trim() === '' ? (
+                  <Switch
+                    checked={allowRandom}
+                    onChange={setAllowRandom}
+                    label="🌐 允许陌生人随机串门"
+                    description="默认开启；若仅自己跨端传私密文件，点击可关闭防误闯"
+                  />
+                ) : (
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: '2px 4px' }}>
+                    🔒 已设置暗号密码，自动关闭随机串门（仅凭密码进入）
+                  </div>
+                )}
+
                 {mode === 'fixed' && (
                   <Switch
                     checked={saveToFavorites}
@@ -628,15 +660,27 @@ export const Lobby: React.FC<LobbyProps> = ({
                   </div>
                 )}
 
-                <button
-                  type="submit"
-                  className="btn btn-jelly btn-xl"
-                  style={{ width: '100%' }}
-                  disabled={joining}
-                >
-                  <span>{joining ? '正在穿越公网连接...' : '嗖一下进入房间'}</span>
-                  <ArrowRight size={17} />
-                </button>
+                <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                  <button
+                    type="submit"
+                    className="btn btn-jelly btn-xl"
+                    style={{ flex: 1, minWidth: 160 }}
+                    disabled={joining || randomJoining}
+                  >
+                    <span>{joining ? '正在穿越公网连接...' : '嗖一下进入房间'}</span>
+                    <ArrowRight size={17} />
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-soft btn-xl"
+                    disabled={joining || randomJoining}
+                    onClick={() => void handleRandomJoin()}
+                    title="只进入无密码且允许串门的活跃房间"
+                  >
+                    <Dices size={17} />
+                    <span>{randomJoining ? '匹配中...' : '随机串门'}</span>
+                  </button>
+                </div>
               </form>
             )}
           </section>

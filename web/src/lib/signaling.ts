@@ -47,6 +47,8 @@ export function createRoom(params: {
   mode: RoomMode;
   code?: string;
   password?: string;
+  allowRandom?: boolean;
+  topic?: string;
   maxPeers?: number;
   retentionDays: number;
   maxFileSizeMB?: number;
@@ -55,6 +57,20 @@ export function createRoom(params: {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(params),
+  });
+}
+
+// 获取当前可进入的免密公开房间列表
+export function fetchPublicRooms(): Promise<{ rooms: RoomSummary[]; count: number }> {
+  return requestJSON<{ rooms: RoomSummary[]; count: number }>('/api/rooms/public');
+}
+
+// 随机抽取一间免密公开房间（支持排除当前房间号）
+export function pickRandomPublicRoom(excludeCode?: string): Promise<RoomSummary> {
+  return requestJSON<RoomSummary>('/api/rooms/random', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ excludeCode: excludeCode || '' }),
   });
 }
 

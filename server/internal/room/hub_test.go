@@ -357,3 +357,83 @@ func TestRoomStatsAndStreakPersistence(t *testing.T) {
 		t.Fatalf("重启后成长统计丢失: %+v", info.Stats)
 	}
 }
+
+func TestRandomAndPublicPasswordlessRooms(t *testing.T) {
+	cfg := newTestConfig(t)
+	hub, err := NewHub(cfg)
+	if err != nil {
+		t.Fatalf("初始化 Hub 失败: %v", err)
+	}
+	defer hub.Close()
+
+	// 1. 设了密码的房间即使传 AllowRandom=true 也绝不允许被随机进入
+	yes := true
+	locked, err := hub.CreateRoom(CreateRoomRequest{
+		Mode:        ModeEphemeral,
+		Password:    "pass888",
+		AllowRandom: &yes,
+	})
+	if err != nil {
+		t.Fatalf("创建加密房失败: %v", err)
+	}
+	if locked.AllowRandom {
+		t.Fatalf("加密房绝不允许 AllowRandom=true: %+v", locked)
+	}
+
+	// 2. 无密码房间关闭 AllowRandom=false 也不会出现在公开随机池
+	no := false
+	privateOpen, err := hub.CreateRoom(CreateRoomRequest{
+		Mode:        ModeEphemeral,
+		AllowRandom: &no,
+	})
+	if err != nil {
+		t.Fatalf("创建关闭随机串门的免密房失败: %v", err)
+	}
+	if privateOpen.AllowRandom {
+		t.Fatalf("预期 AllowRandom=false: %+v", privateOpen)
+	}
+
+	if _, err := hub.PickRandomPublicRoom(""); !errors.Is(err, ErrNoPublicRoom) {
+		t.Fatalf("仅有加密房和关闭随机房时应返回 ErrNoPublicRoom，实际: %v", err)
+	}
+
+	// 3. 无密码房未传 AllowRandom 时默认打开（AllowRandom=true）
+	pub1, err := hub.CreateRoom(CreateRoomRequest{
+		Mode:  ModeEphemeral,
+		Topic: "☕ 闲聊摸鱼",
+	})
+	if err != nil {
+		t.Fatalf("创建免密公开房1失败: %v", err)
+	}
+	if !pub1.AllowRandom || pub1.HasPassword || pub1.Topic != "☕ 闲聊摸鱼" {
+		t.Fatalf("免密公开房1属性异常: %+v", pub1)
+	}
+
+	pub2, err := hub.CreateRoom(CreateRoomRequest{
+		Mode:  ModeEphemeral,
+		Topic: "⚡ 互传文件",
+	})
+	if err != nil {
+		t.Fatalf("创建免密公开房2失败: %v", err)
+	}
+
+	list := hub.ListPublicRooms()
+	if len(list) != 2 {
+		t.Fatalf("公开列表预期 2 间，实际 %d: %+v", len(list), list)
+	}
+
+	// 4. 排除 pub1 时必须精准抽中 pub2
+	picked, err := hub.PickRandomPublicRoom(pub1.Code)
+	if err != nil || picked.Code != pub2.Code {
+		t.Fatalf("排除 %s 后预期抽中 %s，实际 picked=%+v err=%v", pub1.Code, pub2.Code, picked, err)
+	}
+
+	// 5. 动态关闭 pub2 的随机串门开关后，再次排除 pub1 必须无房可抽
+	updatedAllow, err := hub.UpdateAllowRandom(pub2.Code, "", false, "房主")
+	if err != nil || updatedAllow {
+		t.Fatalf("关闭随机串门失败: allow=%v err=%v", updatedAllow, err)
+	}
+	if _, err := hub.PickRandomPublicRoom(pub1.Code); !errors.Is(err, ErrNoPublicRoom) {
+		t.Fatalf("关闭后应无法抽到 pub2，实际: %v", err)
+	}
+}

@@ -18,15 +18,16 @@ enum class RoomMode(val wireValue: String) {
 }
 
 enum class AppThemeMode(val id: String, val label: String) {
-    PEACH("peach", "蜜桃粉"),
+    AIR("air", "清风极简"),
+    PEACH("peach", "蜜桃暖屿"),
     MINT("mint", "薄荷蓝"),
     BERRY("berry", "莓果紫"),
     LIME("lime", "青柠绿"),
-    NEON("neon", "暗夜霓虹");
+    NEON("neon", "暗夜光束");
 
     companion object {
         fun fromId(raw: String?): AppThemeMode =
-            entries.firstOrNull { it.id == raw } ?: PEACH
+            entries.firstOrNull { it.id == raw } ?: AIR
     }
 }
 
@@ -72,6 +73,8 @@ data class RoomSummary(
     val code: String,
     val mode: String = "ephemeral",
     val hasPassword: Boolean = false,
+    val allowRandom: Boolean = true,
+    val topic: String = "",
     val maxPeers: Int = 6,
     val peerCount: Int = 0,
     val retentionDays: Int = 1,
@@ -87,9 +90,67 @@ data class CreateRoomRequest(
     val mode: String,
     val code: String? = null,
     val password: String? = null,
+    val allowRandom: Boolean? = null,
+    val topic: String? = null,
     val maxPeers: Int? = null,
     val retentionDays: Int = 1,
     val maxFileSizeMB: Int? = null,
+)
+
+@Serializable
+data class PublicRoomsResponse(
+    val rooms: List<RoomSummary> = emptyList(),
+    val count: Int = 0,
+)
+
+@Serializable
+data class RandomRoomRequest(
+    val excludeCode: String = "",
+)
+
+@Serializable
+data class AppReleaseInfo(
+    val versionCode: Int,
+    val versionName: String,
+    val apkUrl: String,
+    val sha256: String = "",
+    val sizeBytes: Long = 0L,
+    val releaseNotes: String = "",
+)
+
+@Serializable
+data class TransferRecord(
+    val id: String,
+    val fileName: String,
+    val fileSize: Long,
+    val mimeType: String,
+    val direction: String, // send | receive
+    val roomCode: String,
+    val peerName: String = "",
+    val savedDisplayPath: String? = null,
+    val localPath: String? = null,
+    val verified: Boolean = false,
+    val timestamp: Long = System.currentTimeMillis(),
+)
+
+@Serializable
+data class PartialFileMeta(
+    val partFileName: String,
+    val fileName: String,
+    val fileSize: Long,
+    val roomCode: String,
+    val peerName: String = "",
+    val updatedAt: Long = System.currentTimeMillis(),
+)
+
+data class PartialResumeItem(
+    val partFileName: String,
+    val fileName: String,
+    val savedBytes: Long,
+    val totalBytes: Long,
+    val roomCode: String,
+    val peerName: String,
+    val lastModified: Long,
 )
 
 @Serializable
@@ -184,6 +245,8 @@ data class SignalEnvelope(
     val activityBytes: Long? = null,
     val retentionDays: Int? = null,
     val maxFileSizeMB: Int? = null,
+    val allowRandom: Boolean? = null,
+    val topic: String? = null,
     val reason: String? = null,
     val errorCode: String? = null,
     val error: String? = null,

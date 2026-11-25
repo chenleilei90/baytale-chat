@@ -1,5 +1,8 @@
 package com.baytale.baychat
 
+import com.baytale.baychat.core.model.AppReleaseInfo
+import com.baytale.baychat.core.model.AppThemeMode
+import com.baytale.baychat.core.model.PublicRoomsResponse
 import com.baytale.baychat.core.model.SignalEnvelope
 import com.baytale.baychat.core.util.FormatUtils
 import kotlinx.serialization.json.Json
@@ -80,5 +83,50 @@ class ProtocolCompatTest {
         assertEquals(0xFF.toByte(), arr[4])
         assertEquals(0xFF.toByte(), arr[7])
         assertTrue(FormatUtils.bytesToHex(byteArrayOf(0x0A, 0xFF.toByte())) == "0aff")
+    }
+
+    @Test
+    fun testAirDefaultThemeAndPublicRoomsAndReleaseJson() {
+        assertEquals(AppThemeMode.AIR, AppThemeMode.fromId(null))
+        assertEquals(AppThemeMode.AIR, AppThemeMode.fromId("unknown"))
+        assertEquals(AppThemeMode.NEON, AppThemeMode.fromId("neon"))
+
+        val publicJson = """
+            {
+              "count": 1,
+              "rooms": [
+                {
+                  "code": "602819",
+                  "mode": "ephemeral",
+                  "hasPassword": false,
+                  "allowRandom": true,
+                  "topic": "☕ 闲聊摸鱼",
+                  "maxPeers": 6,
+                  "peerCount": 2,
+                  "retentionDays": 1,
+                  "maxFileSizeMB": 0
+                }
+              ]
+            }
+        """.trimIndent()
+        val parsedPublic = json.decodeFromString(PublicRoomsResponse.serializer(), publicJson)
+        assertEquals(1, parsedPublic.count)
+        assertEquals("602819", parsedPublic.rooms.first().code)
+        assertTrue(parsedPublic.rooms.first().allowRandom)
+        assertEquals("☕ 闲聊摸鱼", parsedPublic.rooms.first().topic)
+
+        val relJson = """
+            {
+              "versionCode": 3,
+              "versionName": "1.1.0",
+              "apkUrl": "https://chat.baytale.com/apk/BayChat-v1.1.0.apk",
+              "sha256": "abc123",
+              "sizeBytes": 45000000,
+              "releaseNotes": "清风极简与随机串门"
+            }
+        """.trimIndent()
+        val rel = json.decodeFromString(AppReleaseInfo.serializer(), relJson)
+        assertEquals(3, rel.versionCode)
+        assertEquals("1.1.0", rel.versionName)
     }
 }

@@ -46,17 +46,22 @@ import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Reply
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.AttachFile
+import androidx.compose.material.icons.rounded.Block
+import androidx.compose.material.icons.rounded.Casino
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ContentCopy
+import androidx.compose.material.icons.rounded.ContentPaste
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.FileOpen
+import androidx.compose.material.icons.rounded.Flag
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.InsertDriveFile
 import androidx.compose.material.icons.rounded.LocalFireDepartment
 import androidx.compose.material.icons.rounded.Mood
 import androidx.compose.material.icons.rounded.PictureInPictureAlt
+import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material.icons.rounded.QrCode2
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
@@ -149,11 +154,15 @@ fun ChatRoomScreen(
     onSearchFilterChange: (String, String) -> Unit,
     onUpdateRetention: (Int) -> Unit,
     onUpdateMaxFileMB: (Int) -> Unit,
+    onUpdateAllowRandom: (Boolean) -> Unit,
     onUpdatePrefs: (AppUserPrefs) -> Unit,
     onSelectTheme: (AppThemeMode) -> Unit,
     onExportLog: () -> Unit,
     onClearHistory: () -> Unit,
     onRotateCode: () -> Unit,
+    onRandomSwitchRoom: () -> Unit,
+    onBlockPeer: (peerId: String, peerName: String) -> Unit,
+    onReportPeer: (peerName: String) -> Unit,
     onSwitchRecentRoom: (RecentRoom) -> Unit,
     onMinimizeRoom: () -> Unit,
     onLeaveRoom: () -> Unit,
@@ -188,10 +197,11 @@ fun ChatRoomScreen(
         if (uris.isNotEmpty()) onSendUris(uris)
     }
 
-    // 过滤后的可见消息列表
-    val visibleMessages = remember(room.messages, room.searchKeyword, room.filterKind) {
+    // 过滤后的可见消息列表（自动隐藏已屏蔽成员的消息）
+    val visibleMessages = remember(room.messages, room.searchKeyword, room.filterKind, state.blockedPeerIds) {
         val kw = room.searchKeyword.trim().lowercase()
         room.messages.filter { m ->
+            if (!m.isSelf && m.senderId in state.blockedPeerIds) return@filter false
             val kindOk = when (room.filterKind) {
                 "image" -> m.kind == ChatKind.IMAGE
                 "file" -> m.kind == ChatKind.FILE
@@ -295,22 +305,33 @@ fun ChatRoomScreen(
                 }
             }
 
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onMinimizeRoom, modifier = Modifier.size(36.dp)) {
-                    Icon(Icons.Rounded.PictureInPictureAlt, contentDescription = "最小化挂起房间", tint = colors.textSub, modifier = Modifier.size(20.dp))
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                // 房内一键「换一间」：快速随机切换到下一间免密公开房
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(colors.accentSoft)
+                        .clickable(enabled = !state.randomJoining) { onRandomSwitchRoom() }
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                ) {
+                    Icon(Icons.Rounded.Casino, contentDescription = "随机换一间免密房", tint = colors.accent, modifier = Modifier.size(14.dp))
+                    Text("换一间", fontSize = 11.5.sp, fontWeight = FontWeight.Bold, color = colors.accent, maxLines = 1)
                 }
-                IconButton(onClick = { showSearch = !showSearch }, modifier = Modifier.size(36.dp)) {
+                IconButton(onClick = { showSearch = !showSearch }, modifier = Modifier.size(34.dp)) {
                     Icon(
                         Icons.Rounded.Search,
                         contentDescription = "查找消息",
                         tint = if (showSearch) colors.accent else colors.textSub,
+                        modifier = Modifier.size(19.dp),
                     )
                 }
-                IconButton(onClick = { showInviteDialog = true }, modifier = Modifier.size(36.dp)) {
-                    Icon(Icons.Rounded.QrCode2, contentDescription = "邀请二维码", tint = colors.accent)
+                IconButton(onClick = { showInviteDialog = true }, modifier = Modifier.size(34.dp)) {
+                    Icon(Icons.Rounded.QrCode2, contentDescription = "邀请二维码", tint = colors.accent, modifier = Modifier.size(20.dp))
                 }
-                IconButton(onClick = { showSettingsSheet = true }, modifier = Modifier.size(36.dp)) {
-                    Icon(Icons.Rounded.Tune, contentDescription = "房间设置", tint = colors.textSub)
+                IconButton(onClick = { showSettingsSheet = true }, modifier = Modifier.size(34.dp)) {
+                    Icon(Icons.Rounded.Tune, contentDescription = "房间设置", tint = colors.textSub, modifier = Modifier.size(19.dp))
                 }
             }
         }
@@ -599,13 +620,13 @@ fun ChatRoomScreen(
                 maxLines = 4,
             )
 
-            // 底部单行清爽工具栏：文件 | 图片 | 表情  +  发送
+            // 底部单行清爽工具栏：文件 | 图片 | 剪贴板 | 表情  +  发送
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
                     ToolChipButton(
                         icon = Icons.Rounded.AttachFile,
                         label = "文件",
@@ -620,15 +641,29 @@ fun ChatRoomScreen(
                             )
                         },
                     )
+                    ToolChipButton(
+                        icon = Icons.Rounded.ContentPaste,
+                        label = "剪贴板",
+                        onClick = {
+                            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                            val clipText = cm?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString()?.trim()
+                            if (clipText.isNullOrBlank()) {
+                                onToast("当前剪贴板为空")
+                            } else {
+                                onSendText(clipText)
+                                onToast("📋 已将剪贴板内容发送到房间")
+                            }
+                        },
+                    )
                     IconButton(
                         onClick = { showEmojiBar = !showEmojiBar },
-                        modifier = Modifier.size(34.dp),
+                        modifier = Modifier.size(32.dp),
                     ) {
                         Icon(
                             Icons.Rounded.Mood,
                             contentDescription = "表情",
                             tint = if (showEmojiBar) colors.accent else colors.textSub,
-                            modifier = Modifier.size(20.dp),
+                            modifier = Modifier.size(19.dp),
                         )
                     }
                 }
@@ -713,6 +748,30 @@ fun ChatRoomScreen(
                             modifier = Modifier.fillMaxWidth(),
                         ) {
                             Text("撤回此消息（同步删服务器缓存）", color = colors.danger, fontWeight = FontWeight.Bold)
+                        }
+                    } else if (!msg.isSelf && msg.kind != ChatKind.SYSTEM) {
+                        HorizontalDivider(color = colors.border)
+                        TextButton(
+                            onClick = {
+                                onBlockPeer(msg.senderId, msg.senderName)
+                                selectedActionMessage = null
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Icon(Icons.Rounded.Block, null, tint = colors.danger, modifier = Modifier.size(15.dp))
+                            Spacer(Modifier.width(5.dp))
+                            Text("屏蔽「${msg.senderName}」的消息", color = colors.danger)
+                        }
+                        TextButton(
+                            onClick = {
+                                onReportPeer(msg.senderName)
+                                selectedActionMessage = null
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Icon(Icons.Rounded.Flag, null, tint = colors.textSub, modifier = Modifier.size(15.dp))
+                            Spacer(Modifier.width(5.dp))
+                            Text("举报违规内容", color = colors.textSub)
                         }
                     }
                 }
@@ -859,9 +918,20 @@ fun ChatRoomScreen(
                                 Text(sub, fontSize = 11.5.sp, color = if (ready) colors.emerald else colors.amber)
                             }
                         }
-                        if (!ready) {
-                            IconButton(onClick = { onReconnectPeer(peer.peerId) }) {
-                                Icon(Icons.Rounded.Refresh, contentDescription = "重建 P2P 连接", tint = colors.accent)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (!ready) {
+                                IconButton(onClick = { onReconnectPeer(peer.peerId) }, modifier = Modifier.size(32.dp)) {
+                                    Icon(Icons.Rounded.Refresh, contentDescription = "重建 P2P 连接", tint = colors.accent, modifier = Modifier.size(18.dp))
+                                }
+                            }
+                            IconButton(
+                                onClick = {
+                                    onBlockPeer(peer.peerId, peer.name)
+                                    showSettingsSheet = false
+                                },
+                                modifier = Modifier.size(32.dp),
+                            ) {
+                                Icon(Icons.Rounded.Block, contentDescription = "屏蔽此成员", tint = colors.textMuted, modifier = Modifier.size(17.dp))
                             }
                         }
                     }
@@ -915,6 +985,35 @@ fun ChatRoomScreen(
                             )
                         }
                     }
+                }
+
+                // 允许陌生人随机串门开关（实时同步给全员；设密码房间自动禁用）
+                val isPasswordProtected = room.password.isNotBlank() || room.roomInfo?.hasPassword == true
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Icon(Icons.Rounded.Public, contentDescription = null, tint = colors.accent, modifier = Modifier.size(18.dp))
+                        Column {
+                            Text("允许陌生人随机串门", fontSize = 13.5.sp, fontWeight = FontWeight.Bold, color = colors.textMain)
+                            Text(
+                                text = if (isPasswordProtected) "加密房已自动关闭" else "关闭后仅凭口令进入，防误闯",
+                                fontSize = 11.sp,
+                                color = colors.textMuted,
+                            )
+                        }
+                    }
+                    Switch(
+                        checked = !isPasswordProtected && (room.roomInfo?.allowRandom ?: true),
+                        enabled = !isPasswordProtected,
+                        onCheckedChange = onUpdateAllowRandom,
+                    )
                 }
 
                 // 传输偏好开关
@@ -1579,13 +1678,13 @@ private fun FileTransferCard(
 
 private fun copyToClipboard(context: Context, text: String) {
     val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
-    cm.setPrimaryClip(ClipData.newPlainText("BayChat", text))
+    cm.setPrimaryClip(ClipData.newPlainText("湾聊 BayChat", text))
 }
 
 private fun shareInviteLink(context: Context, code: String, url: String) {
     val sendIntent = Intent(Intent.ACTION_SEND).apply {
         type = "text/plain"
-        putExtra(Intent.EXTRA_TEXT, "快来加入 BayChat 闪传房间 #$code，跨公网 P2P 满速传文件：$url")
+        putExtra(Intent.EXTRA_TEXT, "快来加入湾聊（BayChat）房间 #$code，跨公网 P2P 满速传文件：$url")
     }
     context.startActivity(Intent.createChooser(sendIntent, "分享房间邀请"))
 }
