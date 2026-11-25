@@ -38,6 +38,7 @@ const FALLBACK_CONFIG: ServerConfig = {
   maxRoomPeers: 6,
   maxRetentionDays: 7,
   historyMaxMediaBytes: 10 * 1024 * 1024,
+  historyMaxFileBytes: 100 * 1024 * 1024,
   maxAttachmentMB: 0,
   defaultRoomMaxFileMB: 500,
   hasTurn: false,

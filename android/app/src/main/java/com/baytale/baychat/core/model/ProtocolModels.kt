@@ -44,6 +44,7 @@ data class ServerConfig(
     val maxRoomPeers: Int = 6,
     val maxRetentionDays: Int = 7,
     val historyMaxMediaBytes: Long = 10L * 1024 * 1024,
+    val historyMaxFileBytes: Long = 100L * 1024 * 1024,
     val maxAttachmentMB: Int = 0,
     val defaultRoomMaxFileMB: Int = 500,
     val hasTurn: Boolean = false,
@@ -163,6 +164,15 @@ data class MediaUploadResponse(
     val mediaId: String,
     val mime: String,
     val size: Long,
+)
+
+@Serializable
+data class FileUploadResponse(
+    val fileId: String,
+    val mediaId: String = "",
+    val fileName: String = "",
+    val mime: String = "application/octet-stream",
+    val size: Long = 0L,
 )
 
 @Serializable
@@ -313,6 +323,8 @@ data class FileTransferInfo(
     val verified: Boolean = false,
     val localPath: String? = null,
     val savedDisplayPath: String? = null,
+    val cachedDownloadUrl: String? = null,
+    val isHistoryRecord: Boolean = false,
     val resumedFromBytes: Long = 0L,
     val canResumeBytes: Long = 0L,
     val errorMessage: String? = null,

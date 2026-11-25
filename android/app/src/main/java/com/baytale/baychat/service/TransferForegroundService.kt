@@ -8,27 +8,34 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import com.baytale.baychat.MainActivity
 import com.baytale.baychat.R
 
-// 前台保活传输服务：进入房间或后台传输 GB 级大文件时在通知栏常驻并实时更新进度，防止系统休眠断链
+// 前台保活传输服务：持有 CPU Partial WakeLock + 高性能 WifiLock，切到其他 App 或锁屏时防止系统冻结 P2P/WebSocket 传输
 class TransferForegroundService : Service() {
+
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
+                releaseLocks()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
                 return START_NOT_STICKY
             }
             else -> {
-                val title = intent?.getStringExtra(EXTRA_TITLE) ?: "BayChat P2P 通道保持中"
-                val text = intent?.getStringExtra(EXTRA_TEXT) ?: "正在维持低功耗直连通道"
+                acquireLocks()
+                val title = intent?.getStringExtra(EXTRA_TITLE) ?: "湾聊 P2P 通道保持中"
+                val text = intent?.getStringExtra(EXTRA_TEXT) ?: "正在维持后台高速直连通道"
                 val progress = intent?.getIntExtra(EXTRA_PROGRESS, -1) ?: -1
                 val notification = buildNotification(title, text, progress)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -43,6 +50,54 @@ class TransferForegroundService : Service() {
             }
         }
         return START_STICKY
+    }
+
+    override fun onDestroy() {
+        releaseLocks()
+        super.onDestroy()
+    }
+
+    private fun acquireLocks() {
+        runCatching {
+            val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+            if (wakeLock == null && pm != null) {
+                wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "BayChat::TransferWakeLock").apply {
+                    setReferenceCounted(false)
+                }
+            }
+            if (wakeLock?.isHeld == false) {
+                // 最长 6 小时超时保护，退出房间时立即释放
+                wakeLock?.acquire(6L * 60L * 60L * 1000L)
+            }
+        }
+        runCatching {
+            val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            if (wifiLock == null && wm != null) {
+                val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                } else {
+                    @Suppress("DEPRECATION")
+                    WifiManager.WIFI_MODE_FULL_HIGH_PERF
+                }
+                wifiLock = wm.createWifiLock(mode, "BayChat::TransferWifiLock").apply {
+                    setReferenceCounted(false)
+                }
+            }
+            if (wifiLock?.isHeld == false) {
+                wifiLock?.acquire()
+            }
+        }
+    }
+
+    private fun releaseLocks() {
+        runCatching {
+            if (wakeLock?.isHeld == true) wakeLock?.release()
+        }
+        wakeLock = null
+        runCatching {
+            if (wifiLock?.isHeld == true) wifiLock?.release()
+        }
+        wifiLock = null
     }
 
     private fun buildNotification(title: String, text: String, progress: Int): Notification {

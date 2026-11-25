@@ -424,11 +424,17 @@ const DopamineFileCard: React.FC<{
           </div>
           <div className="mono" style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 2 }}>
             {formatBytes(transfer.fileSize)} ·{' '}
-            {transfer.direction === 'send'
-              ? transfer.targetPeerName
-                ? `直发给 ${transfer.targetPeerName}`
-                : '高速直发'
-              : '点对点接收'}
+            {transfer.isHistoryRecord
+              ? transfer.cachedDownloadUrl
+                ? '云端限时缓存 · 随时可下'
+                : 'P2P 闪传历史记录'
+              : transfer.direction === 'send'
+                ? transfer.targetPeerName
+                  ? `直发给 ${transfer.targetPeerName}`
+                  : transfer.cachedDownloadUrl
+                    ? '已上传至房间缓存'
+                    : '高速直发'
+                : '点对点接收'}
           </div>
         </div>
       </div>
@@ -553,21 +559,44 @@ const DopamineFileCard: React.FC<{
 
         {transfer.status === 'completed' && (
           <>
-            <span className="pill pill-emerald">
-              <CheckCircle2 size={12} />
-              {transfer.verified ? 'SHA-256 满分校验' : '传输完成'}
-            </span>
-            {transfer.direction === 'receive' && transfer.savedToDisk && (
-              <span style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>已写入本地磁盘</span>
-            )}
-            {transfer.direction === 'receive' && transfer.objectUrl && !transfer.savedToDisk && (
-              <button
-                type="button"
-                className="btn btn-soft btn-sm"
-                onClick={() => triggerBlobDownload(transfer.objectUrl!, transfer.fileName)}
-              >
-                <Download size={13} /> 保存文件
-              </button>
+            {transfer.isHistoryRecord && !transfer.cachedDownloadUrl ? (
+              <span className="pill pill-neutral" title="超过云端单文件缓存上限或发送时未缓存，仅保留文件传输记录">
+                <Cloud size={12} /> 仅 P2P 记录（未存云端，需发送方在线重传）
+              </span>
+            ) : (
+              <>
+                <span className="pill pill-emerald">
+                  <CheckCircle2 size={12} />
+                  {transfer.verified
+                    ? 'SHA-256 满分校验'
+                    : transfer.cachedDownloadUrl
+                      ? '云端可下载'
+                      : '传输完成'}
+                </span>
+                {transfer.direction === 'receive' && transfer.savedToDisk && (
+                  <span style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>已写入本地磁盘</span>
+                )}
+                {transfer.direction === 'receive' && transfer.objectUrl && !transfer.savedToDisk && (
+                  <button
+                    type="button"
+                    className="btn btn-soft btn-sm"
+                    onClick={() => triggerBlobDownload(transfer.objectUrl!, transfer.fileName)}
+                  >
+                    <Download size={13} /> 保存文件
+                  </button>
+                )}
+                {transfer.cachedDownloadUrl && (
+                  <a
+                    href={transfer.cachedDownloadUrl}
+                    download={transfer.fileName}
+                    className="btn btn-jelly btn-sm"
+                    style={{ textDecoration: 'none' }}
+                    title="从房间服务器限时缓存直接下载此历史附件（支持断点续传）"
+                  >
+                    <Download size={13} /> 下载附件
+                  </a>
+                )}
+              </>
             )}
           </>
         )}

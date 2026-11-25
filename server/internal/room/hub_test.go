@@ -1,7 +1,9 @@
 package room
 
 import (
+	"bytes"
 	"errors"
+	"io"
 	"testing"
 	"time"
 
@@ -17,6 +19,7 @@ func newTestConfig(t *testing.T) *config.Config {
 		MaxRoomPeers:         6,
 		HistoryMaxMessages:   100,
 		HistoryMaxMediaBytes: 2 * 1024 * 1024,
+		HistoryMaxFileBytes:  10 * 1024 * 1024,
 		MaxAttachmentMB:      0,
 		DefaultRoomMaxFileMB: 500,
 	}
@@ -435,5 +438,62 @@ func TestRandomAndPublicPasswordlessRooms(t *testing.T) {
 	}
 	if _, err := hub.PickRandomPublicRoom(pub1.Code); !errors.Is(err, ErrNoPublicRoom) {
 		t.Fatalf("关闭后应无法抽到 pub2，实际: %v", err)
+	}
+}
+
+func TestCachedFileAttachmentLifecycle(t *testing.T) {
+	cfg := newTestConfig(t)
+	cfg.HistoryMaxFileBytes = 1024 // 仅测试 1KB 上限
+	hub, err := NewHub(cfg)
+	if err != nil {
+		t.Fatalf("初始化 Hub 失败: %v", err)
+	}
+	defer hub.Close()
+
+	days := 7
+	rm, err := hub.CreateRoom(CreateRoomRequest{
+		Mode:          ModeFixed,
+		Code:          "file-box",
+		Password:      "p123",
+		RetentionDays: &days,
+	})
+	if err != nil {
+		t.Fatalf("创建房间失败: %v", err)
+	}
+
+	// 超限附件应被拒绝
+	tooBig := bytes.Repeat([]byte("A"), 2048)
+	if _, _, err := hub.SaveRoomFile(rm.Code, "p123", "big.apk", "application/vnd.android.package-archive", bytes.NewReader(tooBig)); !errors.Is(err, ErrMediaTooLarge) {
+		t.Fatalf("预期超限附件返回 ErrMediaTooLarge，实际: %v", err)
+	}
+
+	// 密码错误应被拒绝
+	payload := []byte("hello baychat cached attachment")
+	if _, _, err := hub.SaveRoomFile(rm.Code, "wrong", "notes.txt", "text/plain", bytes.NewReader(payload)); !errors.Is(err, ErrWrongPassword) {
+		t.Fatalf("预期错误密码返回 ErrWrongPassword，实际: %v", err)
+	}
+
+	// 正常上传并读取校验
+	fileID, meta, err := hub.SaveRoomFile(rm.Code, "p123", "测试 附件.apk", "application/vnd.android.package-archive", bytes.NewReader(payload))
+	if err != nil || fileID == "" || meta.Size != int64(len(payload)) || meta.FileName != "测试 附件.apk" {
+		t.Fatalf("保存历史附件失败: id=%s meta=%+v err=%v", fileID, meta, err)
+	}
+
+	f, openedMeta, _, err := hub.OpenRoomFile(rm.Code, "p123", fileID)
+	if err != nil {
+		t.Fatalf("打开历史附件失败: %v", err)
+	}
+	gotBytes, _ := io.ReadAll(f)
+	_ = f.Close()
+	if !bytes.Equal(gotBytes, payload) || openedMeta.FileName != "测试 附件.apk" {
+		t.Fatalf("读取历史附件内容不匹配: meta=%+v got=%q", openedMeta, string(gotBytes))
+	}
+
+	// 清空历史记录后文件必须被物理删除
+	if _, err := hub.ClearHistory(rm.Code, "p123", "tester"); err != nil {
+		t.Fatalf("清空历史失败: %v", err)
+	}
+	if _, _, _, err := hub.OpenRoomFile(rm.Code, "p123", fileID); !errors.Is(err, ErrMediaNotFound) {
+		t.Fatalf("清空历史后预期附件返回 ErrMediaNotFound，实际: %v", err)
 	}
 }

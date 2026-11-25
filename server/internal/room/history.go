@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -307,7 +308,7 @@ func (hs *HistoryStore) AppendMessage(code string, retentionDays int, msg Cached
 	}
 
 	data.Messages = append(data.Messages, msg)
-	// 若超出单房间最大缓存条数，裁剪最早的消息并删除其对应缓存媒体文件及 .mime 副文件
+	// 若超出单房间最大缓存条数，裁剪最早的消息并删除其对应缓存媒体/附件与元数据副文件
 	if len(data.Messages) > hs.maxMessages {
 		overflow := len(data.Messages) - hs.maxMessages
 		for i := 0; i < overflow; i++ {
@@ -315,6 +316,7 @@ func (hs *HistoryStore) AppendMessage(code string, retentionDays int, msg Cached
 				mediaFile := filepath.Join(hs.mediaDir(code), data.Messages[i].MediaID)
 				_ = os.Remove(mediaFile)
 				_ = os.Remove(mediaFile + ".mime")
+				_ = os.Remove(mediaFile + ".meta.json")
 			}
 		}
 		data.Messages = data.Messages[overflow:]
@@ -444,6 +446,7 @@ func (hs *HistoryStore) DeleteMessage(code, msgID, senderID string, defaultReten
 		mediaFile := filepath.Join(hs.mediaDir(code), removed.MediaID)
 		_ = os.Remove(mediaFile)
 		_ = os.Remove(mediaFile + ".mime")
+		_ = os.Remove(mediaFile + ".meta.json")
 	}
 
 	data.Messages = append(data.Messages[:idx], data.Messages[idx+1:]...)
@@ -555,6 +558,137 @@ func (hs *HistoryStore) LoadMedia(code, mediaID string) ([]byte, string, error) 
 		mimeType = string(mimeRaw)
 	}
 	return raw, mimeType, nil
+}
+
+// CachedFileMeta 表示服务器限时缓存的普通历史附件元信息（始终以 attachment 下载，杜绝 XSS）
+type CachedFileMeta struct {
+	FileName string `json:"fileName"`
+	MimeType string `json:"mimeType"`
+	Size     int64  `json:"size"`
+}
+
+// SaveCachedFile 流式保存普通历史附件至房间限时缓存目录（受 maxBytes 限制，到期或清房自动物理清除）
+func (hs *HistoryStore) SaveCachedFile(code string, retentionDays int, fileName, mimeType string, body io.Reader, maxBytes int64) (string, CachedFileMeta, error) {
+	if !safeRoomDirRegex.MatchString(code) {
+		return "", CachedFileMeta{}, ErrInvalidRoomCode
+	}
+	if retentionDays <= 0 {
+		return "", CachedFileMeta{}, errors.New("当前房间已关闭服务器缓存")
+	}
+	if maxBytes <= 0 {
+		maxBytes = 100 * 1024 * 1024
+	}
+	cleanName := sanitizeAttachmentFileName(fileName)
+	cleanMime := strings.TrimSpace(strings.Split(mimeType, ";")[0])
+	if cleanMime == "" {
+		cleanMime = "application/octet-stream"
+	}
+
+	dir := hs.mediaDir(code)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", CachedFileMeta{}, err
+	}
+
+	fileID := randomHex(16)
+	targetPath := filepath.Join(dir, fileID)
+	tmpPath := targetPath + ".tmp"
+
+	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return "", CachedFileMeta{}, err
+	}
+	n, copyErr := io.Copy(f, io.LimitReader(body, maxBytes+1))
+	closeErr := f.Close()
+	if copyErr != nil {
+		_ = os.Remove(tmpPath)
+		return "", CachedFileMeta{}, copyErr
+	}
+	if closeErr != nil {
+		_ = os.Remove(tmpPath)
+		return "", CachedFileMeta{}, closeErr
+	}
+	if n == 0 {
+		_ = os.Remove(tmpPath)
+		return "", CachedFileMeta{}, errors.New("上传附件为空")
+	}
+	if n > maxBytes {
+		_ = os.Remove(tmpPath)
+		return "", CachedFileMeta{}, ErrMediaTooLarge
+	}
+
+	meta := CachedFileMeta{
+		FileName: cleanName,
+		MimeType: cleanMime,
+		Size:     n,
+	}
+	metaBytes, _ := json.Marshal(meta)
+
+	hs.mu.Lock()
+	defer hs.mu.Unlock()
+	if err := os.Rename(tmpPath, targetPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", CachedFileMeta{}, err
+	}
+	_ = os.WriteFile(targetPath+".meta.json", metaBytes, 0o644)
+	return fileID, meta, nil
+}
+
+// OpenCachedFile 返回服务器限时缓存历史附件的文件句柄与元信息（供 http.ServeContent 支持断点续传下载）
+func (hs *HistoryStore) OpenCachedFile(code, fileID string) (*os.File, CachedFileMeta, time.Time, error) {
+	if !safeRoomDirRegex.MatchString(code) || !safeMediaIDRegex.MatchString(fileID) {
+		return nil, CachedFileMeta{}, time.Time{}, ErrMediaNotFound
+	}
+
+	hs.mu.Lock()
+	nowMs := hs.now().UnixMilli()
+	if data, ok := hs.cache[code]; ok && hs.isExpiredLocked(data, nowMs) {
+		hs.clearRoomDiskLocked(code)
+		hs.mu.Unlock()
+		return nil, CachedFileMeta{}, time.Time{}, ErrMediaNotFound
+	}
+	hs.mu.Unlock()
+
+	targetPath := filepath.Join(hs.mediaDir(code), fileID)
+	f, err := os.Open(targetPath)
+	if err != nil {
+		return nil, CachedFileMeta{}, time.Time{}, ErrMediaNotFound
+	}
+	stat, err := f.Stat()
+	if err != nil || stat.IsDir() {
+		_ = f.Close()
+		return nil, CachedFileMeta{}, time.Time{}, ErrMediaNotFound
+	}
+
+	meta := CachedFileMeta{
+		FileName: fileID,
+		MimeType: "application/octet-stream",
+		Size:     stat.Size(),
+	}
+	if rawMeta, err := os.ReadFile(targetPath + ".meta.json"); err == nil {
+		var parsed CachedFileMeta
+		if json.Unmarshal(rawMeta, &parsed) == nil {
+			if parsed.FileName != "" {
+				meta.FileName = sanitizeAttachmentFileName(parsed.FileName)
+			}
+			if parsed.MimeType != "" {
+				meta.MimeType = parsed.MimeType
+			}
+		}
+	}
+	return f, meta, stat.ModTime(), nil
+}
+
+func sanitizeAttachmentFileName(raw string) string {
+	s := strings.TrimSpace(raw)
+	s = strings.ReplaceAll(s, "\\", "_")
+	s = strings.ReplaceAll(s, "/", "_")
+	s = strings.ReplaceAll(s, "\r", "")
+	s = strings.ReplaceAll(s, "\n", "")
+	s = strings.ReplaceAll(s, "\"", "_")
+	if s == "" || s == "." || s == ".." {
+		return "attachment.bin"
+	}
+	return truncateRunes(s, 140)
 }
 
 // PurgeExpired 扫描并彻底清理所有已超过保留期限的房间缓存及孤儿媒体目录

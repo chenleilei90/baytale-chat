@@ -147,6 +147,7 @@ fun ChatRoomScreen(
     onAcceptFile: (peerId: String, transferId: String, resumeIfAvailable: Boolean) -> Unit,
     onRejectFile: (peerId: String, transferId: String) -> Unit,
     onCancelTransfer: (peerId: String, transferId: String) -> Unit,
+    onDownloadCachedFile: (itemId: String, url: String, fileName: String, fileSize: Long, mimeType: String) -> Unit,
     onReconnectPeer: (peerId: String) -> Unit,
     onReplyMessage: (ChatItem?) -> Unit,
     onRecallMessage: (String) -> Unit,
@@ -515,6 +516,9 @@ fun ChatRoomScreen(
                             onAcceptFile = onAcceptFile,
                             onRejectFile = onRejectFile,
                             onCancelTransfer = onCancelTransfer,
+                            onDownloadCachedFile = { url, name, size, mime ->
+                                onDownloadCachedFile(item.id, url, name, size, mime)
+                            },
                             onOpenLocalFile = { path, mime ->
                                 if (!MediaDownloadHelper.openLocalFile(context, path, mime)) {
                                     onToast("文件已保存在系统「下载/BayChat」目录中")
@@ -1266,6 +1270,7 @@ private fun ChatMessageRow(
     onAcceptFile: (String, String, Boolean) -> Unit,
     onRejectFile: (String, String) -> Unit,
     onCancelTransfer: (String, String) -> Unit,
+    onDownloadCachedFile: (url: String, fileName: String, fileSize: Long, mimeType: String) -> Unit,
     onOpenLocalFile: (String, String) -> Unit,
 ) {
     val colors = LocalBayColors.current
@@ -1431,6 +1436,11 @@ private fun ChatMessageRow(
                             onAccept = { resume -> tr.targetPeerId?.let { pid -> onAcceptFile(pid, tr.transferId, resume) } },
                             onReject = { tr.targetPeerId?.let { pid -> onRejectFile(pid, tr.transferId) } },
                             onCancel = { tr.targetPeerId?.let { pid -> onCancelTransfer(pid, tr.transferId) } },
+                            onDownloadCached = {
+                                tr.cachedDownloadUrl?.let { url ->
+                                    onDownloadCachedFile(url, tr.fileName, tr.fileSize, tr.mimeType)
+                                }
+                            },
                             onOpen = {
                                 val path = tr.localPath
                                 if (!path.isNullOrBlank()) onOpenLocalFile(path, tr.mimeType)
@@ -1476,6 +1486,7 @@ private fun FileTransferCard(
     onAccept: (resumeIfAvailable: Boolean) -> Unit,
     onReject: () -> Unit,
     onCancel: () -> Unit,
+    onDownloadCached: () -> Unit,
     onOpen: () -> Unit,
 ) {
     val colors = LocalBayColors.current
@@ -1523,9 +1534,14 @@ private fun FileTransferCard(
                     )
                     Text(
                         text = "${FormatUtils.formatBytes(transfer.fileSize)} · " +
-                            if (transfer.direction == TransferDirection.SEND) {
-                                transfer.targetPeerName?.let { "发给 $it" } ?: "P2P 直发"
-                            } else "P2P 接收",
+                            when {
+                                transfer.isHistoryRecord && !transfer.cachedDownloadUrl.isNullOrBlank() -> "云端限时缓存 · 随时可下"
+                                transfer.isHistoryRecord -> "P2P 闪传历史记录"
+                                transfer.direction == TransferDirection.SEND ->
+                                    transfer.targetPeerName?.let { "发给 $it" }
+                                        ?: if (!transfer.cachedDownloadUrl.isNullOrBlank()) "已存入房间缓存" else "P2P 直发"
+                                else -> "P2P 接收"
+                            },
                         fontFamily = FontFamily.Monospace,
                         fontSize = 11.sp,
                         color = colors.textMuted,
@@ -1631,24 +1647,50 @@ private fun FileTransferCard(
                     }
 
                     TransferStatus.COMPLETED -> {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
-                            modifier = Modifier.weight(1f),
-                        ) {
-                            Icon(Icons.Rounded.CheckCircle, null, tint = colors.emerald, modifier = Modifier.size(15.dp))
+                        if (transfer.isHistoryRecord && transfer.cachedDownloadUrl.isNullOrBlank() && transfer.savedDisplayPath.isNullOrBlank()) {
                             Text(
-                                text = if (transfer.verified) "SHA-256 校验通过" else "传输完成",
-                                fontSize = 11.5.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = colors.emerald,
+                                text = "仅 P2P 记录（未存云端，需发送方在线重传）",
+                                fontSize = 11.sp,
+                                color = colors.textMuted,
                             )
-                        }
-                        if (transfer.direction == TransferDirection.RECEIVE && !transfer.localPath.isNullOrBlank()) {
-                            TextButton(onClick = onOpen, contentPadding = PaddingValues(horizontal = 8.dp)) {
-                                Icon(Icons.Rounded.FileOpen, null, modifier = Modifier.size(14.dp))
-                                Spacer(Modifier.width(3.dp))
-                                Text("打开", fontSize = 12.sp)
+                        } else {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                Icon(Icons.Rounded.CheckCircle, null, tint = colors.emerald, modifier = Modifier.size(15.dp))
+                                Text(
+                                    text = when {
+                                        transfer.verified -> "SHA-256 校验通过"
+                                        !transfer.savedDisplayPath.isNullOrBlank() -> "已保存到本机"
+                                        !transfer.cachedDownloadUrl.isNullOrBlank() -> "云端可下载"
+                                        else -> "传输完成"
+                                    },
+                                    fontSize = 11.5.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = colors.emerald,
+                                )
+                            }
+                            if (!transfer.cachedDownloadUrl.isNullOrBlank()) {
+                                Button(
+                                    onClick = onDownloadCached,
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                                    modifier = Modifier.height(30.dp),
+                                    shape = RoundedCornerShape(9.dp),
+                                    colors = ButtonDefaults.buttonColors(containerColor = colors.accent),
+                                ) {
+                                    Icon(Icons.Rounded.Download, null, modifier = Modifier.size(13.dp))
+                                    Spacer(Modifier.width(3.dp))
+                                    Text("下载附件", fontSize = 11.5.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                            if (transfer.direction == TransferDirection.RECEIVE && !transfer.localPath.isNullOrBlank()) {
+                                TextButton(onClick = onOpen, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                                    Icon(Icons.Rounded.FileOpen, null, modifier = Modifier.size(14.dp))
+                                    Spacer(Modifier.width(3.dp))
+                                    Text("打开", fontSize = 12.sp)
+                                }
                             }
                         }
                     }

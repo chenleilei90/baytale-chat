@@ -165,6 +165,36 @@ export function buildCachedMediaUrl(code: string, mediaId: string, password: str
   return `${base}?password=${encodeURIComponent(password)}`;
 }
 
+// 上传普通历史附件到房间服务器限时缓存（受服务端 historyMaxFileBytes 限制，默认 100MB）
+export async function uploadCachedFile(
+  code: string,
+  password: string,
+  file: Blob,
+  fileName: string
+): Promise<{ fileId: string; mediaId: string; fileName: string; mime: string; size: number }> {
+  const res = await fetch(`/api/rooms/${encodeURIComponent(code)}/files`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': file.type || 'application/octet-stream',
+      'X-Room-Password': password,
+      'X-File-Name': encodeURIComponent(fileName),
+    },
+    body: file,
+  });
+  const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  if (!res.ok) {
+    throw new ApiError(res.status, String(data.errorCode || 'UPLOAD_FAILED'), String(data.error || '历史附件缓存上传失败'));
+  }
+  return data as { fileId: string; mediaId: string; fileName: string; mime: string; size: number };
+}
+
+// 构建历史附件限时缓存下载地址
+export function buildCachedFileUrl(code: string, fileId: string, password: string): string {
+  const base = `/api/rooms/${encodeURIComponent(code)}/files/${encodeURIComponent(fileId)}`;
+  if (!password) return base;
+  return `${base}?password=${encodeURIComponent(password)}`;
+}
+
 // 从用户输入中提取房间码（支持完整邀请链接 ?room=849205 或短链 /r/849205）
 export function extractRoomCodeInput(raw: string): string {
   const trimmed = raw.trim();

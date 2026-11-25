@@ -4,9 +4,11 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"math/big"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -816,6 +818,51 @@ func (h *Hub) LoadRoomMedia(rawCode, password, mediaID string) ([]byte, string, 
 	h.mu.RUnlock()
 
 	return h.historyStore.LoadMedia(code, mediaID)
+}
+
+// SaveRoomFile 流式保存普通历史附件至房间限时缓存（受 HistoryMaxFileBytes 限制）
+func (h *Hub) SaveRoomFile(rawCode, password, fileName, mimeType string, body io.Reader) (string, CachedFileMeta, error) {
+	code := NormalizeCode(rawCode)
+	h.mu.RLock()
+	rm, ok := h.rooms[code]
+	if !ok {
+		_, burned := h.burnedCodes[code]
+		h.mu.RUnlock()
+		if burned {
+			return "", CachedFileMeta{}, ErrRoomExpired
+		}
+		return "", CachedFileMeta{}, ErrRoomNotFound
+	}
+	if !VerifyPassword(rm.PasswordHash, password) {
+		h.mu.RUnlock()
+		return "", CachedFileMeta{}, ErrWrongPassword
+	}
+	retentionDays := rm.RetentionDays
+	h.mu.RUnlock()
+
+	return h.historyStore.SaveCachedFile(code, retentionDays, fileName, mimeType, body, h.cfg.HistoryMaxFileBytes)
+}
+
+// OpenRoomFile 打开房间限时缓存的历史附件以支持断点下载
+func (h *Hub) OpenRoomFile(rawCode, password, fileID string) (*os.File, CachedFileMeta, time.Time, error) {
+	code := NormalizeCode(rawCode)
+	h.mu.RLock()
+	rm, ok := h.rooms[code]
+	if !ok {
+		_, burned := h.burnedCodes[code]
+		h.mu.RUnlock()
+		if burned {
+			return nil, CachedFileMeta{}, time.Time{}, ErrRoomExpired
+		}
+		return nil, CachedFileMeta{}, time.Time{}, ErrRoomNotFound
+	}
+	if !VerifyPassword(rm.PasswordHash, password) {
+		h.mu.RUnlock()
+		return nil, CachedFileMeta{}, time.Time{}, ErrWrongPassword
+	}
+	h.mu.RUnlock()
+
+	return h.historyStore.OpenCachedFile(code, fileID)
 }
 
 func (h *Hub) destroyRoomLocked(rm *Room) []*peerConn {

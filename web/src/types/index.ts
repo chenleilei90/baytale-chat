@@ -126,6 +126,7 @@ export interface ServerConfig {
   maxRoomPeers: number;
   maxRetentionDays: number;
   historyMaxMediaBytes: number;
+  historyMaxFileBytes?: number; // 单个历史附件云端限时缓存上限（字节），默认 100MB
   maxAttachmentMB: number; // 服务端允许的最高硬上限（MB），0 表示不限制
   defaultRoomMaxFileMB: number; // 新建房间默认单附件上限（MB），0 表示不限制
   hasTurn: boolean;
@@ -216,6 +217,8 @@ export interface FileTransferInfo {
   sha256?: string;
   verified?: boolean;
   objectUrl?: string; // 内存 Blob 下载或图片预览链接
+  cachedDownloadUrl?: string; // 服务器限时缓存历史附件直链（刷新/重进后可直接下载）
+  isHistoryRecord?: boolean; // 是否恢复自服务器历史附件记录
   savedToDisk?: boolean; // 是否通过 File System Access API 流式直写硬盘
   resumedFromBytes?: number; // 若本次传输从断点续传，记录起始字节偏移
   canResumeBytes?: number; // 本地检测到可续传的已落盘字节数（大于 0 时显示断点续传按钮）

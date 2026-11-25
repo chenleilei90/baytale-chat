@@ -57,10 +57,12 @@ import type {
 } from '../types';
 import {
   ApiError,
+  buildCachedFileUrl,
   buildCachedMediaUrl,
   createRoom,
   fetchRoomInfo,
   SignalingClient,
+  uploadCachedFile,
   uploadCachedMedia,
 } from '../lib/signaling';
 import { WebRTCMeshManager } from '../lib/webrtc';
@@ -673,17 +675,57 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           ];
         }
         if (cm.kind === 'file_notice') {
+          const cachedUrl = cm.mediaId ? buildCachedFileUrl(roomCode, cm.mediaId, password) : undefined;
+          const basePrefix = cm.id.replace(/^fnotice_/, '');
+          // 若当前会话已存在同批次实时 P2P 文件卡，则原地补充云端缓存直链，绝不重复渲染两张卡片
+          const existingIdx = prev.findIndex(
+            (m) =>
+              m.kind === 'file' &&
+              m.transfer &&
+              (m.transfer.transferId === basePrefix || m.transfer.transferId.startsWith(`${basePrefix}_`))
+          );
+          if (existingIdx >= 0) {
+            if (!cachedUrl) return prev;
+            return prev.map((m, idx) =>
+              idx === existingIdx && m.transfer
+                ? {
+                    ...m,
+                    transfer: {
+                      ...m.transfer,
+                      cachedDownloadUrl: cachedUrl,
+                    },
+                  }
+                : m
+            );
+          }
+
           return [
             ...prev,
             {
               id: cm.id,
-              kind: 'system',
+              kind: 'file',
               senderId: cm.senderId,
-              senderName: cm.senderName,
-              isSelf: false,
+              senderName: cm.senderName || '伙伴',
+              senderAvatar: cm.senderAvatar,
+              isSelf,
               timestamp: cm.timestamp,
-              text: `📦 ${cm.senderName} 闪传过文件「${cm.fileName || '文件'}」（${formatBytes(cm.fileSize || 0)}）`,
+              mediaId: cm.mediaId,
               fromCache: markFromCache,
+              transfer: {
+                transferId: cm.id,
+                streamId: 0,
+                fileName: cm.fileName || '未命名附件',
+                fileSize: cm.fileSize || 0,
+                mimeType: cm.mediaMime || 'application/octet-stream',
+                isImage: false,
+                direction: isSelf ? 'send' : 'receive',
+                status: 'completed',
+                transferredBytes: cm.fileSize || 0,
+                speedBps: 0,
+                etaSeconds: 0,
+                cachedDownloadUrl: cachedUrl,
+                isHistoryRecord: true,
+              },
             },
           ];
         }
@@ -1701,6 +1743,8 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     if (files.length === 0) return;
 
     const connectedPeers = meshRef.current?.getConnectedPeerCount() || 0;
+    const maxCacheFileBytes = serverConfigRef.current.historyMaxFileBytes || 100 * 1024 * 1024;
+
     for (const file of files) {
       if (!checkAttachmentAllowed(file.size, file.name)) {
         continue;
@@ -1709,50 +1753,177 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         await sendImageBlob(file, { fileName: file.name });
         continue;
       }
-      if (connectedPeers === 0) {
-        onToast('文件直传需等小伙伴进房建立 P2P 通道后发送哦');
+
+      const retention = historyMetaRef.current.retentionDays;
+      const canCloudCache = retention > 0 && file.size > 0 && file.size <= maxCacheFileBytes;
+
+      if (connectedPeers === 0 && !canCloudCache) {
+        onToast(
+          retention <= 0
+            ? '当前为阅后即焚模式，大文件直传需等小伙伴进房后发送'
+            : `超过 ${formatBytes(maxCacheFileBytes)} 的超大文件仅走 P2P 满速直传，需等小伙伴进房后发送`
+        );
         continue;
       }
 
       const timestamp = Date.now();
       const idPrefix = `file_${timestamp}_${Math.random().toString(36).slice(2, 7)}`;
-      const transfers =
-        meshRef.current?.sendFileToAll(file, {
-          transferIdPrefix: idPrefix,
-          fileName: file.name,
-          mimeType: file.type || 'application/octet-stream',
-          isImage: false,
-          timestamp,
-        }) || [];
 
-      transfers.forEach((tr) => {
-        const peerName = tr.targetPeerId ? peersRef.current[tr.targetPeerId]?.name : undefined;
+      if (connectedPeers > 0) {
+        const transfers =
+          meshRef.current?.sendFileToAll(file, {
+            transferIdPrefix: idPrefix,
+            fileName: file.name,
+            mimeType: file.type || 'application/octet-stream',
+            isImage: false,
+            timestamp,
+          }) || [];
+
+        transfers.forEach((tr) => {
+          const peerName = tr.targetPeerId ? peersRef.current[tr.targetPeerId]?.name : undefined;
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `tr_${tr.transferId}`,
+              kind: 'file',
+              senderId: selfPeerId,
+              senderName: profile.name,
+              senderAvatar: profile.avatar,
+              isSelf: true,
+              timestamp,
+              transfer: { ...tr, targetPeerName: peerName },
+            },
+          ]);
+        });
+
+        if (canCloudCache) {
+          // 同步上传一份至房间限时云端缓存（≤100MB），刷新页面或稍后进房也能直接下载附件
+          void uploadCachedFile(roomCode, password, file, file.name)
+            .then((uploaded) => {
+              const dlUrl = buildCachedFileUrl(roomCode, uploaded.fileId, password);
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.kind === 'file' && m.transfer && m.transfer.transferId.startsWith(`${idPrefix}_`)
+                    ? { ...m, transfer: { ...m.transfer, cachedDownloadUrl: dlUrl } }
+                    : m
+                )
+              );
+              signalingRef.current?.cacheMessage({
+                id: `fnotice_${idPrefix}`,
+                kind: 'file_notice',
+                senderId: selfPeerId,
+                senderName: profile.name,
+                senderAvatar: profile.avatar,
+                mediaId: uploaded.fileId,
+                mediaMime: uploaded.mime,
+                fileName: file.name,
+                fileSize: file.size,
+                timestamp,
+              });
+            })
+            .catch(() => {
+              // 缓存上传失败不影响 P2P，降级保存历史文件记录卡
+              signalingRef.current?.cacheMessage({
+                id: `fnotice_${idPrefix}`,
+                kind: 'file_notice',
+                senderId: selfPeerId,
+                senderName: profile.name,
+                senderAvatar: profile.avatar,
+                fileName: file.name,
+                fileSize: file.size,
+                timestamp,
+              });
+            });
+        } else if (retention > 0) {
+          // 超大文件（>100MB）走纯 P2P，服务端仅记录文件卡片摘要，刷新后依然可在历史/文件筛选中清晰展示
+          signalingRef.current?.cacheMessage({
+            id: `fnotice_${idPrefix}`,
+            kind: 'file_notice',
+            senderId: selfPeerId,
+            senderName: profile.name,
+            senderAvatar: profile.avatar,
+            fileName: file.name,
+            fileSize: file.size,
+            timestamp,
+          });
+        }
+      } else if (canCloudCache) {
+        // 无人在线时（如固定秘密基地跨端留存），≤100MB 附件直接上传到房间限时云端缓存
+        const noticeId = `fnotice_${idPrefix}`;
         setMessages((prev) => [
           ...prev,
           {
-            id: `tr_${tr.transferId}`,
+            id: noticeId,
             kind: 'file',
             senderId: selfPeerId,
             senderName: profile.name,
             senderAvatar: profile.avatar,
             isSelf: true,
             timestamp,
-            transfer: { ...tr, targetPeerName: peerName },
+            transfer: {
+              transferId: noticeId,
+              streamId: 0,
+              fileName: file.name,
+              fileSize: file.size,
+              mimeType: file.type || 'application/octet-stream',
+              isImage: false,
+              direction: 'send',
+              status: 'transferring',
+              transferredBytes: 0,
+              speedBps: 0,
+              etaSeconds: 0,
+            },
           },
         ]);
-      });
-
-      if (historyMetaRef.current.retentionDays > 0) {
-        signalingRef.current?.cacheMessage({
-          id: `fnotice_${idPrefix}`,
-          kind: 'file_notice',
-          senderId: selfPeerId,
-          senderName: profile.name,
-          senderAvatar: profile.avatar,
-          fileName: file.name,
-          fileSize: file.size,
-          timestamp,
-        });
+        try {
+          const uploaded = await uploadCachedFile(roomCode, password, file, file.name);
+          const dlUrl = buildCachedFileUrl(roomCode, uploaded.fileId, password);
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === noticeId && m.transfer
+                ? {
+                    ...m,
+                    mediaId: uploaded.fileId,
+                    transfer: {
+                      ...m.transfer,
+                      status: 'completed',
+                      transferredBytes: file.size,
+                      cachedDownloadUrl: dlUrl,
+                    },
+                  }
+                : m
+            )
+          );
+          signalingRef.current?.cacheMessage({
+            id: noticeId,
+            kind: 'file_notice',
+            senderId: selfPeerId,
+            senderName: profile.name,
+            senderAvatar: profile.avatar,
+            mediaId: uploaded.fileId,
+            mediaMime: uploaded.mime,
+            fileName: file.name,
+            fileSize: file.size,
+            timestamp,
+          });
+          signalingRef.current?.recordActivity('file', file.size);
+          onToast(`☁️「${file.name}」已缓存至房间，刷新或换设备随时可下载`);
+        } catch (err) {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === noticeId && m.transfer
+                ? {
+                    ...m,
+                    transfer: {
+                      ...m.transfer,
+                      status: 'error',
+                      errorMessage: err instanceof Error ? err.message : '附件缓存上传失败',
+                    },
+                  }
+                : m
+            )
+          );
+        }
       }
     }
   };

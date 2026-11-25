@@ -21,6 +21,7 @@ type Config struct {
 	AllowedOrigin        string // 可选限制的 Origin（留空允许任意来源）
 	HistoryMaxMessages   int    // 单房间最多缓存的历史消息条数，默认 500
 	HistoryMaxMediaBytes int64  // 单张缓存图片/语音上限（字节），默认 10MB，最高 100MB
+	HistoryMaxFileBytes  int64  // 单个历史附件服务器限时缓存上限（字节），默认 100MB，最高 500MB
 	MaxAttachmentMB      int    // 服务端允许的单附件最高上限（MB），0 表示不限制
 	DefaultRoomMaxFileMB int    // 新建房间默认单附件上限（MB），0 表示不限制，默认 500MB
 }
@@ -46,6 +47,7 @@ func Load() *Config {
 		AllowedOrigin:        strings.TrimSpace(os.Getenv("ALLOWED_ORIGIN")),
 		HistoryMaxMessages:   clampInt(getEnvInt("HISTORY_MAX_MESSAGES", 500), 50, 5000),
 		HistoryMaxMediaBytes: int64(clampInt(getEnvInt("HISTORY_MAX_MEDIA_MB", 10), 1, 100)) * 1024 * 1024,
+		HistoryMaxFileBytes:  int64(clampInt(getEnvInt("HISTORY_MAX_FILE_MB", 100), 1, 500)) * 1024 * 1024,
 		MaxAttachmentMB:      maxAttachmentMB,
 		DefaultRoomMaxFileMB: defaultRoomMaxFileMB,
 	}

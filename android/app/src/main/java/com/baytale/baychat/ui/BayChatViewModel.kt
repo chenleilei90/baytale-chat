@@ -1018,54 +1018,212 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                     continue
                 }
 
-                if (connectedPeers == 0) {
-                    showToast("文件 P2P 直传需等伙伴进房建立通道后发送")
+                val retention = room.historyMeta.retentionDays
+                val maxCacheFileBytes = _uiState.value.serverConfig.historyMaxFileBytes
+                    .takeIf { it > 0L } ?: (100L * 1024L * 1024L)
+                val canCloudCache = retention > 0 && meta.fileSize in 1L..maxCacheFileBytes
+
+                if (connectedPeers == 0 && !canCloudCache) {
+                    showToast(
+                        if (retention <= 0) "当前为阅后即焚模式，大文件直传需等伙伴进房后发送"
+                        else "超过 ${FormatUtils.formatBytes(maxCacheFileBytes)} 的超大文件仅走 P2P 直传，请等伙伴进房后发送"
+                    )
                     continue
                 }
 
                 val ts = System.currentTimeMillis()
                 val idPrefix = "file_${ts}_${(1000..9999).random()}"
-                val transfers = mesh?.sendFileToAll(
-                    OutgoingFileSource(
-                        uri = uri,
-                        fileName = meta.fileName,
-                        fileSize = meta.fileSize,
-                        mimeType = meta.mimeType,
-                        isImage = false,
-                        transferIdPrefix = idPrefix,
-                        timestamp = ts,
-                    )
-                ).orEmpty()
 
-                transfers.forEach { tr ->
-                    val peerName = tr.targetPeerId?.let { room.peers[it]?.name }
+                if (connectedPeers > 0) {
+                    val transfers = mesh?.sendFileToAll(
+                        OutgoingFileSource(
+                            uri = uri,
+                            fileName = meta.fileName,
+                            fileSize = meta.fileSize,
+                            mimeType = meta.mimeType,
+                            isImage = false,
+                            transferIdPrefix = idPrefix,
+                            timestamp = ts,
+                        )
+                    ).orEmpty()
+
+                    transfers.forEach { tr ->
+                        val peerName = tr.targetPeerId?.let { room.peers[it]?.name }
+                        appendMessageIfAbsent(
+                            ChatItem(
+                                id = "tr_${tr.transferId}",
+                                kind = ChatKind.FILE,
+                                senderId = selfPeerId,
+                                senderName = profile.name,
+                                senderAvatar = profile.avatar,
+                                isSelf = true,
+                                timestamp = ts,
+                                transfer = tr.copy(targetPeerName = peerName),
+                            )
+                        )
+                    }
+
+                    if (canCloudCache) {
+                        viewModelScope.launch(Dispatchers.IO) {
+                            val uploaded = runCatching {
+                                api.uploadCachedFile(
+                                    code = room.roomCode,
+                                    password = room.password,
+                                    context = appContext,
+                                    uri = uri,
+                                    fileName = meta.fileName,
+                                    fileSize = meta.fileSize,
+                                    mimeType = meta.mimeType,
+                                )
+                            }.getOrNull()
+                            if (uploaded != null) {
+                                val dlUrl = api.buildCachedFileUrl(room.roomCode, uploaded.fileId, room.password)
+                                updateRoom { r ->
+                                    r.copy(
+                                        messages = r.messages.map { m ->
+                                            if (m.kind == ChatKind.FILE && m.transfer?.transferId?.startsWith("${idPrefix}_") == true) {
+                                                m.copy(transfer = m.transfer.copy(cachedDownloadUrl = dlUrl))
+                                            } else m
+                                        }
+                                    )
+                                }
+                                signaling?.cacheMessage(
+                                    CachedMessage(
+                                        id = "fnotice_$idPrefix",
+                                        kind = "file_notice",
+                                        senderId = selfPeerId,
+                                        senderName = profile.name,
+                                        senderAvatar = profile.avatar,
+                                        mediaId = uploaded.fileId,
+                                        mediaMime = uploaded.mime,
+                                        fileName = meta.fileName,
+                                        fileSize = meta.fileSize,
+                                        timestamp = ts,
+                                    )
+                                )
+                            } else {
+                                signaling?.cacheMessage(
+                                    CachedMessage(
+                                        id = "fnotice_$idPrefix",
+                                        kind = "file_notice",
+                                        senderId = selfPeerId,
+                                        senderName = profile.name,
+                                        senderAvatar = profile.avatar,
+                                        fileName = meta.fileName,
+                                        fileSize = meta.fileSize,
+                                        timestamp = ts,
+                                    )
+                                )
+                            }
+                        }
+                    } else if (retention > 0) {
+                        signaling?.cacheMessage(
+                            CachedMessage(
+                                id = "fnotice_$idPrefix",
+                                kind = "file_notice",
+                                senderId = selfPeerId,
+                                senderName = profile.name,
+                                senderAvatar = profile.avatar,
+                                fileName = meta.fileName,
+                                fileSize = meta.fileSize,
+                                timestamp = ts,
+                            )
+                        )
+                    }
+                } else if (canCloudCache) {
+                    // 无人在线时（如固定秘密基地跨端留存），≤100MB 附件直接上传到房间服务器限时缓存
+                    val noticeId = "fnotice_$idPrefix"
                     appendMessageIfAbsent(
                         ChatItem(
-                            id = "tr_${tr.transferId}",
+                            id = noticeId,
                             kind = ChatKind.FILE,
                             senderId = selfPeerId,
                             senderName = profile.name,
                             senderAvatar = profile.avatar,
                             isSelf = true,
                             timestamp = ts,
-                            transfer = tr.copy(targetPeerName = peerName),
+                            transfer = FileTransferInfo(
+                                transferId = noticeId,
+                                streamId = 0,
+                                fileName = meta.fileName,
+                                fileSize = meta.fileSize,
+                                mimeType = meta.mimeType,
+                                isImage = false,
+                                direction = TransferDirection.SEND,
+                                status = TransferStatus.TRANSFERRING,
+                            ),
                         )
                     )
-                }
-
-                if (room.historyMeta.retentionDays > 0) {
-                    signaling?.cacheMessage(
-                        CachedMessage(
-                            id = "fnotice_$idPrefix",
-                            kind = "file_notice",
-                            senderId = selfPeerId,
-                            senderName = profile.name,
-                            senderAvatar = profile.avatar,
+                    runCatching {
+                        api.uploadCachedFile(
+                            code = room.roomCode,
+                            password = room.password,
+                            context = appContext,
+                            uri = uri,
                             fileName = meta.fileName,
                             fileSize = meta.fileSize,
-                            timestamp = ts,
+                            mimeType = meta.mimeType,
                         )
-                    )
+                    }.onSuccess { uploaded ->
+                        val dlUrl = api.buildCachedFileUrl(room.roomCode, uploaded.fileId, room.password)
+                        updateRoom { r ->
+                            r.copy(
+                                messages = r.messages.map { m ->
+                                    if (m.id == noticeId && m.transfer != null) {
+                                        m.copy(
+                                            mediaId = uploaded.fileId,
+                                            transfer = m.transfer.copy(
+                                                status = TransferStatus.COMPLETED,
+                                                transferredBytes = meta.fileSize,
+                                                cachedDownloadUrl = dlUrl,
+                                            ),
+                                        )
+                                    } else m
+                                }
+                            )
+                        }
+                        signaling?.cacheMessage(
+                            CachedMessage(
+                                id = noticeId,
+                                kind = "file_notice",
+                                senderId = selfPeerId,
+                                senderName = profile.name,
+                                senderAvatar = profile.avatar,
+                                mediaId = uploaded.fileId,
+                                mediaMime = uploaded.mime,
+                                fileName = meta.fileName,
+                                fileSize = meta.fileSize,
+                                timestamp = ts,
+                            )
+                        )
+                        signaling?.recordActivity("file", meta.fileSize)
+                        val rec = TransferRecord(
+                            id = "${noticeId}_SEND",
+                            fileName = meta.fileName,
+                            fileSize = meta.fileSize,
+                            mimeType = meta.mimeType,
+                            direction = "send",
+                            roomCode = room.roomCode,
+                            savedDisplayPath = "房间云端限时缓存",
+                        )
+                        _uiState.update { it.copy(transferRecords = store.addTransferRecord(rec)) }
+                        showToast("☁️「${meta.fileName}」已上传至房间缓存，刷新或换设备随时可下")
+                    }.onFailure { err ->
+                        updateRoom { r ->
+                            r.copy(
+                                messages = r.messages.map { m ->
+                                    if (m.id == noticeId && m.transfer != null) {
+                                        m.copy(
+                                            transfer = m.transfer.copy(
+                                                status = TransferStatus.ERROR,
+                                                errorMessage = err.message ?: "上传失败",
+                                            )
+                                        )
+                                    } else m
+                                }
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -1178,6 +1336,119 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
 
     fun cancelTransfer(peerId: String, transferId: String) {
         mesh?.cancelTransfer(peerId, transferId)
+    }
+
+    // 从服务器限时缓存流式下载历史附件到本地 Download/BayChat/ 并实时刷新进度
+    fun downloadCachedAttachment(
+        itemId: String,
+        url: String,
+        fileName: String,
+        fileSize: Long,
+        mimeType: String,
+    ) {
+        val room = _uiState.value.activeRoom ?: return
+        viewModelScope.launch {
+            val startAt = System.currentTimeMillis()
+            updateRoom { r ->
+                r.copy(
+                    messages = r.messages.map { m ->
+                        if (m.id == itemId && m.transfer != null) {
+                            m.copy(
+                                transfer = m.transfer.copy(
+                                    status = TransferStatus.TRANSFERRING,
+                                    transferredBytes = 0L,
+                                    speedBps = 0.0,
+                                    errorMessage = null,
+                                )
+                            )
+                        } else m
+                    }
+                )
+            }
+            val tmpDir = File(appContext.cacheDir, "cached_downloads").apply { mkdirs() }
+            val tmpFile = File(tmpDir, "dl_${System.currentTimeMillis()}.tmp")
+            runCatching {
+                api.downloadCachedFileToTemp(url, tmpFile) { done, total ->
+                    val realTotal = if (total > 0L) total else fileSize
+                    val elapsedSec = ((System.currentTimeMillis() - startAt) / 1000.0).coerceAtLeast(0.1)
+                    val speed = done / elapsedSec
+                    val eta = if (speed > 0 && realTotal > done) (realTotal - done) / speed else 0.0
+                    updateRoom { r ->
+                        r.copy(
+                            messages = r.messages.map { m ->
+                                if (m.id == itemId && m.transfer != null) {
+                                    m.copy(
+                                        transfer = m.transfer.copy(
+                                            status = TransferStatus.TRANSFERRING,
+                                            fileSize = if (realTotal > 0L) realTotal else m.transfer.fileSize,
+                                            transferredBytes = done,
+                                            speedBps = speed,
+                                            etaSeconds = eta,
+                                        )
+                                    )
+                                } else m
+                            }
+                        )
+                    }
+                }
+                val saved = withContext(Dispatchers.IO) {
+                    MediaDownloadHelper.saveReceivedFile(
+                        context = appContext,
+                        sourceFile = tmpFile,
+                        fileName = fileName,
+                        mimeType = mimeType,
+                        keepLocalPreviewCopy = false,
+                    )
+                }
+                updateRoom { r ->
+                    r.copy(
+                        messages = r.messages.map { m ->
+                            if (m.id == itemId && m.transfer != null) {
+                                m.copy(
+                                    localFilePath = saved.previewFilePath,
+                                    transfer = m.transfer.copy(
+                                        status = TransferStatus.COMPLETED,
+                                        transferredBytes = m.transfer.fileSize,
+                                        etaSeconds = 0.0,
+                                        localPath = saved.previewFilePath,
+                                        savedDisplayPath = saved.displayPath,
+                                    )
+                                )
+                            } else m
+                        }
+                    )
+                }
+                val rec = TransferRecord(
+                    id = "${itemId}_CLOUD_DL",
+                    fileName = fileName,
+                    fileSize = fileSize,
+                    mimeType = mimeType,
+                    direction = "receive",
+                    roomCode = room.roomCode,
+                    savedDisplayPath = saved.displayPath,
+                    localPath = saved.previewFilePath,
+                )
+                _uiState.update { it.copy(transferRecords = store.addTransferRecord(rec)) }
+                showToast("✅ 已下载历史附件至 ${saved.displayPath}")
+            }.onFailure { err ->
+                runCatching { tmpFile.delete() }
+                updateRoom { r ->
+                    r.copy(
+                        messages = r.messages.map { m ->
+                            if (m.id == itemId && m.transfer != null) {
+                                m.copy(
+                                    transfer = m.transfer.copy(
+                                        status = TransferStatus.COMPLETED,
+                                        errorMessage = err.message,
+                                    )
+                                )
+                            } else m
+                        }
+                    )
+                }
+                showToast(err.message ?: "历史附件下载失败")
+            }
+        }
     }
 
     fun reconnectPeer(peerId: String) {
@@ -1355,16 +1626,55 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                 )
             } else return
 
-            "file_notice" -> ChatItem(
-                id = cm.id,
-                kind = ChatKind.SYSTEM,
-                senderId = cm.senderId,
-                senderName = cm.senderName,
-                isSelf = false,
-                timestamp = cm.timestamp,
-                text = "📦 ${cm.senderName} 闪传过文件「${cm.fileName ?: "文件"}」（${FormatUtils.formatBytes(cm.fileSize ?: 0L)}）",
-                fromCache = fromCache,
-            )
+            "file_notice" -> {
+                val cachedUrl = cm.mediaId?.takeIf { it.isNotBlank() }
+                    ?.let { api.buildCachedFileUrl(room.roomCode, it, room.password) }
+                val basePrefix = cm.id.removePrefix("fnotice_")
+                val existingLive = room.messages.any { m ->
+                    m.kind == ChatKind.FILE && m.transfer != null &&
+                        (m.transfer.transferId == basePrefix || m.transfer.transferId.startsWith("${basePrefix}_"))
+                }
+                if (existingLive) {
+                    if (cachedUrl != null) {
+                        updateRoom { r ->
+                            r.copy(
+                                messages = r.messages.map { m ->
+                                    if (m.kind == ChatKind.FILE && m.transfer != null &&
+                                        (m.transfer.transferId == basePrefix || m.transfer.transferId.startsWith("${basePrefix}_"))
+                                    ) {
+                                        m.copy(transfer = m.transfer.copy(cachedDownloadUrl = cachedUrl))
+                                    } else m
+                                }
+                            )
+                        }
+                    }
+                    return
+                }
+                ChatItem(
+                    id = cm.id,
+                    kind = ChatKind.FILE,
+                    senderId = cm.senderId,
+                    senderName = cm.senderName.ifBlank { "伙伴" },
+                    senderAvatar = cm.senderAvatar,
+                    isSelf = isSelf,
+                    timestamp = cm.timestamp,
+                    mediaId = cm.mediaId,
+                    fromCache = fromCache,
+                    transfer = FileTransferInfo(
+                        transferId = cm.id,
+                        streamId = 0,
+                        fileName = cm.fileName?.ifBlank { "未命名附件" } ?: "未命名附件",
+                        fileSize = cm.fileSize ?: 0L,
+                        mimeType = cm.mediaMime?.ifBlank { "application/octet-stream" } ?: "application/octet-stream",
+                        isImage = false,
+                        direction = if (isSelf) TransferDirection.SEND else TransferDirection.RECEIVE,
+                        status = TransferStatus.COMPLETED,
+                        transferredBytes = cm.fileSize ?: 0L,
+                        cachedDownloadUrl = cachedUrl,
+                        isHistoryRecord = true,
+                    ),
+                )
+            }
 
             else -> {
                 val quote = if (!cm.replyToId.isNullOrBlank() && !cm.replyToPreview.isNullOrBlank()) {

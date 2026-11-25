@@ -304,6 +304,9 @@ class MainActivity : ComponentActivity() {
                             onAcceptFile = { pid, tid, resume -> viewModel.acceptFile(pid, tid, resume) },
                             onRejectFile = { pid, tid -> viewModel.rejectFile(pid, tid) },
                             onCancelTransfer = { pid, tid -> viewModel.cancelTransfer(pid, tid) },
+                            onDownloadCachedFile = { itemId, url, name, size, mime ->
+                                viewModel.downloadCachedAttachment(itemId, url, name, size, mime)
+                            },
                             onReconnectPeer = { pid -> viewModel.reconnectPeer(pid) },
                             onReplyMessage = { item -> viewModel.setReplyingTo(item) },
                             onRecallMessage = { id -> viewModel.recallMessage(id) },

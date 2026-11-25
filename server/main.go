@@ -49,6 +49,7 @@ func main() {
 			"maxRoomPeers":         cfg.MaxRoomPeers,
 			"maxRetentionDays":     room.MaxRetentionDays,
 			"historyMaxMediaBytes": cfg.HistoryMaxMediaBytes,
+			"historyMaxFileBytes":  cfg.HistoryMaxFileBytes,
 			"maxAttachmentMB":      cfg.MaxAttachmentMB,
 			"defaultRoomMaxFileMB": cfg.DefaultRoomMaxFileMB,
 			"hasTurn":              hasTurn,
@@ -257,6 +258,50 @@ func main() {
 		_, _ = w.Write(raw)
 	})
 
+	// 上传普通历史附件到房间限时缓存（受 HISTORY_MAX_FILE_MB 限制，默认 100MB；到期或清房自动清除）
+	mux.HandleFunc("POST /api/rooms/{code}/files", func(w http.ResponseWriter, r *http.Request) {
+		rawName := strings.TrimSpace(r.Header.Get("X-File-Name"))
+		if decoded, err := url.QueryUnescape(rawName); err == nil && decoded != "" {
+			rawName = decoded
+		}
+		if rawName == "" {
+			rawName = strings.TrimSpace(r.URL.Query().Get("name"))
+		}
+		mimeType := r.Header.Get("Content-Type")
+		fileID, meta, err := hub.SaveRoomFile(r.PathValue("code"), extractPassword(r), rawName, mimeType, r.Body)
+		if err != nil {
+			writeRoomError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, map[string]any{
+			"fileId":   fileID,
+			"mediaId":  fileID,
+			"fileName": meta.FileName,
+			"mime":     meta.MimeType,
+			"size":     meta.Size,
+		})
+	})
+
+	// 下载房间限时缓存的历史附件（强制 attachment 下载 + 防嗅探 + 沙盒 CSP，支持 HTTP Range 断点下载）
+	mux.HandleFunc("GET /api/rooms/{code}/files/{fileId}", func(w http.ResponseWriter, r *http.Request) {
+		f, meta, modTime, err := hub.OpenRoomFile(r.PathValue("code"), extractPassword(r), r.PathValue("fileId"))
+		if err != nil {
+			writeRoomError(w, err)
+			return
+		}
+		defer func() { _ = f.Close() }()
+
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox")
+		w.Header().Set("Cache-Control", "private, max-age=3600")
+		w.Header().Set(
+			"Content-Disposition",
+			`attachment; filename="download.bin"; filename*=UTF-8''`+url.PathEscape(meta.FileName),
+		)
+		http.ServeContent(w, r, meta.FileName, modTime, f)
+	})
+
 	// WebSocket 信令与实时房间同步
 	mux.HandleFunc("/ws", hub.ServeWS)
 
@@ -314,7 +359,7 @@ func withCORS(cfg *config.Config, next http.Handler) http.Handler {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Set("Vary", "Origin")
 				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Room-Password, X-Actor-Name")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Room-Password, X-Actor-Name, X-File-Name")
 			}
 		}
 		if r.Method == http.MethodOptions {
