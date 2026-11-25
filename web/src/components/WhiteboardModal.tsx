@@ -10,6 +10,10 @@ import {
   StickyNote,
   PenTool,
   Users,
+  Wand2,
+  Moon,
+  Sun,
+  Pin,
 } from 'lucide-react';
 import type {
   StickyNoteColor,
@@ -45,12 +49,12 @@ interface WhiteboardModalProps {
 const NEON_COLORS = ['#ff5487', '#ff965a', '#facc15', '#34d399', '#22d3ee', '#a855f7', '#ffffff'];
 const NOTE_STYLES: Record<
   StickyNoteColor,
-  { label: string; bg: string; border: string; text: string }
+  { label: string; bg: string; edge: string; text: string }
 > = {
-  yellow: { label: '柠檬黄', bg: '#fef08a', border: '#eab308', text: '#422006' },
-  pink: { label: '蜜桃粉', bg: '#fbcfe8', border: '#ec4899', text: '#500724' },
-  mint: { label: '薄荷蓝', bg: '#a5f3fc', border: '#06b6d4', text: '#083344' },
-  violet: { label: '香芋紫', bg: '#ddd6fe', border: '#8b5cf6', text: '#2e1065' },
+  yellow: { label: '柠檬黄', bg: '#fef08a', edge: '#eab308', text: '#422006' },
+  pink: { label: '蜜桃粉', bg: '#fbcfe8', edge: '#ec4899', text: '#500724' },
+  mint: { label: '薄荷蓝', bg: '#a5f3fc', edge: '#06b6d4', text: '#083344' },
+  violet: { label: '香芋紫', bg: '#ddd6fe', edge: '#8b5cf6', text: '#2e1065' },
 };
 
 const CANVAS_W = 920;
@@ -368,13 +372,13 @@ export const WhiteboardModal: React.FC<WhiteboardModalProps> = ({
       roundRectPath(ctx, x, y, nw, nh, 14);
       ctx.fill();
       ctx.shadowBlur = 0;
-      ctx.strokeStyle = st.border;
+      ctx.strokeStyle = st.edge;
       ctx.lineWidth = 2;
       ctx.stroke();
 
       ctx.fillStyle = st.text;
       ctx.font = 'bold 12px "PingFang SC", "Microsoft YaHei", sans-serif';
-      ctx.fillText(`📌 ${note.authorName}`, x + 12, y + 22);
+      ctx.fillText(note.authorName, x + 12, y + 22);
 
       ctx.font = '13px "PingFang SC", "Microsoft YaHei", sans-serif';
       const content = note.text || '（空白便签）';
@@ -384,7 +388,7 @@ export const WhiteboardModal: React.FC<WhiteboardModalProps> = ({
 
     off.toBlob((blob) => {
       if (blob) {
-        onExportImage(blob, caption.trim() || '🎨 多人协作白板作品');
+        onExportImage(blob, caption.trim() || '多人协作白板作品');
       }
     }, 'image/png');
   };
@@ -410,8 +414,14 @@ export const WhiteboardModal: React.FC<WhiteboardModalProps> = ({
               {onlinePeerCount > 0 ? `已联机 · ${onlinePeerCount + 1} 人可同屏画` : '单人创作中（有人进房即同步）'}
             </span>
           </div>
-          <button type="button" className="btn btn-ghost btn-icon" onClick={onClose}>
-            <X size={16} />
+          <button
+            type="button"
+            className="btn btn-ghost btn-icon"
+            onClick={onClose}
+            aria-label="关闭协作白板"
+            title="关闭协作白板"
+          >
+            <X size={16} aria-hidden="true" />
           </button>
         </div>
 
@@ -423,61 +433,61 @@ export const WhiteboardModal: React.FC<WhiteboardModalProps> = ({
               className={`seg-item ${tool === 'neon' ? 'active' : ''}`}
               onClick={() => setTool('neon')}
             >
-              ✨ 荧光笔
+              <Wand2 size={13} aria-hidden="true" /> 荧光笔
             </button>
             <button
               type="button"
               className={`seg-item ${tool === 'rainbow' ? 'active' : ''}`}
               onClick={() => setTool('rainbow')}
             >
-              <Sparkles size={13} /> 彩虹笔
+              <Sparkles size={13} aria-hidden="true" /> 彩虹笔
             </button>
             <button
               type="button"
               className={`seg-item ${tool === 'pen' ? 'active' : ''}`}
               onClick={() => setTool('pen')}
             >
-              <PenTool size={13} /> 细画笔
+              <PenTool size={13} aria-hidden="true" /> 细画笔
             </button>
             <button
               type="button"
               className={`seg-item ${tool === 'note' ? 'active' : ''}`}
               onClick={() => setTool('note')}
             >
-              <StickyNote size={13} /> 贴便签
+              <StickyNote size={13} aria-hidden="true" /> 贴便签
             </button>
             <button
               type="button"
               className={`seg-item ${tool === 'eraser' ? 'active' : ''}`}
               onClick={() => setTool('eraser')}
             >
-              <Eraser size={13} /> 橡皮
+              <Eraser size={13} aria-hidden="true" /> 橡皮
             </button>
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
             <button
               type="button"
-              className={`btn btn-sm ${bgStyle === 'night' ? 'btn-jelly' : 'btn-glass'}`}
+              className={`btn btn-sm ${bgStyle === 'night' ? 'btn-primary' : 'btn-secondary'}`}
               onClick={() => onEmitEvent({ type: 'bg-change', bgStyle: 'night' })}
             >
-              🌌 星空
+              <Moon size={13} aria-hidden="true" /> 星空
             </button>
             <button
               type="button"
-              className={`btn btn-sm ${bgStyle === 'cream' ? 'btn-jelly' : 'btn-glass'}`}
+              className={`btn btn-sm ${bgStyle === 'cream' ? 'btn-primary' : 'btn-secondary'}`}
               onClick={() => onEmitEvent({ type: 'bg-change', bgStyle: 'cream' })}
             >
-              🌸 奶油
+              <Sun size={13} aria-hidden="true" /> 奶油
             </button>
             <button
               type="button"
-              className="btn btn-glass btn-sm"
+              className="btn btn-secondary btn-sm"
               onClick={handleUndoSelf}
               disabled={!hasOwnStroke}
               title="撤销我画的最后一笔"
             >
-              <Undo2 size={13} /> 撤销
+              <Undo2 size={13} aria-hidden="true" /> 撤销
             </button>
             <button
               type="button"
@@ -485,7 +495,7 @@ export const WhiteboardModal: React.FC<WhiteboardModalProps> = ({
               onClick={() => onEmitEvent({ type: 'clear', actorName: selfName })}
               title="清空全房白板与便签"
             >
-              <Trash2 size={13} /> 清空
+              <Trash2 size={13} aria-hidden="true" /> 清空
             </button>
           </div>
         </div>
@@ -497,14 +507,14 @@ export const WhiteboardModal: React.FC<WhiteboardModalProps> = ({
               <button
                 key={ck}
                 type="button"
-                className={`btn btn-sm ${noteColor === ck ? 'btn-jelly' : 'btn-glass'}`}
+                className={`btn btn-sm ${noteColor === ck ? 'btn-primary' : 'btn-secondary'}`}
                 onClick={() => setNoteColor(ck)}
                 style={{
                   background: noteColor === ck ? undefined : NOTE_STYLES[ck].bg,
-                  color: noteColor === ck ? '#fff' : NOTE_STYLES[ck].text,
+                  color: noteColor === ck ? 'var(--on-accent)' : NOTE_STYLES[ck].text,
                 }}
               >
-                📌 {NOTE_STYLES[ck].label}
+                <Pin size={12} aria-hidden="true" /> {NOTE_STYLES[ck].label}
               </button>
             ))}
             <button
@@ -514,43 +524,42 @@ export const WhiteboardModal: React.FC<WhiteboardModalProps> = ({
             >
               + 立即新增便签
             </button>
-            <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+            <span style={{ fontSize: 'var(--fs-footnote)', color: 'var(--text-muted)' }}>
               也可直接在画布任意空白处点击贴便签，拖动顶条可同步移动
             </span>
           </div>
         ) : (
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-            {NEON_COLORS.map((c) => (
-              <button
-                key={c}
-                type="button"
-                onClick={() => {
-                  setColor(c);
-                  if (tool === 'eraser') setTool('neon');
-                }}
-                style={{
-                  width: 22,
-                  height: 22,
-                  borderRadius: '50%',
-                  background: c,
-                  border:
-                    color === c && (tool === 'neon' || tool === 'pen')
-                      ? '3px solid var(--accent)'
-                      : '2px solid var(--line-strong)',
-                  cursor: 'pointer',
-                }}
-              />
-            ))}
-            <span style={{ fontSize: 12, color: 'var(--text-muted)', marginLeft: 4 }}>粗细</span>
+            {NEON_COLORS.map((c) => {
+              const isSelected = color === c && (tool === 'neon' || tool === 'pen');
+              return (
+                <button
+                  key={c}
+                  type="button"
+                  aria-label={`选择画笔颜色 ${c}`}
+                  onClick={() => {
+                    setColor(c);
+                    if (tool === 'eraser') setTool('neon');
+                  }}
+                  className={`wb-color-orb ${isSelected ? 'active' : ''}`}
+                  style={{
+                    background: c,
+                    color: c,
+                  }}
+                />
+              );
+            })}
+            <span style={{ fontSize: 'var(--fs-footnote)', color: 'var(--text-muted)', marginLeft: 4 }}>粗细</span>
             <input
               type="range"
               min={2}
               max={18}
               value={size}
+              aria-label="画笔粗细"
               onChange={(e) => setSize(Number(e.target.value))}
               style={{ width: 92, accentColor: 'var(--accent)' }}
             />
-            <span className="mono" style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>
+            <span className="mono" style={{ fontSize: 'var(--fs-footnote)', color: 'var(--text-muted)' }}>
               {size}px
             </span>
           </div>
@@ -582,7 +591,6 @@ export const WhiteboardModal: React.FC<WhiteboardModalProps> = ({
                   left: `${note.x * 100}%`,
                   top: `${note.y * 100}%`,
                   background: st.bg,
-                  borderColor: st.border,
                   color: st.text,
                 }}
               >
@@ -593,7 +601,7 @@ export const WhiteboardModal: React.FC<WhiteboardModalProps> = ({
                   onPointerUp={handleNoteDragEnd}
                   onPointerCancel={handleNoteDragEnd}
                 >
-                  <span>📌 {note.authorName}</span>
+                  <span>{note.authorName}</span>
                   <button
                     type="button"
                     className="wb-sticky-del"
@@ -602,8 +610,9 @@ export const WhiteboardModal: React.FC<WhiteboardModalProps> = ({
                       onEmitEvent({ type: 'note-delete', noteId: note.id });
                     }}
                     title="删除便签"
+                    aria-label="删除便签"
                   >
-                    <X size={11} />
+                    <X size={11} aria-hidden="true" />
                   </button>
                 </div>
                 <textarea

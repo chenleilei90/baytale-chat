@@ -33,9 +33,12 @@ import {
   Flag,
   Ban,
   Settings2,
+  ArrowRight,
+  Users,
 } from 'lucide-react';
 import QRCode from 'qrcode';
 import type {
+  AppearanceMode,
   BlockedPeer,
   CachedMessage,
   ChatItem,
@@ -103,7 +106,7 @@ import {
   type UserPrefs,
 } from '../lib/storage';
 import { Avatar } from './Avatar';
-import { PalettePicker, Switch } from './Controls';
+import { AppearancePicker, PalettePicker, Switch } from './Controls';
 import { MessageList } from './MessageList';
 import { InviteModal } from './InviteModal';
 import { WhiteboardModal, type RemoteCursorState } from './WhiteboardModal';
@@ -119,10 +122,12 @@ interface ChatRoomProps {
   profile: UserProfile;
   prefs: UserPrefs;
   theme: ThemeMode;
+  appearance: AppearanceMode;
   serverConfig: ServerConfig;
   savedFixedRooms: SavedFixedRoom[];
   recentRooms: RecentRoom[];
   onSelectTheme: (theme: ThemeMode) => void;
+  onSelectAppearance: (mode: AppearanceMode) => void;
   onUpdatePrefs: (next: UserPrefs) => void;
   onEditProfile: () => void;
   onSwitchRoom: (newCode: string, password: string, mode?: RoomMode, ownerToken?: string) => void;
@@ -136,7 +141,8 @@ interface ChatRoomProps {
 
 type MessageFilterTab = 'all' | 'image' | 'file' | 'audio';
 
-const DEFAULT_DOC_TITLE = 'BayChat · 跨公网 P2P 闪传对讲屋';
+const DEFAULT_DOC_TITLE = '湾聊 BayChat · 房间聊天';
+const RECALL_WINDOW_MS = 120_000;
 const ROOM_ATTACHMENT_PRESETS = [
   { mb: 50, label: '50MB' },
   { mb: 200, label: '200MB' },
@@ -162,10 +168,7 @@ function formatLimitMB(mb: number): string {
   }
   return `${mb}MB`;
 }
-const QUICK_EMOJIS = [
-  '😀', '😄', '😂', '🥰', '😎', '🤩', '👍', '👏',
-  '🙏', '🎉', '🔥', '🚀', '✨', '💖', '🐱', '🌈',
-];
+const QUICK_EMOJIS = ['😀', '😄', '😂', '🥰', '😎', '🤩', '👍', '👏', '🙏', '🎉', '🔥', '🚀', '✨', '💖', '🐱', '🌈'];
 const RETENTION_STEPS = [
   { days: 0, label: '阅后即焚' },
   { days: 1, label: '1天' },
@@ -203,10 +206,12 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   profile,
   prefs,
   theme,
+  appearance,
   serverConfig,
   savedFixedRooms,
   recentRooms,
   onSelectTheme,
+  onSelectAppearance,
   onUpdatePrefs,
   onEditProfile,
   onSwitchRoom,
@@ -251,6 +256,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   const [linkStatuses, setLinkStatuses] = useState<Record<string, PeerLinkStatus>>({});
   const [typingPeers, setTypingPeers] = useState<Record<string, boolean>>({});
   const [messages, setMessages] = useState<ChatItem[]>([]);
+  const [recalledTexts, setRecalledTexts] = useState<Record<string, string>>({});
 
   // 搜索与分类筛选状态
   const [showSearchBar, setShowSearchBar] = useState(false);
@@ -327,6 +333,8 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   const unreadCountRef = useRef(0);
   const voiceCancelledRef = useRef(false);
   const messageEndRef = useRef<HTMLDivElement>(null);
+  const composerInputRef = useRef<HTMLTextAreaElement>(null);
+  const messagesRef = useRef<ChatItem[]>(messages);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -355,6 +363,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   profileRef.current = profile;
   prefsRef.current = prefs;
   peersRef.current = peers;
+  messagesRef.current = messages;
   blockedPeersRef.current = blockedPeers;
   ownerTokenRef.current = ownerToken;
   onSwitchRoomRef.current = onSwitchRoom;
@@ -503,7 +512,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       const limitBytes = limitMB * 1024 * 1024;
       if (sizeBytes > limitBytes) {
         onToast(
-          `⚠️「${fileName}」（${formatBytes(sizeBytes)}）超出当前附件上限 ${formatLimitMB(limitMB)}，可点顶部「附件上限」随时调大`
+          `「${fileName}」（${formatBytes(sizeBytes)}）超出当前附件上限 ${formatLimitMB(limitMB)}，可点顶部「附件上限」随时调大`
         );
         return false;
       }
@@ -649,8 +658,8 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         const isFocus = finishedMode !== 'break5';
         appendSystemMessage(
           isFocus
-            ? '🍅 太棒了！全房共同完成一轮番茄专注，基地成长 +1🍅 ✨'
-            : '☕ 小憩时间结束，准备进入下一轮高效专注吧！'
+            ? '全房已完成本轮番茄专注，基地成长计数 +1'
+            : '小憩时间结束，准备进入下一轮专注吧'
         );
         if (isFocus && (!starter || starter === profileRef.current.name || Object.keys(peersRef.current).length === 0)) {
           signalingRef.current?.recordActivity('pomodoro', 0);
@@ -810,37 +819,72 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     [roomCode, password, selfPeerId]
   );
 
-  // 本地移除被撤回的消息并插入系统提示（严格校验消息发送者归属，防止伪造撤回他人消息）
-  const applyMessageRecalled = useCallback((msgId: string, actorPeerId?: string, actorName?: string) => {
-    let removedAny = false;
-    setMessages((prev) => {
-      const target = prev.find((m) => m.id === msgId);
-      if (!target) return prev;
-      if (actorPeerId && target.senderId !== actorPeerId) return prev;
-      removedAny = true;
-      const filtered = prev.filter((m) => m.id !== msgId);
-      return [
-        ...filtered,
-        {
-          id: `recalled_${msgId}`,
-          kind: 'system',
-          senderId: 'system',
-          senderName: '系统',
-          isSelf: false,
-          timestamp: Date.now(),
-          text: `↩ ${actorName || target.senderName || '成员'} 撤回了一条消息`,
-        },
-      ];
-    });
-    if (removedAny) {
-      setReplyingTo((cur) => (cur?.id === msgId ? null : cur));
-    }
-  }, []);
+  // 本地移除被撤回的消息并插入系统提示（校验发送者归属与 180s 容忍时钟偏差窗口，同步刷新引用回复预览）
+  const applyMessageRecalled = useCallback(
+    (msgId: string, actorPeerId?: string, actorName?: string) => {
+      const targetSnapshot = messagesRef.current.find((m) => m.id === msgId);
+      if (targetSnapshot) {
+        if (actorPeerId && targetSnapshot.senderId !== actorPeerId) return;
+        if (Date.now() - targetSnapshot.timestamp > RECALL_WINDOW_MS + 60_000) return;
+      }
+
+      const recallEntryId = `recalled_${msgId}`;
+      let removedAny = false;
+      let recalledTextForReedit: string | undefined;
+
+      setMessages((prev) => {
+        const target = prev.find((m) => m.id === msgId);
+        if (!target) return prev;
+        if (actorPeerId && target.senderId !== actorPeerId) return prev;
+        if (Date.now() - target.timestamp > RECALL_WINDOW_MS + 60_000) return prev;
+
+        removedAny = true;
+        const isSelfRecall = target.isSelf || actorPeerId === selfPeerId;
+        if (isSelfRecall && target.kind === 'text' && target.text) {
+          recalledTextForReedit = target.text;
+        }
+        const sysText = isSelfRecall
+          ? '你撤回了一条消息'
+          : `"${actorName || target.senderName || '成员'}" 撤回了一条消息`;
+
+        const updated = prev
+          .filter((m) => m.id !== msgId)
+          .map((m) =>
+            m.replyTo?.id === msgId
+              ? { ...m, replyTo: { ...m.replyTo, preview: '该引用内容已撤回' } }
+              : m
+          );
+
+        return [
+          ...updated,
+          {
+            id: recallEntryId,
+            kind: 'system',
+            senderId: 'system',
+            senderName: '系统',
+            isSelf: false,
+            timestamp: Date.now(),
+            text: sysText,
+          },
+        ];
+      });
+
+      if (removedAny) {
+        if (recalledTextForReedit) {
+          const textToSave = recalledTextForReedit;
+          setRecalledTexts((prev) => ({ ...prev, [recallEntryId]: textToSave }));
+        }
+        setReplyingTo((cur) => (cur?.id === msgId ? null : cur));
+      }
+    },
+    [selfPeerId]
+  );
 
   // 初始化 WebSocket 信令与 WebRTC Mesh 管理器（严禁把 serverConfig 放入依赖，避免配置加载后断线清屏）
   useEffect(() => {
     mountedRef.current = true;
     setMessages([]);
+    setRecalledTexts({});
     setPeers({});
     setLinkStatuses({});
     setTypingPeers({});
@@ -958,7 +1002,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           ];
         });
         bumpUnreadIfHidden();
-        onToast(`📋 收到 ${sender?.name || '伙伴'} 共享的剪贴板内容`);
+        onToast(`收到 ${sender?.name || '伙伴'} 共享的剪贴板内容`);
       },
       onRoomMoved: (_peerId, nextCode, nextPassword) => {
         onToast('房间已更换口令');
@@ -985,7 +1029,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             transfer: { ...info, targetPeerName: peerName },
           },
         ]);
-        onToast(`⚡ 正在响应续传重发「${info.fileName}」`);
+        onToast(`正在响应续传重发「${info.fileName}」`);
       },
       onRemoteAudioStream: (peerId, stream) => {
         setRemoteAudioStreams((prev) => {
@@ -1004,7 +1048,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         });
         if (stream) {
           const sender = peersRef.current[peerId];
-          onToast(`🖥️ ${sender?.name || '伙伴'} 开启了实时屏幕共享`);
+          onToast(`${sender?.name || '伙伴'} 开启了实时屏幕共享`);
         }
       },
       onPeerMediaState: (peerId, state) => {
@@ -1041,7 +1085,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         const limitMB = effectiveMaxFileMBRef.current;
         if (limitMB > 0 && info.fileSize > limitMB * 1024 * 1024) {
           onToast(
-            `⚠️ 收到超大附件「${info.fileName}」（${formatBytes(info.fileSize)}），超过本房上限 ${formatLimitMB(limitMB)}，请手动确认接收或婉拒`
+            `收到较大附件「${info.fileName}」（${formatBytes(info.fileSize)}），超过本房上限 ${formatLimitMB(limitMB)}，请手动确认接收或婉拒`
           );
         }
         setMessages((prev) => {
@@ -1091,8 +1135,8 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           }
           onToast(
             updated.verified
-              ? `✅ ${updated.fileName} 传输完成且 SHA-256 校验通过`
-              : `📦 ${updated.fileName} 传输完成`
+              ? `${updated.fileName} 传输完成且 SHA-256 校验通过`
+              : `${updated.fileName} 传输完成`
           );
         }
       },
@@ -1162,7 +1206,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           setPeers((prev) => ({ ...prev, [p.peerId]: p }));
           // 成员新加入或重连时强制重建干净的 PeerConnection，防止僵尸连接卡死
           mesh.ensurePeer(p.peerId, true);
-          appendSystemMessage(`✨ ${p.name} 加入了房间`);
+          appendSystemMessage(`${p.name} 加入了房间`);
         },
         onPeerUpdated: (p) => {
           if (isBlockedProfile(p)) return;
@@ -1212,7 +1256,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           return next;
         });
         mesh.removePeer(peerId);
-        if (leftPeer) appendSystemMessage(`👋 ${leftPeer.name} 离开了房间`);
+        if (leftPeer) appendSystemMessage(`${leftPeer.name} 离开了房间`);
       },
       onSignal: (env) => void mesh.handleSignal(env),
       onMessageCached: (env) => {
@@ -1233,7 +1277,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           const days = env.retentionDays;
           setRoomInfo((prev) => (prev ? { ...prev, retentionDays: days } : prev));
           const desc = days === 0 ? '阅后即焚（零缓存）' : `最后聊天后保留 ${days} 天`;
-          appendSystemMessage(`⏱ ${env.actorName || '伙伴'} 将保鲜期设为：${desc}`);
+          appendSystemMessage(`${env.actorName || '伙伴'} 将保鲜期设为：${desc}`);
         }
       },
       onRoomSettingsUpdated: (env) => {
@@ -1249,11 +1293,11 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         });
         if (typeof env.maxFileSizeMB === 'number') {
           appendSystemMessage(
-            `📦 ${env.actorName || '伙伴'} 将单附件大小上限调整为：${formatLimitMB(env.maxFileSizeMB)}`
+            `${env.actorName || '伙伴'} 将单附件大小上限调整为：${formatLimitMB(env.maxFileSizeMB)}`
           );
         }
         if (typeof env.hasPassword === 'boolean' || typeof env.topic === 'string') {
-          appendSystemMessage(`🔧 ${env.actorName || '房主'} 更新了房间设置`);
+          appendSystemMessage(`${env.actorName || '房主'} 更新了房间设置`);
         }
       },
       onRoomStatsUpdated: (env) => {
@@ -1265,6 +1309,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         if (env.history) setHistoryMeta(env.history);
         revokeAllTrackedUrls();
         setReplyingTo(null);
+        setRecalledTexts({});
         setMessages([
           {
             id: `cleared_${Date.now()}`,
@@ -1273,10 +1318,10 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             senderName: '系统',
             isSelf: false,
             timestamp: Date.now(),
-            text: `🧹 ${env.actorName || '伙伴'} 已一键清空服务器缓存记录`,
+            text: `${env.actorName || '伙伴'} 已清空服务器缓存记录`,
           },
         ]);
-        onToast('房间服务器聊天缓存已秒清 ✨');
+        onToast('房间服务器聊天缓存已清空');
       },
       onRoomDestroyed: (reason) => {
         mesh.destroyAll();
@@ -1284,6 +1329,10 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         onExitToLobby(reason);
       },
       onError: (code, msg) => {
+        if (code === 'RECALL_EXPIRED') {
+          onToast('已超过 2 分钟，无法撤回');
+          return;
+        }
         if (FATAL_WS_ERRORS.has(code)) {
           mesh.destroyAll();
           revokeAllTrackedUrls();
@@ -1459,7 +1508,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       setMicActive(false);
       setMicMuted(false);
       meshRef.current?.setLocalMicStream(null);
-      appendSystemMessage('🎧 你已退出语音连麦');
+      appendSystemMessage('你已退出语音连麦');
       return;
     }
 
@@ -1479,7 +1528,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       setMicActive(true);
       setMicMuted(false);
       meshRef.current?.setLocalMicStream(stream, false);
-      appendSystemMessage('🎧 你开启了实时语音连麦，房间伙伴可直接听到你说话');
+      appendSystemMessage('你开启了实时语音连麦，房间伙伴可直接听到你说话');
     } catch {
       onToast('无法开启麦克风，请检查浏览器权限或 HTTPS 环境');
     }
@@ -1489,7 +1538,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     const next = !micMuted;
     setMicMuted(next);
     meshRef.current?.setLocalMicMuted(next);
-    onToast(next ? '🔇 麦克风已静音' : '🎙️ 已恢复开麦');
+    onToast(next ? '麦克风已静音' : '已恢复开麦');
   };
 
   // 一键实时屏幕共享（WebRTC 动态挂载视频轨，监听原生「停止共享」按钮）
@@ -1499,7 +1548,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       localScreenStreamRef.current = null;
       setLocalScreenStream(null);
       meshRef.current?.setLocalScreenStream(null);
-      appendSystemMessage('🖥️ 你已停止实时屏幕共享');
+      appendSystemMessage('你已停止实时屏幕共享');
       return;
     }
 
@@ -1523,14 +1572,14 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             localScreenStreamRef.current = null;
             setLocalScreenStream(null);
             meshRef.current?.setLocalScreenStream(null);
-            appendSystemMessage('🖥️ 实时屏幕共享已结束');
+            appendSystemMessage('实时屏幕共享已结束');
           }
         };
       }
       localScreenStreamRef.current = stream;
       setLocalScreenStream(stream);
       meshRef.current?.setLocalScreenStream(stream);
-      appendSystemMessage('🖥️ 你开启了实时屏幕共享，房间伙伴正在顶部舞台同步观看');
+      appendSystemMessage('你开启了实时屏幕共享，房间伙伴正在顶部舞台同步观看');
     } catch (err) {
       if ((err as DOMException)?.name !== 'NotAllowedError') {
         onToast('屏幕共享开启失败，请确认系统录屏权限');
@@ -1578,7 +1627,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         startedBy: profile.name,
         updatedAt: now,
       });
-      appendSystemMessage(`🍅 ${profile.name} 启动了全房同步番茄钟（${Math.ceil(secs / 60)} 分钟）`);
+      appendSystemMessage(`${profile.name} 启动了全房同步番茄钟（${Math.ceil(secs / 60)} 分钟）`);
     }
   };
 
@@ -1625,13 +1674,13 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     const preview =
       item.kind === 'text'
         ? item.isSecret
-          ? '🕵️ [防窥密信]'
+          ? '[防窥密信]'
           : (item.text || '').slice(0, 60)
         : item.kind === 'image'
-          ? `🖼️ [图片] ${item.caption || item.transfer?.fileName || ''}`
+          ? `[图片] ${item.caption || item.transfer?.fileName || ''}`
           : item.kind === 'audio'
-            ? `🎙️ [语音 ${item.caption || ''}]`
-            : `📦 [文件] ${item.transfer?.fileName || ''}`;
+            ? `[语音 ${item.caption || ''}]`
+            : `[文件] ${item.transfer?.fileName || ''}`;
     setReplyingTo({
       id: item.id,
       senderName: item.senderName,
@@ -1640,10 +1689,18 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   };
 
   const handleRecallMessage = (msgId: string) => {
+    const target = messagesRef.current.find((m) => m.id === msgId);
+    if (!target || !target.isSelf || target.kind === 'file' || target.kind === 'system') {
+      return;
+    }
+    if (Date.now() - target.timestamp > RECALL_WINDOW_MS) {
+      onToast('已超过 2 分钟，无法撤回');
+      return;
+    }
     applyMessageRecalled(msgId, selfPeerId, profile.name);
     meshRef.current?.broadcastRecall(msgId);
     signalingRef.current?.recallMessage(msgId);
-    onToast('↩ 已撤回该消息');
+    onToast('已撤回消息');
   };
 
   const handleApplyRoomMaxFileMB = (nextMB: number) => {
@@ -1677,7 +1734,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     const content = `# BayChat 房间 #${roomCode} 聊天记录\n导出时间：${new Date().toLocaleString()}\n共 ${lines.length} 条记录\n\n${lines.join('\n')}\n`;
     const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
     triggerBlobDownload(blob, `baychat-${roomCode}-${Date.now()}.txt`);
-    onToast('💾 已导出聊天记录到本地');
+    onToast('已导出聊天记录到本地');
   };
 
   const handleSendText = () => {
@@ -2112,7 +2169,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             timestamp,
           });
           signalingRef.current?.recordActivity('file', file.size);
-          onToast(`☁️「${file.name}」已缓存至房间，刷新或换设备随时可下载`);
+          onToast(`「${file.name}」已缓存至房间，刷新或换设备随时可下载`);
         } catch (err) {
           setMessages((prev) =>
             prev.map((m) =>
@@ -2148,10 +2205,13 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     URL.revokeObjectURL(item.previewUrl);
   };
 
-  // 支持 Ctrl+V 粘贴剪贴板截图，也支持从资源管理器 Ctrl+C/V 直接粘贴任意普通文件发送
-  const handleComposerPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    const items = e.clipboardData?.items;
-    if (!items) return;
+  // 统一处理剪贴板图片预览与文件粘贴（支持输入框内及全局 Ctrl+V）
+  const processClipboardPaste = (
+    clipboardData: DataTransfer | null,
+    preventDefault: () => void
+  ): boolean => {
+    const items = clipboardData?.items;
+    if (!items) return false;
     const extraFiles: File[] = [];
     for (let i = 0; i < items.length; i++) {
       const it = items[i];
@@ -2159,7 +2219,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       const file = it.getAsFile();
       if (!file) continue;
       if (it.type.startsWith('image/')) {
-        e.preventDefault();
+        preventDefault();
         if (pendingPaste) URL.revokeObjectURL(pendingPaste.previewUrl);
         setPendingPaste({
           file,
@@ -2167,14 +2227,50 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           fileName: file.name || `screenshot-${Date.now()}.png`,
           compress: prefsRef.current.imageSendMode === 'compressed',
         });
-        return;
+        return true;
       }
       extraFiles.push(file);
     }
     if (extraFiles.length > 0) {
-      e.preventDefault();
+      preventDefault();
       void sendFiles(extraFiles);
+      return true;
     }
+    return false;
+  };
+
+  const windowPasteHandlerRef = useRef<(e: ClipboardEvent) => void>(() => {});
+  windowPasteHandlerRef.current = (e: ClipboardEvent) => {
+    if (e.defaultPrevented) return;
+    // 若当前打开了白板/设置/举报等独立弹窗且焦点在输入框中，避免抢占弹窗粘贴
+    const hasBlockingModal =
+      showWhiteboard ||
+      roomProfileOpen ||
+      Boolean(reportTarget) ||
+      showInvite ||
+      confirmClearOpen ||
+      confirmDestroyOpen ||
+      Boolean(lightboxData);
+    const activeEl = document.activeElement as HTMLElement | null;
+    const isEditableTarget = Boolean(
+      activeEl &&
+        activeEl !== composerInputRef.current &&
+        (activeEl.tagName === 'INPUT' ||
+          activeEl.tagName === 'TEXTAREA' ||
+          activeEl.isContentEditable)
+    );
+    if (hasBlockingModal && isEditableTarget) return;
+    processClipboardPaste(e.clipboardData, () => e.preventDefault());
+  };
+
+  useEffect(() => {
+    const onWindowPaste = (e: ClipboardEvent) => windowPasteHandlerRef.current(e);
+    window.addEventListener('paste', onWindowPaste);
+    return () => window.removeEventListener('paste', onWindowPaste);
+  }, []);
+
+  const handleComposerPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    processClipboardPaste(e.clipboardData, () => e.preventDefault());
   };
 
   const handleAcceptFile = async (
@@ -2197,9 +2293,9 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       const started = meshRef.current?.acceptIncomingTransfer(peerId, transferId, diskStream);
       if (!started) {
         if (diskStream) void diskStream.close().catch(() => {});
-        onToast('⚠️ 发送方已离线或该传输已失效，请让对方重新发送文件');
+        onToast('发送方已离线或该传输已失效，请让对方重新发送文件');
       } else if (diskStream && diskStream.initialOffset > 0) {
-        onToast(`⚡ 正在从 ${formatBytes(diskStream.initialOffset)} 断点续传「${fileName}」`);
+        onToast(`正在从 ${formatBytes(diskStream.initialOffset)} 断点续传「${fileName}」`);
       }
     } catch (err) {
       onToast(err instanceof Error ? err.message : '无法打开保存位置');
@@ -2235,9 +2331,9 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       );
       if (!ok) {
         if (diskStream) void diskStream.close().catch(() => {});
-        onToast('⚠️ 对方不在线或 P2P 通道未就绪，无法请求续传');
+        onToast('对方不在线或 P2P 通道未就绪，无法请求续传');
       } else {
-        onToast(`⚡ 已向对方请求续传「${transfer.fileName}」...`);
+        onToast(`已向对方请求续传「${transfer.fileName}」...`);
       }
     } catch (err) {
       onToast(err instanceof Error ? err.message : '无法发起续传请求');
@@ -2250,7 +2346,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         meshRef.current?.acceptIncomingTransfer(m.transfer.targetPeerId, m.transfer.transferId, null);
       }
     });
-    onToast(`🚀 已开始批量接收 ${pendingIncomingFiles.length} 个文件`);
+    onToast(`已开始批量接收 ${pendingIncomingFiles.length} 个文件`);
   };
 
   // 切换常用固定房间或最近房间前先探测是否仍存在及是否需要密码
@@ -2303,7 +2399,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         setShowInvite(false);
         setRotatingCode(false);
         onSwitchRoom(nextRoom.code, password, 'ephemeral', nextRoom.ownerToken);
-        onToast(`🎲 已换上全新口令：${nextRoom.code}`);
+        onToast(`已换上全新口令：${nextRoom.code}`);
       }, 800);
     } catch (err) {
       setRotatingCode(false);
@@ -2325,7 +2421,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       delete copy[p.peerId];
       return copy;
     });
-    onToast(`🚫 已屏蔽 ${p.name}，后续将自动拒收其消息与文件`);
+    onToast(`已屏蔽 ${p.name}，后续将自动拒收其消息与文件`);
   };
 
   const handleUnblockPeer = (clientId: string) => {
@@ -2351,7 +2447,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         reporterClientId: profile.clientId,
       });
       setReportTarget(null);
-      onToast('✅ 已提交举报，感谢共同维护安全的传输环境');
+      onToast('已提交举报，感谢共同维护安全的传输环境');
     } catch (err) {
       onToast(err instanceof Error ? err.message : '举报提交失败');
     } finally {
@@ -2385,7 +2481,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       });
       setRoomInfo(updated);
       setRoomProfileOpen(false);
-      onToast('✅ 房间资料已更新');
+      onToast('房间资料已更新');
       if (nextPwd !== undefined) {
         onSwitchRoom(roomCode, nextPwd, updated.mode, ownerToken);
       }
@@ -2409,7 +2505,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     stopAllLocalMedia();
     signalingRef.current?.destroyRoom();
     onRemoveRecentRoom(roomCode);
-    onExitToLobby('房间与服务器聊天缓存已彻底销毁 ✨');
+    onExitToLobby('房间与服务器聊天缓存已彻底销毁');
   };
 
   const handleDragEnter = (e: React.DragEvent) => {
@@ -2442,7 +2538,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           if (!checkAttachmentAllowed(estBytes, `${folder.name}.zip`)) {
             continue;
           }
-          onToast(`📦 正在将文件夹「${folder.name}」打包为 ZIP...`);
+          onToast(`正在将文件夹「${folder.name}」打包为 ZIP...`);
           const zipFile = await buildZipArchive(folder.entries, folder.name);
           await sendFiles([zipFile]);
         }
@@ -2500,7 +2596,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
 
   return (
     <div
-      className="aurora-canvas"
+      className="chat-shell"
       onDragEnter={handleDragEnter}
       onDragOver={(e) => e.preventDefault()}
       onDragLeave={handleDragLeave}
@@ -2511,7 +2607,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         onClick={() => setSidebarOpen(false)}
       />
 
-      {/* 顶部晶莹毛玻璃胶囊栏 */}
+      {/* 顶部导航胶囊栏 */}
       <header className="top-glass-nav chat-top-nav">
         <div className="nav-left-group">
           <button
@@ -2519,8 +2615,9 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             className="btn btn-glass btn-icon mobile-only nav-menu-btn"
             onClick={() => setSidebarOpen((v) => !v)}
             title="打开房间面板与更多设置"
+            aria-label="打开房间面板与更多设置"
           >
-            <PanelLeft size={16} />
+            <PanelLeft size={16} aria-hidden="true" />
             {peerList.length > 0 && <span className="nav-peer-badge">{peerList.length + 1}</span>}
           </button>
 
@@ -2535,13 +2632,13 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             title="点击复制房间口令"
           >
             {roomInfo?.mode === 'fixed' ? (
-              <Pin size={13} style={{ color: 'var(--accent)' }} />
+              <Pin size={13} style={{ color: 'var(--accent)' }} aria-hidden="true" />
             ) : (
-              <Flame size={13} style={{ color: 'var(--accent)' }} />
+              <Flame size={13} style={{ color: 'var(--accent)' }} aria-hidden="true" />
             )}
             <span>{roomCode}</span>
             <span className={`status-dot ${linkStatusPill.dot} mobile-only`} />
-            <Copy size={12} className="hide-mobile" style={{ color: 'var(--text-muted)' }} />
+            <Copy size={12} className="hide-mobile" style={{ color: 'var(--text-muted)' }} aria-hidden="true" />
           </button>
 
           <span className={`pill ${linkStatusPill.cls} hide-mobile`}>
@@ -2559,8 +2656,9 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                 className={`btn btn-sm ${micMuted ? 'btn-glass' : 'mic-live-btn'}`}
                 onClick={handleToggleMicMute}
                 title={micMuted ? '点击取消静音' : '连麦中，点击静音'}
+                aria-label={micMuted ? '取消麦克风静音' : '静音麦克风'}
               >
-                {micMuted ? <MicOff size={13} /> : <Headphones size={13} />}
+                {micMuted ? <MicOff size={13} aria-hidden="true" /> : <Headphones size={13} aria-hidden="true" />}
                 <span className="hide-mobile">{micMuted ? '已静音' : '连麦中'}</span>
               </button>
               <button
@@ -2569,8 +2667,9 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                 style={{ width: 31, height: 31, borderRadius: 10 }}
                 onClick={() => void handleToggleVoiceCall()}
                 title="挂断语音连麦"
+                aria-label="挂断语音连麦"
               >
-                <PhoneOff size={13} />
+                <PhoneOff size={13} aria-hidden="true" />
               </button>
             </div>
           ) : (
@@ -2579,8 +2678,9 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
               className="btn btn-glass btn-sm"
               onClick={() => void handleToggleVoiceCall()}
               title="一键开启全房实时语音连麦（WebRTC 直连）"
+              aria-label="开启实时语音连麦"
             >
-              <Headphones size={13} style={{ color: 'var(--accent)' }} />
+              <Headphones size={13} style={{ color: 'var(--accent)' }} aria-hidden="true" />
               <span className="hide-mobile">连麦</span>
             </button>
           )}
@@ -2591,7 +2691,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             onClick={() => void handleToggleScreenShare()}
             title={localScreenStream ? '点击停止实时屏幕共享' : '一键开启实时屏幕共享投屏'}
           >
-            <MonitorUp size={13} style={{ color: localScreenStream ? '#fff' : 'var(--accent)' }} />
+            <MonitorUp size={13} style={{ color: localScreenStream ? 'var(--on-accent)' : 'var(--accent)' }} aria-hidden="true" />
             <span className="hide-mobile">{localScreenStream ? '投屏中' : '投屏'}</span>
           </button>
 
@@ -2601,11 +2701,11 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             onClick={() => setShowSearchBar((v) => !v)}
             title="搜索或按图片/文件筛选记录 (Ctrl+F)"
           >
-            <Search size={13} />
+            <Search size={13} aria-hidden="true" />
             <span className="hide-mobile">查找</span>
           </button>
 
-          {/* 附件大小上限 & 传输设置 Popover（移动端入口收敛进侧边抽屉，弹窗自动居中展示） */}
+          {/* 附件大小上限 & 传输设置 Popover */}
           <div className="popover-anchor">
             <button
               type="button"
@@ -2616,30 +2716,32 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
               }}
               title="动态调整房间附件大小上限、自动接收阈值与图片画质"
             >
-              <SlidersHorizontal size={13} style={{ color: attachmentPopoverOpen ? '#fff' : 'var(--accent)' }} />
+              <SlidersHorizontal size={13} style={{ color: attachmentPopoverOpen ? 'var(--on-accent)' : 'var(--accent)' }} aria-hidden="true" />
               <span>
                 {effectiveMaxFileMB === 0 ? '附件不限' : `≤${formatLimitMB(effectiveMaxFileMB)}`}
               </span>
-              <ChevronDown size={12} />
+              <ChevronDown size={12} aria-hidden="true" />
             </button>
 
             {attachmentPopoverOpen && (
               <div className="floating-popover" style={{ width: 344 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <span style={{ fontWeight: 800, fontSize: 14 }}>📦 附件大小与传输调节</span>
+                  <span style={{ fontWeight: 700, fontSize: 'var(--fs-callout)' }}>附件大小与传输调节</span>
                   <button
                     type="button"
                     className="btn btn-ghost btn-icon"
-                    style={{ width: 26, height: 26 }}
+                    style={{ width: 28, height: 28 }}
                     onClick={() => setAttachmentPopoverOpen(false)}
+                    aria-label="关闭附件设置"
+                    title="关闭"
                   >
-                    <X size={14} />
+                    <X size={14} aria-hidden="true" />
                   </button>
                 </div>
 
                 {canManageRoom && (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, fontWeight: 700, color: 'var(--text-sub)' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 'var(--fs-footnote)', fontWeight: 700, color: 'var(--text-secondary)' }}>
                       <span>房间单附件上限（全房同步）</span>
                       <span className="mono" style={{ color: 'var(--accent)' }}>
                         {formatLimitMB(effectiveMaxFileMB)}
@@ -2689,14 +2791,14 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                       </button>
                     </div>
                     {serverConfig.maxAttachmentMB > 0 && (
-                      <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                      <div style={{ fontSize: 'var(--fs-caption)', color: 'var(--text-muted)' }}>
                         服务端配置硬上限：{formatLimitMB(serverConfig.maxAttachmentMB)}
                       </div>
                     )}
                   </div>
                 )}
 
-                <div style={{ borderTop: '1px solid var(--line-border)', paddingTop: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <div className="popover-divider" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                   <Switch
                     checked={prefs.autoAcceptSmallFiles}
                     onChange={(v) => onUpdatePrefs({ ...prefs, autoAcceptSmallFiles: v })}
@@ -2719,8 +2821,8 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                   )}
                 </div>
 
-                <div style={{ borderTop: '1px solid var(--line-border)', paddingTop: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
-                  <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-sub)' }}>
+                <div className="popover-divider" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <span style={{ fontSize: 'var(--fs-footnote)', fontWeight: 700, color: 'var(--text-secondary)' }}>
                     图片默认发送模式
                   </span>
                   <div className="segmented full">
@@ -2741,7 +2843,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                       智能压缩省流
                     </button>
                   </div>
-                  <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                  <div style={{ fontSize: 'var(--fs-caption)', color: 'var(--text-muted)' }}>
                     服务端图片/语音缓存单文件上限：{formatBytes(serverConfig.historyMaxMediaBytes)}（超限自动瘦身缓存，P2P 原图直传不受影响）
                   </div>
                 </div>
@@ -2758,30 +2860,32 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                 setAttachmentPopoverOpen(false);
               }}
             >
-              <Clock size={13} style={{ color: 'var(--accent)' }} />
+              <Clock size={13} style={{ color: 'var(--accent)' }} aria-hidden="true" />
               <span>{cacheShortLabel}</span>
               {historyMeta.messageCount > 0 && (
                 <span className="mono" style={{ opacity: 0.7 }}>
                   · {historyMeta.messageCount}
                 </span>
               )}
-              <ChevronDown size={12} />
+              <ChevronDown size={12} aria-hidden="true" />
             </button>
 
             {cachePopoverOpen && (
               <div className="floating-popover">
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <span style={{ fontWeight: 800, fontSize: 14 }}>⏱ 服务器缓存保鲜期</span>
+                  <span style={{ fontWeight: 700, fontSize: 'var(--fs-callout)' }}>服务器缓存保鲜期</span>
                   <button
                     type="button"
                     className="btn btn-ghost btn-icon"
-                    style={{ width: 26, height: 26 }}
+                    style={{ width: 28, height: 28 }}
                     onClick={() => setCachePopoverOpen(false)}
+                    aria-label="关闭缓存设置"
+                    title="关闭"
                   >
-                    <X size={14} />
+                    <X size={14} aria-hidden="true" />
                   </button>
                 </div>
-                <div style={{ fontSize: 12, color: 'var(--text-sub)', lineHeight: 1.5 }}>
+                <div style={{ fontSize: 'var(--fs-footnote)', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
                   {cacheDetailText}
                 </div>
                 {canManageRoom && (
@@ -2820,7 +2924,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                     handleExportChatLog();
                   }}
                 >
-                  <FileDown size={13} /> 导出当前聊天记录 (.txt)
+                  <FileDown size={13} aria-hidden="true" /> 导出当前聊天记录 (.txt)
                 </button>
                 {canManageRoom && (
                   <>
@@ -2833,7 +2937,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                         handleOpenRoomProfile();
                       }}
                     >
-                      <Settings2 size={13} /> 修改房间密码与主题
+                      <Settings2 size={13} aria-hidden="true" /> 修改房间密码与主题
                     </button>
                     <button
                       type="button"
@@ -2844,7 +2948,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                         setConfirmClearOpen(true);
                       }}
                     >
-                      <Trash2 size={13} /> 立即清空服务器聊天记录
+                      <Trash2 size={13} aria-hidden="true" /> 立即清空服务器聊天记录
                     </button>
                   </>
                 )}
@@ -2857,8 +2961,9 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             className="btn btn-glass btn-sm"
             onClick={() => setShowInvite(true)}
             title="邀请二维码与链接"
+            aria-label="邀请成员"
           >
-            <QrCode size={14} />
+            <QrCode size={14} aria-hidden="true" />
             <span className="hide-mobile">邀请</span>
           </button>
 
@@ -2869,7 +2974,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
               onClick={() => setConfirmDestroyOpen(true)}
               title="结束对话并立即销毁此房间口令"
             >
-              <Flame size={13} />
+              <Flame size={13} aria-hidden="true" />
               <span className="hide-mobile">销毁</span>
             </button>
           )}
@@ -2879,19 +2984,26 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             className="btn btn-glass btn-sm"
             onClick={onMinimizeRoom}
             title="最小化挂起房间回大厅（保持 P2P 直连与文件传输不断线）"
+            aria-label="最小化挂起房间"
           >
-            <Minimize2 size={13} />
+            <Minimize2 size={13} aria-hidden="true" />
             <span className="hide-mobile">挂起</span>
           </button>
 
-          <button type="button" className="btn btn-glass btn-sm" onClick={handleLeave} title="离开并断开房间">
-            <LogOut size={14} />
+          <button
+            type="button"
+            className="btn btn-glass btn-sm"
+            onClick={handleLeave}
+            title="离开并断开房间"
+            aria-label="离开房间"
+          >
+            <LogOut size={14} aria-hidden="true" />
             <span className="hide-mobile">离开</span>
           </button>
         </div>
       </header>
 
-      {/* 主体双栏毛玻璃 Bento */}
+      {/* 主体双栏工作台 */}
       <div className="chat-layout">
         <aside className={`chat-side-bento ${sidebarOpen ? 'open' : ''}`}>
           {/* 移动端专属顶部房间快捷面板 */}
@@ -2904,10 +3016,12 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
               <button
                 type="button"
                 className="btn btn-ghost btn-icon"
-                style={{ width: 28, height: 28 }}
+                style={{ width: 32, height: 32 }}
                 onClick={() => setSidebarOpen(false)}
+                aria-label="关闭侧边面板"
+                title="关闭面板"
               >
-                <X size={15} />
+                <X size={15} aria-hidden="true" />
               </button>
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
@@ -2919,7 +3033,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                   setShowSearchBar((v) => !v);
                 }}
               >
-                <Search size={12} /> 查找记录
+                <Search size={12} aria-hidden="true" /> 查找记录
               </button>
               <button
                 type="button"
@@ -2930,7 +3044,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                   setCachePopoverOpen(true);
                 }}
               >
-                <Clock size={12} /> {cacheShortLabel}
+                <Clock size={12} aria-hidden="true" /> {cacheShortLabel}
               </button>
               {canManageRoom && roomInfo?.mode === 'ephemeral' && (
                 <button
@@ -2942,59 +3056,60 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                     setConfirmDestroyOpen(true);
                   }}
                 >
-                  <Flame size={12} /> 销毁当前房间
+                  <Flame size={12} aria-hidden="true" /> 销毁当前房间
                 </button>
               )}
             </div>
           </div>
 
-          {/* 秘密基地成长统计卡（常驻房或产生真实传输/专注记录时展示，临时空房保持清爽） */}
+          {/* 秘密基地成长统计卡 */}
           {(roomInfo?.mode === 'fixed' || roomStats.totalFiles > 0 || roomStats.totalPomodoros > 0) && (
             <div className="base-stats-card">
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <span style={{ fontSize: 12, fontWeight: 800, color: 'var(--accent)' }}>
-                  🔥 基地火花 · 连续 {Math.max(1, roomStats.streakDays)} 天
+                <span style={{ fontSize: 'var(--fs-footnote)', fontWeight: 700, color: 'var(--accent)', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                  <Flame size={12} aria-hidden="true" /> 基地火花 · 连续 {Math.max(1, roomStats.streakDays)} 天
                 </span>
-                <span className="mono" style={{ fontSize: 10.5, color: 'var(--text-muted)' }}>
+                <span className="mono" style={{ fontSize: 'var(--fs-caption)', color: 'var(--text-muted)' }}>
                   {roomInfo?.mode === 'fixed' ? '永久养成' : '本场统计'}
                 </span>
               </div>
               <div className="base-stats-grid">
-                <div className="base-stat-cell" title={`累计闪传 ${roomStats.totalFiles} 个文件`}>
+                <div className="base-stat-cell" title={`累计传输 ${roomStats.totalFiles} 个文件`}>
                   <div className="base-stat-val mono">{formatBytes(roomStats.totalBytes)}</div>
-                  <div className="base-stat-label">📦 {roomStats.totalFiles} 文件</div>
+                  <div className="base-stat-label">{roomStats.totalFiles} 文件</div>
                 </div>
                 <div className="base-stat-cell" title="累计共同完成番茄专注次数">
                   <div className="base-stat-val mono">{roomStats.totalPomodoros}</div>
-                  <div className="base-stat-label">🍅 番茄专注</div>
+                  <div className="base-stat-label">番茄专注</div>
                 </div>
                 <div className="base-stat-cell" title="基地累计聊天互动数">
                   <div className="base-stat-val mono">{roomStats.totalMessages}</div>
-                  <div className="base-stat-label">💬 互动数</div>
+                  <div className="base-stat-label">互动数</div>
                 </div>
               </div>
             </div>
           )}
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, fontWeight: 800, color: 'var(--text-muted)' }}>
-              <span>👥 房间成员 ({peerList.length + 1}/{roomInfo?.maxPeers || 6})</span>
-              <span style={{ color: wsConnected ? '#10b981' : '#f59e0b' }}>
-                {wsConnected ? '● 在线' : '● 重连'}
+            <div className="sidebar-section-head">
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                <Users size={12} aria-hidden="true" /> 房间成员 ({peerList.length + 1}/{roomInfo?.maxPeers || 6})
+              </span>
+              <span style={{ color: wsConnected ? 'var(--success)' : 'var(--warning)' }}>
+                {wsConnected ? '在线' : '重连中'}
               </span>
             </div>
 
             <div
               onClick={onEditProfile}
-              style={{
-                padding: '9px 11px',
-                borderRadius: 16,
-                background: 'var(--glass-bg-strong)',
-                border: '1px solid var(--line-border)',
-                display: 'flex',
-                alignItems: 'center',
-                gap: 10,
-                cursor: 'pointer',
+              className="sidebar-peer-card clickable"
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  onEditProfile();
+                }
               }}
               title="点击更换头像与昵称"
             >
@@ -3002,11 +3117,11 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                 <Avatar name={profile.name} avatar={profile.avatar} size={34} />
               </div>
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 13.5, fontWeight: 800, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                <div style={{ fontSize: 'var(--fs-subhead)', fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {profile.name}（我）
                 </div>
-                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                  {micActive ? (micMuted ? '🔇 连麦静音' : '🎙️ 连麦说话中') : '点击修改头像与昵称'}
+                <div style={{ fontSize: 'var(--fs-caption)', color: 'var(--text-muted)' }}>
+                  {micActive ? (micMuted ? '连麦静音' : '连麦说话中') : '点击修改头像与昵称'}
                 </div>
               </div>
             </div>
@@ -3024,38 +3139,27 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                   : `P2P 直连${st?.rttMs !== undefined ? ` ${st.rttMs}ms` : ''}`;
 
               return (
-                <div
-                  key={p.peerId}
-                  style={{
-                    padding: '9px 11px',
-                    borderRadius: 16,
-                    background: 'var(--glass-bg-strong)',
-                    border: '1px solid var(--line-border)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 10,
-                  }}
-                >
+                <div key={p.peerId} className="sidebar-peer-card">
                   <div className={pSpeaking ? 'speaking-ring' : ''}>
                     <Avatar name={p.name} avatar={p.avatar} size={34} />
                   </div>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-                      <span style={{ fontSize: 13.5, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      <span style={{ fontSize: 'var(--fs-subhead)', fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         {p.name}
                       </span>
                       {pMedia?.micOn && (
-                        <span title={pMedia.micMuted ? '已静音' : '语音连麦中'} style={{ fontSize: 11 }}>
-                          {pMedia.micMuted ? '🔇' : '🎙️'}
+                        <span title={pMedia.micMuted ? '已静音' : '语音连麦中'} style={{ display: 'inline-flex', color: pMedia.micMuted ? 'var(--text-muted)' : 'var(--success)' }}>
+                          {pMedia.micMuted ? <MicOff size={11} aria-hidden="true" /> : <Mic size={11} aria-hidden="true" />}
                         </span>
                       )}
                       {pMedia?.screenOn && (
-                        <span title="正在投屏" style={{ fontSize: 11 }}>
-                          🖥️
+                        <span title="正在投屏" style={{ display: 'inline-flex', color: 'var(--accent)' }}>
+                          <MonitorUp size={11} aria-hidden="true" />
                         </span>
                       )}
                     </div>
-                    <div style={{ fontSize: 11, color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <div style={{ fontSize: 'var(--fs-caption)', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 4 }}>
                       <span className={`status-dot ${!ready ? 'pulse' : relay ? 'amber' : 'emerald'}`} />
                       <span>{sub}</span>
                     </div>
@@ -3065,21 +3169,23 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                       <button
                         type="button"
                         className="btn btn-ghost btn-icon"
-                        style={{ width: 26, height: 26 }}
+                        style={{ width: 28, height: 28 }}
                         title="手动重建 P2P 连接"
+                        aria-label={`重建与 ${p.name} 的 P2P 连接`}
                         onClick={() => {
                           meshRef.current?.reconnectPeer(p.peerId);
-                          onToast(`🔄 正在重新尝试与 ${p.name} 打洞直连...`);
+                          onToast(`正在重新尝试与 ${p.name} 打洞直连...`);
                         }}
                       >
-                        <RotateCw size={13} />
+                        <RotateCw size={13} aria-hidden="true" />
                       </button>
                     )}
                     <button
                       type="button"
                       className="btn btn-ghost btn-icon"
-                      style={{ width: 26, height: 26 }}
+                      style={{ width: 28, height: 28 }}
                       title={`举报 ${p.name}`}
+                      aria-label={`举报 ${p.name}`}
                       onClick={() => {
                         setReportReason('发送垃圾广告或恶意文件');
                         setReportTarget({
@@ -3089,16 +3195,17 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                         });
                       }}
                     >
-                      <Flag size={12} />
+                      <Flag size={12} aria-hidden="true" />
                     </button>
                     <button
                       type="button"
                       className="btn btn-ghost btn-icon"
-                      style={{ width: 26, height: 26 }}
+                      style={{ width: 28, height: 28 }}
                       title={`屏蔽 ${p.name}`}
+                      aria-label={`屏蔽 ${p.name}`}
                       onClick={() => handleBlockPeer(p)}
                     >
-                      <Ban size={12} />
+                      <Ban size={12} aria-hidden="true" />
                     </button>
                   </div>
                 </div>
@@ -3108,23 +3215,13 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
 
           {blockedPeers.length > 0 && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <div style={{ fontSize: 12, fontWeight: 800, color: 'var(--text-muted)' }}>
-                🚫 已屏蔽成员 ({blockedPeers.length})
+              <div className="sidebar-section-head">
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                  <Ban size={12} aria-hidden="true" /> 已屏蔽成员 ({blockedPeers.length})
+                </span>
               </div>
               {blockedPeers.map((b) => (
-                <div
-                  key={b.clientId}
-                  style={{
-                    padding: '6px 10px',
-                    borderRadius: 12,
-                    background: 'var(--glass-subtle)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    gap: 6,
-                    fontSize: 12,
-                  }}
-                >
+                <div key={b.clientId} className="sidebar-blocked-row">
                   <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {b.name}
                   </span>
@@ -3156,8 +3253,10 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
 
           {savedFixedRooms.filter((r) => r.code !== roomCode).length > 0 && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <div style={{ fontSize: 12, fontWeight: 800, color: 'var(--text-muted)' }}>
-                📌 切换秘密基地
+              <div className="sidebar-section-head">
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                  <Pin size={12} aria-hidden="true" /> 切换秘密基地
+                </span>
               </div>
               {savedFixedRooms
                 .filter((r) => r.code !== roomCode)
@@ -3171,7 +3270,13 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                     onClick={() => void handleSwitchSavedFixed(r)}
                   >
                     <span className="mono">#{r.code}</span>
-                    {r.hasPassword ? <Lock size={12} /> : <span>空降 →</span>}
+                    {r.hasPassword ? (
+                      <Lock size={12} aria-hidden="true" />
+                    ) : (
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                        进入 <ArrowRight size={12} aria-hidden="true" />
+                      </span>
+                    )}
                   </button>
                 ))}
             </div>
@@ -3181,8 +3286,10 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             (r) => r.code !== roomCode && !savedFixedRooms.some((s) => s.code === r.code)
           ).length > 0 && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <div style={{ fontSize: 12, fontWeight: 800, color: 'var(--text-muted)' }}>
-                🕒 最近房间
+              <div className="sidebar-section-head">
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                  <Clock size={12} aria-hidden="true" /> 最近房间
+                </span>
               </div>
               {recentRooms
                 .filter(
@@ -3198,7 +3305,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                     onClick={() => void handleSwitchSavedFixed(r)}
                   >
                     <span className="mono">#{r.code}</span>
-                    <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                    <span style={{ fontSize: 'var(--fs-caption)', color: 'var(--text-muted)' }}>
                       {formatRelativeTime(r.lastVisitedAt)}
                     </span>
                   </button>
@@ -3206,9 +3313,13 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             </div>
           )}
 
-          <div style={{ marginTop: 'auto', display: 'flex', flexDirection: 'column', gap: 8, paddingTop: 10, borderTop: '1px solid var(--line-border)' }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-              <span style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--text-sub)' }}>主题色</span>
+          <div className="sidebar-footer-section">
+            <div className="sidebar-appearance-block">
+              <span className="sidebar-setting-label">外观模式</span>
+              <AppearancePicker appearance={appearance} onSelect={onSelectAppearance} />
+            </div>
+            <div className="sidebar-theme-row">
+              <span className="sidebar-setting-label">主题色</span>
               <PalettePicker theme={theme} onSelect={onSelectTheme} />
             </div>
             <Switch
@@ -3230,7 +3341,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                 setAttachmentPopoverOpen(true);
               }}
             >
-              <span>📦 附件上限</span>
+              <span>附件上限</span>
               <span className="mono" style={{ color: 'var(--accent)', fontWeight: 700 }}>
                 {formatLimitMB(effectiveMaxFileMB)}
               </span>
@@ -3242,7 +3353,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                 style={{ marginTop: 2 }}
                 onClick={() => setConfirmDestroyOpen(true)}
               >
-                <Trash2 size={13} /> 彻底删除此常驻基地
+                <Trash2 size={13} aria-hidden="true" /> 彻底删除此常驻基地
               </button>
             )}
           </div>
@@ -3263,21 +3374,23 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             <div className="wb-invite-banner">
               <span>
                 {nearbyInviteStatus === 'pending' &&
-                  `⏳ 正在等待 ${pendingNearbyInvite.targetName} 接受邀请...`}
+                  `正在等待 ${pendingNearbyInvite.targetName} 接受邀请...`}
                 {nearbyInviteStatus === 'accepted' &&
-                  `✅ ${pendingNearbyInvite.targetName} 已接受邀请，正在建立连接`}
+                  `${pendingNearbyInvite.targetName} 已接受邀请，正在建立连接`}
                 {nearbyInviteStatus === 'declined' &&
-                  `❌ ${pendingNearbyInvite.targetName} 婉拒了本次传输邀请`}
+                  `${pendingNearbyInvite.targetName} 婉拒了本次传输邀请`}
                 {nearbyInviteStatus === 'expired' &&
-                  `⏱ 等待 ${pendingNearbyInvite.targetName} 响应已超时`}
+                  `等待 ${pendingNearbyInvite.targetName} 响应已超时`}
               </span>
               <button
                 type="button"
                 className="btn btn-ghost btn-icon"
-                style={{ width: 26, height: 26 }}
+                style={{ width: 28, height: 28 }}
                 onClick={() => onClearPendingNearbyInvite?.()}
+                aria-label="关闭邀请状态提示"
+                title="关闭"
               >
-                <X size={13} />
+                <X size={13} aria-hidden="true" />
               </button>
             </div>
           )}
@@ -3285,7 +3398,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           {/* 协作白板召唤横幅（对方开启白板画画时提示一键加入同屏创作） */}
           {wbInviteBanner && !showWhiteboard && (
             <div className="wb-invite-banner">
-              <span>🎨 {wbInviteBanner} 正在多人协作白板创作，快来一起同屏涂鸦贴便签！</span>
+              <span>{wbInviteBanner} 正在多人协作白板创作，快来一起同屏涂鸦贴便签</span>
               <div style={{ display: 'flex', gap: 6 }}>
                 <button
                   type="button"
@@ -3298,10 +3411,12 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                 <button
                   type="button"
                   className="btn btn-ghost btn-icon"
-                  style={{ width: 26, height: 26 }}
+                  style={{ width: 28, height: 28 }}
                   onClick={() => setWbInviteBanner(null)}
+                  aria-label="关闭白板提示"
+                  title="关闭"
                 >
-                  <X size={13} />
+                  <X size={13} aria-hidden="true" />
                 </button>
               </div>
             </div>
@@ -3314,6 +3429,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                 <Search
                   size={13}
                   style={{ position: 'absolute', left: 10, color: 'var(--text-muted)', pointerEvents: 'none' }}
+                  aria-hidden="true"
                 />
                 <input
                   ref={searchInputRef}
@@ -3328,9 +3444,9 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                 {(
                   [
                     { id: 'all', label: '全部' },
-                    { id: 'image', label: '🖼️ 图片' },
-                    { id: 'file', label: '📦 文件' },
-                    { id: 'audio', label: '🎙️ 语音' },
+                    { id: 'image', label: '图片' },
+                    { id: 'file', label: '文件' },
+                    { id: 'audio', label: '语音' },
                   ] as const
                 ).map((t) => (
                   <button
@@ -3347,14 +3463,16 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
               <button
                 type="button"
                 className="btn btn-ghost btn-icon"
-                style={{ width: 26, height: 26 }}
+                style={{ width: 28, height: 28 }}
                 onClick={() => {
                   setShowSearchBar(false);
                   setSearchKeyword('');
                   setFilterTab('all');
                 }}
+                aria-label="关闭查找栏"
+                title="关闭"
               >
-                <X size={14} />
+                <X size={14} aria-hidden="true" />
               </button>
             </div>
           )}
@@ -3362,15 +3480,15 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           {/* 批量待接收文件快捷条（收到 >= 2 个大文件时自动弹出） */}
           {pendingIncomingFiles.length >= 2 && (
             <div className="batch-accept-bar">
-              <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--accent)' }}>
-                📦 收到 {pendingIncomingFiles.length} 个待接收文件，可一键全部接收
+              <span style={{ fontSize: 'var(--fs-subhead)', fontWeight: 700, color: 'var(--accent)' }}>
+                收到 {pendingIncomingFiles.length} 个待接收文件，可一键全部接收
               </span>
               <button
                 type="button"
                 className="btn btn-jelly btn-sm"
                 onClick={handleAcceptAllPending}
               >
-                <Download size={13} /> 一键全部接收
+                <Download size={13} aria-hidden="true" /> 一键全部接收
               </button>
             </div>
           )}
@@ -3395,21 +3513,10 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                 </div>
 
                 <div>
-                  <div
-                    className="mono"
-                    style={{
-                      fontSize: 30,
-                      fontWeight: 900,
-                      letterSpacing: '0.14em',
-                      paddingLeft: '0.14em',
-                      background: 'var(--grad-primary)',
-                      WebkitBackgroundClip: 'text',
-                      WebkitTextFillColor: 'transparent',
-                    }}
-                  >
+                  <div className="mono radar-room-code">
                     {roomCode}
                   </div>
-                  <div style={{ fontSize: 13, color: 'var(--text-sub)', marginTop: 6 }}>
+                  <div style={{ fontSize: 'var(--fs-subhead)', color: 'var(--text-secondary)', marginTop: 6 }}>
                     {peerList.length === 0
                       ? '手机扫码或发送口令给朋友，即可开始 P2P 文件直传与实时聊天'
                       : '已连上伙伴，发消息、拖入文件或直接粘贴截图即可传输'}
@@ -3422,18 +3529,18 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                     className="btn btn-jelly"
                     onClick={async () => {
                       if (await copyTextToClipboard(inviteUrl)) {
-                        onToast('已复制直连邀请链接 🚀');
+                        onToast('已复制直连邀请链接');
                       }
                     }}
                   >
-                    <Copy size={14} /> 复制邀请链接
+                    <Copy size={14} aria-hidden="true" /> 复制邀请链接
                   </button>
                   <button
                     type="button"
                     className="btn btn-glass"
                     onClick={handleOpenWhiteboard}
                   >
-                    <Palette size={15} /> 多人协作白板
+                    <Palette size={15} aria-hidden="true" /> 多人协作白板
                   </button>
                 </div>
               </div>
@@ -3444,6 +3551,17 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             ) : (
               <MessageList
                 items={visibleMessages}
+                recalledTexts={recalledTexts}
+                onReEditRecalled={(text) => {
+                  setInputText(text);
+                  window.setTimeout(() => {
+                    const el = composerInputRef.current;
+                    if (el) {
+                      el.focus();
+                      el.setSelectionRange(text.length, text.length);
+                    }
+                  }, 0);
+                }}
                 onReactMessage={handleReactMessage}
                 onReplyMessage={handleReplyMessage}
                 onRecallMessage={handleRecallMessage}
@@ -3462,25 +3580,25 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           </div>
 
           {typingNames.length > 0 && (
-            <div style={{ maxWidth: 860, width: '100%', margin: '0 auto', padding: '0 20px 4px', fontSize: 12, color: 'var(--accent)', fontWeight: 600 }}>
-              💬 {typingNames.join('、')} 正在输入中...
+            <div style={{ maxWidth: 860, width: '100%', margin: '0 auto', padding: '0 20px 4px', fontSize: 'var(--fs-footnote)', color: 'var(--accent)', fontWeight: 600 }}>
+              {typingNames.join('、')} 正在输入中...
             </div>
           )}
 
-          {/* 底部清爽输入坞 */}
+          {/* 底部输入坞 */}
           <div className="composer-zone">
             <div className="composer-pod">
               {replyingTo && (
                 <div className="composer-reply-bar">
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, flex: 1 }}>
-                    <Reply size={13} style={{ color: 'var(--accent)', flexShrink: 0 }} />
-                    <span style={{ fontWeight: 700, fontSize: 12, color: 'var(--accent)', flexShrink: 0 }}>
+                    <Reply size={13} style={{ color: 'var(--accent)', flexShrink: 0 }} aria-hidden="true" />
+                    <span style={{ fontWeight: 700, fontSize: 'var(--fs-footnote)', color: 'var(--accent)', flexShrink: 0 }}>
                       回复 {replyingTo.senderName}：
                     </span>
                     <span
                       style={{
-                        fontSize: 12,
-                        color: 'var(--text-sub)',
+                        fontSize: 'var(--fs-footnote)',
+                        color: 'var(--text-secondary)',
                         overflow: 'hidden',
                         textOverflow: 'ellipsis',
                         whiteSpace: 'nowrap',
@@ -3492,35 +3610,26 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                   <button
                     type="button"
                     className="btn btn-ghost btn-icon"
-                    style={{ width: 22, height: 22 }}
+                    style={{ width: 24, height: 24 }}
                     onClick={() => setReplyingTo(null)}
                     title="取消引用"
+                    aria-label="取消引用"
                   >
-                    <X size={13} />
+                    <X size={13} aria-hidden="true" />
                   </button>
                 </div>
               )}
 
               {pendingPaste && (
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 12,
-                    padding: '8px 10px',
-                    borderRadius: 14,
-                    background: 'var(--glass-subtle)',
-                    border: '1px solid var(--line-border)',
-                  }}
-                >
+                <div className="pending-paste-card">
                   <img
                     src={pendingPaste.previewUrl}
                     alt="待发送截图"
                     style={{ width: 48, height: 48, borderRadius: 10, objectFit: 'cover' }}
                   />
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 13, fontWeight: 700 }}>
-                      剪贴板美图就绪 · <span className="mono">{formatBytes(pendingPaste.file.size)}</span>
+                    <div style={{ fontSize: 'var(--fs-subhead)', fontWeight: 700 }}>
+                      剪贴板图片就绪 · <span className="mono">{formatBytes(pendingPaste.file.size)}</span>
                     </div>
                     <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
                       <button
@@ -3537,24 +3646,27 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                         style={{ height: 23, fontSize: 11, padding: '0 8px' }}
                         onClick={() => setPendingPaste({ ...pendingPaste, compress: true })}
                       >
-                        轻巧压缩
+                        压缩发送
                       </button>
                     </div>
                   </div>
                   <button
                     type="button"
                     className="btn btn-ghost btn-icon"
+                    aria-label="取消发送剪贴板图片"
+                    title="取消"
                     onClick={() => {
                       URL.revokeObjectURL(pendingPaste.previewUrl);
                       setPendingPaste(null);
                     }}
                   >
-                    <X size={15} />
+                    <X size={15} aria-hidden="true" />
                   </button>
                 </div>
               )}
 
               <textarea
+                ref={composerInputRef}
                 className="composer-textarea"
                 rows={1}
                 value={inputText}
@@ -3568,6 +3680,8 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                 }}
                 onPaste={handleComposerPaste}
                 onKeyDown={(e) => {
+                  // 中文/日文输入法组合候选阶段按下回车绝不误发消息
+                  if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                   if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault();
                     if (pendingPaste) void handleSendPendingPaste();
@@ -3592,6 +3706,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                         setInputText((prev) => prev + em);
                         setShowEmoji(false);
                       }}
+                      aria-label={`插入表情 ${em}`}
                     >
                       {em}
                     </button>
@@ -3606,14 +3721,14 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                     className="tool-pill"
                     onClick={() => fileInputRef.current?.click()}
                   >
-                    <Paperclip size={14} /> 文件
+                    <Paperclip size={14} aria-hidden="true" /> 文件
                   </button>
                   <button
                     type="button"
                     className="tool-pill"
                     onClick={() => imageInputRef.current?.click()}
                   >
-                    <ImageIcon size={14} /> 图片
+                    <ImageIcon size={14} aria-hidden="true" /> 图片
                   </button>
                   <button
                     type="button"
@@ -3623,11 +3738,11 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                   >
                     {recordingVoice ? (
                       <>
-                        <Square size={12} /> 停止 {recordSeconds}s
+                        <Square size={12} aria-hidden="true" /> 停止 {recordSeconds}s
                       </>
                     ) : (
                       <>
-                        <Mic size={14} /> 语音
+                        <Mic size={14} aria-hidden="true" /> 语音
                       </>
                     )}
                   </button>
@@ -3637,15 +3752,16 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                     onClick={handleOpenWhiteboard}
                     title="打开多人实时协作白板"
                   >
-                    <Palette size={14} /> 白板
+                    <Palette size={14} aria-hidden="true" /> 白板
                   </button>
                   <button
                     type="button"
                     className="tool-pill"
                     onClick={() => setShowEmoji((v) => !v)}
                     title="插入表情"
+                    aria-label="插入表情"
                   >
-                    <Smile size={15} />
+                    <Smile size={15} aria-hidden="true" />
                   </button>
                 </div>
 
@@ -3660,7 +3776,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                   }}
                 >
                   <span>发送</span>
-                  <Send size={13} />
+                  <Send size={13} aria-hidden="true" />
                 </button>
               </div>
 
@@ -3690,9 +3806,9 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
 
           {draggingOver && (
             <div className="dropzone-veil">
-              <UploadCloud size={46} />
-              <div style={{ fontSize: 17, fontWeight: 800 }}>
-                松手即可发送文件，拖入整个文件夹将自动打包成 ZIP ✨
+              <UploadCloud size={46} aria-hidden="true" />
+              <div style={{ fontSize: 17, fontWeight: 700 }}>
+                松手即可发送文件，拖入整个文件夹将自动打包成 ZIP
               </div>
             </div>
           )}
@@ -3758,16 +3874,18 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         <div className="modal-overlay" onClick={() => setConfirmClearOpen(false)}>
           <div className="modal-sheet" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 400 }}>
             <div className="modal-head">
-              <h3>🧹 立即清空服务器聊天记录？</h3>
+              <h3>立即清空服务器聊天记录？</h3>
               <button
                 type="button"
                 className="btn btn-ghost btn-icon"
                 onClick={() => setConfirmClearOpen(false)}
+                aria-label="关闭确认弹窗"
+                title="关闭"
               >
-                <X size={16} />
+                <X size={16} aria-hidden="true" />
               </button>
             </div>
-            <p style={{ margin: 0, fontSize: 13.5, color: 'var(--text-sub)', lineHeight: 1.55 }}>
+            <p style={{ margin: 0, fontSize: 13.5, color: 'var(--text-secondary)', lineHeight: 1.55 }}>
               将立即从服务器物理抹除本房间全部缓存消息与媒体（当前 {historyMeta.messageCount} 条），并同步清空所有在线伙伴画面。
             </p>
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
@@ -3786,7 +3904,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                   signalingRef.current?.clearHistory();
                 }}
               >
-                <Trash2 size={14} /> 确认秒清
+                <Trash2 size={14} aria-hidden="true" /> 确认清空
               </button>
             </div>
           </div>
@@ -3798,17 +3916,19 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           <div className="modal-sheet" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 400 }}>
             <div className="modal-head">
               <h3>
-                {roomInfo?.mode === 'ephemeral' ? '🔥 结束并销毁闪传房间？' : '⚠️ 彻底删除常驻基地？'}
+                {roomInfo?.mode === 'ephemeral' ? '结束并销毁临时房间？' : '彻底删除常驻基地？'}
               </h3>
               <button
                 type="button"
                 className="btn btn-ghost btn-icon"
                 onClick={() => setConfirmDestroyOpen(false)}
+                aria-label="关闭确认弹窗"
+                title="关闭"
               >
-                <X size={16} />
+                <X size={16} aria-hidden="true" />
               </button>
             </div>
-            <p style={{ margin: 0, fontSize: 13.5, color: 'var(--text-sub)', lineHeight: 1.55 }}>
+            <p style={{ margin: 0, fontSize: 13.5, color: 'var(--text-secondary)', lineHeight: 1.55 }}>
               {roomInfo?.mode === 'ephemeral'
                 ? '确认后将断开全体连接，该 6 位口令永久作废不可再用，并同步物理清空服务器聊天缓存。'
                 : '确认后将移除此固定基地号并物理清空服务器缓存聊天记录。'}
@@ -3822,7 +3942,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                 取消
               </button>
               <button type="button" className="btn btn-danger" onClick={handleConfirmDestroy}>
-                <Flame size={14} /> 确认销毁
+                <Flame size={14} aria-hidden="true" /> 确认销毁
               </button>
             </div>
           </div>
@@ -3834,13 +3954,15 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         <div className="modal-overlay" onClick={() => setReportTarget(null)}>
           <div className="modal-sheet" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 420 }}>
             <div className="modal-head">
-              <h3>🚩 举报成员：{reportTarget.name}</h3>
+              <h3>举报成员：{reportTarget.name}</h3>
               <button
                 type="button"
                 className="btn btn-ghost btn-icon"
                 onClick={() => setReportTarget(null)}
+                aria-label="关闭举报弹窗"
+                title="关闭"
               >
-                <X size={16} />
+                <X size={16} aria-hidden="true" />
               </button>
             </div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
@@ -3889,18 +4011,20 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         <div className="modal-overlay" onClick={() => setRoomProfileOpen(false)}>
           <div className="modal-sheet" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 420 }}>
             <div className="modal-head">
-              <h3>🔧 修改房间密码与主题</h3>
+              <h3>修改房间密码与主题</h3>
               <button
                 type="button"
                 className="btn btn-ghost btn-icon"
                 onClick={() => setRoomProfileOpen(false)}
+                aria-label="关闭房间设置弹窗"
+                title="关闭"
               >
-                <X size={16} />
+                <X size={16} aria-hidden="true" />
               </button>
             </div>
             <form onSubmit={(e) => void handleSaveRoomProfile(e)} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                <span style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--text-sub)' }}>
+                <span style={{ fontSize: 'var(--fs-footnote)', fontWeight: 700, color: 'var(--text-secondary)' }}>
                   房间主题标签（最多 24 字）
                 </span>
                 <input
@@ -3912,7 +4036,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                 />
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                <span style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--text-sub)' }}>
+                <span style={{ fontSize: 'var(--fs-footnote)', fontWeight: 700, color: 'var(--text-secondary)' }}>
                   新访问密码（留空则保持原密码不变）
                 </span>
                 <input

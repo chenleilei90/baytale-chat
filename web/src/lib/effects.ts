@@ -1,18 +1,18 @@
 // 全屏礼花粒子、表情雨瀑布与趣味音效引擎（零外部依赖 Canvas 高帧率渲染）
-import type { FunEffectType } from '../types';
+import type { FunEffectType, ThemeMode } from '../types';
 
 export interface ThemeOption {
-  id: 'peach' | 'mint' | 'berry' | 'lime' | 'neon';
+  id: ThemeMode;
   name: string;
   orb: string;
 }
 
 export const THEME_OPTIONS: ThemeOption[] = [
-  { id: 'peach', name: '蜜桃汽水', orb: 'linear-gradient(135deg, #ff5e8e, #ff965a)' },
-  { id: 'mint', name: '海盐薄荷', orb: 'linear-gradient(135deg, #06b6d4, #3b82f6)' },
-  { id: 'berry', name: '葡萄苏打', orb: 'linear-gradient(135deg, #8b5cf6, #ec4899)' },
-  { id: 'lime', name: '青柠假日', orb: 'linear-gradient(135deg, #10b981, #f59e0b)' },
-  { id: 'neon', name: '赛博霓虹', orb: 'linear-gradient(135deg, #1e1b4b, #f43f5e, #22d3ee)' },
+  { id: 'air', name: '海空蓝', orb: '#007AFF' },
+  { id: 'mint', name: '海盐青', orb: '#14A3B8' },
+  { id: 'berry', name: '莓果紫', orb: '#5E5CE6' },
+  { id: 'peach', name: '珊瑚粉', orb: '#FF5A5F' },
+  { id: 'lime', name: '青柠绿', orb: '#34C759' },
 ];
 
 const SECRET_PREFIX = '::secret::';

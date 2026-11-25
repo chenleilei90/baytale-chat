@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Upload, X, Sparkles, Check } from 'lucide-react';
+import { Upload, X, Dices, Check } from 'lucide-react';
 import type { UserProfile } from '../types';
 import { compressAvatarFile, generateRandomName, PRESET_AVATARS } from '../lib/avatar';
 import { Avatar } from './Avatar';
@@ -10,7 +10,7 @@ interface ProfileModalProps {
   onClose: () => void;
 }
 
-// 精工个人名片定制弹窗：支持自定义昵称、上传/粘贴图片裁剪压缩、12 款渐变预设徽章
+// 个人名片定制弹窗：支持自定义昵称、上传/粘贴图片裁剪压缩、12 款纯色主题预设徽章
 export const ProfileModal: React.FC<ProfileModalProps> = ({ profile, onSave, onClose }) => {
   const [name, setName] = useState(profile.name);
   const [avatar, setAvatar] = useState(profile.avatar);
@@ -76,47 +76,49 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({ profile, onSave, onC
 
   return (
     <div className="modal-overlay" onClick={onClose} onPaste={handlePaste}>
-      <form className="modal-sheet" onClick={(e) => e.stopPropagation()} onSubmit={handleSubmit}>
+      <form
+        className="modal-sheet"
+        onClick={(e) => e.stopPropagation()}
+        onSubmit={handleSubmit}
+        role="dialog"
+        aria-modal="true"
+        aria-label="个人身份名片"
+      >
         <div className="modal-head">
           <h3>个人身份名片</h3>
-          <button type="button" className="btn btn-ghost btn-icon" onClick={onClose}>
-            <X size={16} />
+          <button
+            type="button"
+            className="btn btn-ghost btn-icon modal-close-btn"
+            aria-label="关闭弹窗"
+            onClick={onClose}
+          >
+            <X size={16} aria-hidden="true" />
           </button>
         </div>
 
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 15,
-            padding: 14,
-            borderRadius: 16,
-            background: 'var(--glass-subtle)',
-            border: '1px solid var(--line-border)',
-          }}
-        >
+        <div className="profile-preview-card">
           <Avatar name={name || '访客'} avatar={avatar} size={60} />
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 7 }}>
-            <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
+          <div className="profile-preview-actions">
+            <div className="profile-btn-row">
               <button
                 type="button"
-                className="btn btn-secondary btn-sm"
+                className="btn btn-secondary btn-sm lobby-touch-pill"
                 onClick={() => fileInputRef.current?.click()}
                 disabled={uploading}
               >
-                <Upload size={13} />
+                <Upload size={13} aria-hidden="true" />
                 {uploading ? '处理中...' : '上传图片'}
               </button>
               <button
                 type="button"
-                className="btn btn-ghost btn-sm"
+                className="btn btn-ghost btn-sm lobby-touch-pill"
                 onClick={() => setName(generateRandomName())}
               >
-                <Sparkles size={13} />
+                <Dices size={13} aria-hidden="true" />
                 随机昵称
               </button>
             </div>
-            <span style={{ fontSize: 11.5, color: 'var(--text-muted)', lineHeight: 1.4 }}>
+            <span className="profile-hint-text">
               支持本地图片或直接 Ctrl+V 粘贴头像，自动居中裁剪并同步给房间成员
             </span>
           </div>
@@ -124,7 +126,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({ profile, onSave, onC
             ref={fileInputRef}
             type="file"
             accept="image/*"
-            style={{ display: 'none' }}
+            hidden
             onChange={(e) => {
               void handleFileChange(e.target.files?.[0]);
               e.target.value = '';
@@ -161,6 +163,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({ profile, onSave, onC
                   className={`avatar-cell ${avatar === id ? 'active' : ''}`}
                   onClick={() => setAvatar(id)}
                   title={item.label}
+                  aria-label={`选择预设头像：${item.label}`}
                 >
                   <Avatar name={item.label} avatar={id} size={36} />
                 </button>
@@ -171,12 +174,12 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({ profile, onSave, onC
 
         {error && <div className="alert-strip">{error}</div>}
 
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-          <button type="button" className="btn btn-secondary" onClick={onClose}>
+        <div className="modal-actions-end">
+          <button type="button" className="btn btn-secondary lobby-touch-pill" onClick={onClose}>
             取消
           </button>
-          <button type="submit" className="btn btn-primary">
-            <Check size={15} />
+          <button type="submit" className="btn btn-primary lobby-touch-pill">
+            <Check size={15} aria-hidden="true" />
             保存修改
           </button>
         </div>

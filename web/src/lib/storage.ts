@@ -1,4 +1,5 @@
 import type {
+  AppearanceMode,
   BlockedPeer,
   MyPickupRecord,
   RecentRoom,
@@ -10,6 +11,7 @@ import { generateRandomName, pickRandomPresetAvatar } from './avatar';
 
 const KEY_PROFILE = 'baychat_profile_v1';
 const KEY_THEME = 'baychat_theme_v1';
+const KEY_APPEARANCE = 'baychat_appearance_v1';
 const KEY_SAVED_ROOMS = 'baychat_fixed_rooms_v1';
 const KEY_RECENT_ROOMS = 'baychat_recent_rooms_v1';
 const KEY_PREFS = 'baychat_prefs_v1';
@@ -89,23 +91,57 @@ export function saveUserProfile(profile: UserProfile): void {
   }
 }
 
-const VALID_THEMES: ThemeMode[] = ['peach', 'mint', 'berry', 'lime', 'neon'];
+const VALID_THEMES: ThemeMode[] = ['air', 'mint', 'berry', 'peach', 'lime'];
+const VALID_APPEARANCES: AppearanceMode[] = ['system', 'light', 'dark'];
 
+// 读取强调色主题：默认 'air'；旧 'neon' 自动迁移为 'air' 且若未保存外观偏好则迁移外观为 'dark'
 export function loadTheme(): ThemeMode {
   try {
-    const saved = localStorage.getItem(KEY_THEME) as ThemeMode | null;
-    if (saved && VALID_THEMES.includes(saved)) {
-      return saved;
+    const saved = localStorage.getItem(KEY_THEME);
+    if (saved === 'neon') {
+      saveTheme('air');
+      if (localStorage.getItem(KEY_APPEARANCE) === null) {
+        saveAppearance('dark');
+      }
+      return 'air';
+    }
+    if (saved && VALID_THEMES.includes(saved as ThemeMode)) {
+      return saved as ThemeMode;
     }
   } catch {
     // 忽略异常
   }
-  return 'peach';
+  return 'air';
 }
 
 export function saveTheme(theme: ThemeMode): void {
   try {
     localStorage.setItem(KEY_THEME, theme);
+  } catch {
+    // 忽略异常
+  }
+}
+
+// 读取外观模式偏好：默认 'system'；兼容首次从旧版 'neon' 迁移而来的深色偏好
+export function loadAppearance(): AppearanceMode {
+  try {
+    const saved = localStorage.getItem(KEY_APPEARANCE);
+    if (saved && VALID_APPEARANCES.includes(saved as AppearanceMode)) {
+      return saved as AppearanceMode;
+    }
+    if (saved === null && localStorage.getItem(KEY_THEME) === 'neon') {
+      saveAppearance('dark');
+      return 'dark';
+    }
+  } catch {
+    // 忽略异常
+  }
+  return 'system';
+}
+
+export function saveAppearance(mode: AppearanceMode): void {
+  try {
+    localStorage.setItem(KEY_APPEARANCE, mode);
   } catch {
     // 忽略异常
   }

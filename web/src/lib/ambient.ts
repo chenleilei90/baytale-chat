@@ -4,11 +4,11 @@
 export type AmbientSoundType = 'off' | 'rain' | 'ocean' | 'fire' | 'study';
 
 export const AMBIENT_OPTIONS: { id: AmbientSoundType; icon: string; label: string }[] = [
-  { id: 'off', icon: '🔇', label: '静音' },
-  { id: 'rain', icon: '🌧️', label: '细雨' },
-  { id: 'ocean', icon: '🌊', label: '海浪' },
-  { id: 'fire', icon: '🔥', label: '壁炉' },
-  { id: 'study', icon: '☕', label: '书房' },
+  { id: 'off', icon: 'off', label: '静音' },
+  { id: 'rain', icon: 'rain', label: '细雨' },
+  { id: 'ocean', icon: 'ocean', label: '海浪' },
+  { id: 'fire', icon: 'fire', label: '壁炉' },
+  { id: 'study', icon: 'study', label: '书房' },
 ];
 
 class AmbientNoiseEngine {

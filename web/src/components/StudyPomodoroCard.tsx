@@ -1,7 +1,35 @@
 import React, { useState } from 'react';
-import { Play, Pause, RotateCcw, Volume2, ChevronDown, ChevronUp } from 'lucide-react';
+import {
+  Play,
+  Pause,
+  RotateCcw,
+  Volume2,
+  VolumeX,
+  CloudRain,
+  Waves,
+  Flame,
+  Coffee,
+  Timer,
+  ChevronDown,
+  ChevronUp,
+} from 'lucide-react';
 import type { PomodoroMode, PomodoroState } from '../types';
 import { AMBIENT_OPTIONS, type AmbientSoundType } from '../lib/ambient';
+
+function renderAmbientIcon(id: AmbientSoundType): React.ReactNode {
+  switch (id) {
+    case 'off':
+      return <VolumeX size={13} aria-hidden="true" />;
+    case 'rain':
+      return <CloudRain size={13} aria-hidden="true" />;
+    case 'ocean':
+      return <Waves size={13} aria-hidden="true" />;
+    case 'fire':
+      return <Flame size={13} aria-hidden="true" />;
+    case 'study':
+      return <Coffee size={13} aria-hidden="true" />;
+  }
+}
 
 interface StudyPomodoroCardProps {
   pomodoro: PomodoroState;
@@ -45,64 +73,60 @@ export const StudyPomodoroCard: React.FC<StudyPomodoroCardProps> = ({
   return (
     <div className="study-card">
       <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          gap: 6,
-          cursor: 'pointer',
-        }}
+        className="study-card-head"
         onClick={() => setExpanded((v) => !v)}
+        role="button"
+        tabIndex={0}
+        aria-expanded={expanded}
+        aria-label={expanded ? '收起自习室面板' : '展开自习室面板'}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            setExpanded((v) => !v);
+          }
+        }}
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
-          <span style={{ fontSize: 13 }}>🍅</span>
-          <span style={{ fontSize: 12.5, fontWeight: 800 }}>一起自习室</span>
+        <div className="study-card-title-wrap">
+          <Timer size={14} style={{ color: 'var(--accent)', flexShrink: 0 }} aria-hidden="true" />
+          <span className="study-card-title">一起自习室</span>
           {pomodoro.running && <span className="status-dot emerald" />}
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-          <span
-            className="mono"
-            style={{
-              fontSize: 14,
-              fontWeight: 900,
-              color: pomodoro.running ? 'var(--accent)' : 'var(--text-main)',
-            }}
-          >
+        <div className="study-card-controls">
+          <span className={`mono study-card-clock ${pomodoro.running ? 'running' : ''}`}>
             {formatTimerClock(displaySeconds)}
           </span>
           <button
             type="button"
-            className={`btn btn-icon ${pomodoro.running ? 'btn-soft' : 'btn-jelly'}`}
-            style={{ width: 25, height: 25, borderRadius: 8 }}
+            className={`btn btn-icon study-card-play-btn ${pomodoro.running ? 'btn-soft' : 'btn-primary'}`}
             onClick={(e) => {
               e.stopPropagation();
               onStartToggle();
             }}
             title={pomodoro.running ? '暂停同步番茄钟' : '启动全房同步番茄钟'}
+            aria-label={pomodoro.running ? '暂停同步番茄钟' : '启动全房同步番茄钟'}
           >
-            {pomodoro.running ? <Pause size={11} /> : <Play size={11} />}
+            {pomodoro.running ? <Pause size={11} aria-hidden="true" /> : <Play size={11} aria-hidden="true" />}
           </button>
-          {expanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+          {expanded ? <ChevronUp size={13} aria-hidden="true" /> : <ChevronDown size={13} aria-hidden="true" />}
         </div>
       </div>
 
       {pomodoro.running && pomodoro.startedBy && !expanded && (
-        <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-          ✨ {pomodoro.startedBy} 发起了全房专注 · 完成后基地 +1🍅
+        <div className="study-card-subtitle">
+          {pomodoro.startedBy} 发起了全房专注，完成后基地计数 +1
         </div>
       )}
 
       {expanded && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 9, paddingTop: 4 }}>
+        <div className="study-card-body">
           {/* 番茄模式切换 */}
-          <div style={{ display: 'flex', gap: 4 }}>
+          <div className="study-mode-row">
             {MODE_OPTIONS.map((m) => (
               <button
                 key={m.id}
                 type="button"
-                className={`btn btn-sm ${pomodoro.mode === m.id ? 'btn-jelly' : 'btn-glass'}`}
-                style={{ flex: 1, height: 25, fontSize: 11, padding: '0 4px' }}
+                className={`btn btn-sm study-mode-btn ${pomodoro.mode === m.id ? 'btn-primary' : 'btn-secondary'}`}
                 onClick={() => onSwitchMode(m.id)}
               >
                 {m.label}
@@ -110,45 +134,46 @@ export const StudyPomodoroCard: React.FC<StudyPomodoroCardProps> = ({
             ))}
             <button
               type="button"
-              className="btn btn-ghost btn-icon"
-              style={{ width: 25, height: 25 }}
+              className="btn btn-ghost btn-icon study-reset-btn"
               onClick={onReset}
               title="重置倒计时"
+              aria-label="重置倒计时"
             >
-              <RotateCcw size={12} />
+              <RotateCcw size={12} aria-hidden="true" />
             </button>
           </div>
 
           {/* 零依赖环境白噪音 */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-            <div style={{ fontSize: 11.5, fontWeight: 700, color: 'var(--text-sub)', display: 'flex', alignItems: 'center', gap: 4 }}>
-              <Volume2 size={12} style={{ color: 'var(--accent)' }} /> 治愈白噪音（本机播放）
+          <div className="study-ambient-section">
+            <div className="study-ambient-title">
+              <Volume2 size={12} style={{ color: 'var(--accent)' }} aria-hidden="true" /> 环境白噪音（本机播放）
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 4 }}>
+            <div className="study-ambient-grid">
               {AMBIENT_OPTIONS.map((opt) => (
                 <button
                   key={opt.id}
                   type="button"
-                  className={`btn btn-sm ${ambientSound === opt.id ? 'btn-jelly' : 'btn-glass'}`}
-                  style={{ height: 26, padding: 0, fontSize: 11, flexDirection: 'column', gap: 0 }}
+                  className={`btn btn-sm study-ambient-btn ${ambientSound === opt.id ? 'btn-primary' : 'btn-secondary'}`}
                   onClick={() => onSelectAmbient(opt.id)}
                   title={opt.label}
+                  aria-label={`白噪音：${opt.label}`}
                 >
-                  <span>{opt.icon}</span>
+                  {renderAmbientIcon(opt.id)}
                 </button>
               ))}
             </div>
             {ambientSound !== 'off' && (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>音量</span>
+              <div className="study-volume-row">
+                <span className="study-volume-label">音量</span>
                 <input
                   type="range"
                   min={0.05}
                   max={0.85}
                   step={0.05}
                   value={ambientVolume}
+                  aria-label="白噪音音量"
                   onChange={(e) => onChangeVolume(Number(e.target.value))}
-                  style={{ flex: 1, accentColor: 'var(--accent)' }}
+                  className="study-volume-slider"
                 />
               </div>
             )}

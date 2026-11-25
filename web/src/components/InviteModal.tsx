@@ -11,7 +11,7 @@ interface InviteModalProps {
   rotating?: boolean;
 }
 
-// 精工房间邀请卡弹窗：离线高清二维码 + 大字距房间码 + 一键复制链接
+// 房间邀请弹窗：离线高清二维码 + 大字距房间码 + 一键复制链接
 export const InviteModal: React.FC<InviteModalProps> = ({
   room,
   onClose,
@@ -36,7 +36,7 @@ export const InviteModal: React.FC<InviteModalProps> = ({
     QRCode.toDataURL(inviteUrl, {
       width: 220,
       margin: 1,
-      color: { dark: '#111318', light: '#ffffff' },
+      color: { dark: '#000000', light: '#ffffff' },
     })
       .then((url) => {
         if (active) setQrDataUrl(url);
@@ -57,77 +57,73 @@ export const InviteModal: React.FC<InviteModalProps> = ({
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div
-        className="modal-sheet"
+        className="modal-sheet modal-sheet-md"
         onClick={(e) => e.stopPropagation()}
-        style={{ maxWidth: 400 }}
+        role="dialog"
+        aria-modal="true"
+        aria-label="分享房间邀请"
       >
         <div className="modal-head">
           <h3>分享房间邀请</h3>
-          <button type="button" className="btn btn-ghost btn-icon" onClick={onClose}>
-            <X size={16} />
+          <button
+            type="button"
+            className="btn btn-ghost btn-icon modal-close-btn"
+            aria-label="关闭弹窗"
+            onClick={onClose}
+          >
+            <X size={16} aria-hidden="true" />
           </button>
         </div>
 
-        <div
-          style={{
-            padding: '22px 18px',
-            borderRadius: 20,
-            background: 'var(--glass-subtle)',
-            border: '1px solid var(--line-border)',
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            gap: 14,
-          }}
-        >
-          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'center' }}>
+        <div className="modal-card-panel">
+          <div className="modal-pills-row">
             {room.mode === 'fixed' ? (
               <span className="pill pill-accent">
-                <Hash size={12} /> 常驻固定房间
+                <Hash size={12} aria-hidden="true" /> 常驻固定房间
               </span>
             ) : (
               <span className="pill pill-warm">
-                <Flame size={12} /> 闪传房间 · 聊完作废
+                <Flame size={12} aria-hidden="true" /> 临时房间 · 离开后销毁
               </span>
             )}
             {room.hasPassword && (
               <span className="pill pill-neutral">
-                <Lock size={11} /> 需访问密码
+                <Lock size={11} aria-hidden="true" /> 需访问密码
               </span>
             )}
           </div>
 
           {qrDataUrl && (
-            <div className="radar-qr-ring">
-              <img src={qrDataUrl} alt="房间二维码" style={{ width: 172, height: 172 }} />
+            <div className="qr-quiet-frame">
+              <img src={qrDataUrl} alt={`房间 ${room.code} 的邀请二维码`} className="qr-img-invite" />
             </div>
           )}
 
-          <div style={{ textAlign: 'center' }}>
-            <div className="radar-code-display mono" style={{ fontSize: 28 }}>
+          <div className="modal-code-box">
+            <div className="radar-code-display mono modal-code-md">
               {room.code}
             </div>
-            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>
-              手机扫码或输入上方房间码建立点对点直连
+            <div className="modal-sub-caption">
+              扫码或输入上方房间码建立点对点直连
             </div>
           </div>
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+        <div className="lobby-two-btn-grid">
           <button
             type="button"
-            className="btn btn-secondary"
+            className="btn btn-secondary lobby-touch-pill"
             onClick={() => void handleCopy(room.code, 'code')}
           >
-            {copiedType === 'code' ? <Check size={14} /> : <Copy size={14} />}
+            {copiedType === 'code' ? <Check size={14} aria-hidden="true" /> : <Copy size={14} aria-hidden="true" />}
             {copiedType === 'code' ? '已复制' : '复制房间码'}
           </button>
           <button
             type="button"
-            className="btn btn-primary"
+            className="btn btn-primary lobby-touch-pill"
             onClick={() => void handleCopy(inviteUrl, 'link')}
           >
-            {copiedType === 'link' ? <Check size={14} /> : <Copy size={14} />}
+            {copiedType === 'link' ? <Check size={14} aria-hidden="true" /> : <Copy size={14} aria-hidden="true" />}
             {copiedType === 'link' ? '已复制' : '复制邀请链接'}
           </button>
         </div>
@@ -135,11 +131,11 @@ export const InviteModal: React.FC<InviteModalProps> = ({
         {room.mode === 'ephemeral' && onRotateCode && (
           <button
             type="button"
-            className="btn btn-ghost btn-sm"
+            className="btn btn-ghost btn-sm lobby-touch-pill"
             onClick={onRotateCode}
             disabled={rotating}
           >
-            <RefreshCw size={13} />
+            <RefreshCw size={13} aria-hidden="true" />
             {rotating ? '正在切换新房间码...' : '作废当前码并换一个新房间码'}
           </button>
         )}

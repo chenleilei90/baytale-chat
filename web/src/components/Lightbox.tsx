@@ -20,29 +20,25 @@ export const Lightbox: React.FC<LightboxProps> = ({ src, fileName, caption, onCl
   }, [onClose]);
 
   return (
-    <div className="modal-overlay" onClick={onClose} style={{ zIndex: 160 }}>
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          maxWidth: '94vw',
-          maxHeight: '92vh',
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          gap: 12,
-        }}
-      >
-        <div style={{ display: 'flex', gap: 8, alignSelf: 'flex-end' }}>
+    <div className="modal-overlay lightbox-overlay" onClick={onClose}>
+      <div className="lightbox-panel" onClick={(e) => e.stopPropagation()}>
+        <div className="lightbox-actions">
           <button
             type="button"
             className="btn btn-primary btn-sm"
+            aria-label="下载原图"
             onClick={() => triggerBlobDownload(src, fileName || `baychat-${Date.now()}.png`)}
           >
-            <Download size={13} />
+            <Download size={13} aria-hidden="true" />
             下载原图
           </button>
-          <button type="button" className="btn btn-secondary btn-sm" onClick={onClose}>
-            <X size={14} />
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            aria-label="关闭预览"
+            onClick={onClose}
+          >
+            <X size={14} aria-hidden="true" />
             关闭
           </button>
         </div>
@@ -50,27 +46,11 @@ export const Lightbox: React.FC<LightboxProps> = ({ src, fileName, caption, onCl
         <img
           src={src}
           alt={caption || fileName || '预览图片'}
-          style={{
-            maxWidth: '92vw',
-            maxHeight: '80vh',
-            objectFit: 'contain',
-            borderRadius: 14,
-            boxShadow: '0 28px 64px rgba(0, 0, 0, 0.65)',
-            background: '#090a0f',
-          }}
+          className="lightbox-img"
         />
 
         {caption && (
-          <div
-            style={{
-              color: '#f3f4f6',
-              fontSize: 13,
-              background: 'rgba(17, 19, 28, 0.82)',
-              border: '1px solid rgba(255, 255, 255, 0.1)',
-              padding: '6px 14px',
-              borderRadius: 99,
-            }}
-          >
+          <div className="lightbox-caption">
             {caption}
           </div>
         )}

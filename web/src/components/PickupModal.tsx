@@ -3,6 +3,7 @@ import {
   Check,
   Copy,
   Flame,
+  KeyRound,
   Lock,
   Package,
   Plus,
@@ -22,6 +23,25 @@ import {
 import { copyTextToClipboard, formatBytes, formatExpiryTime } from '../lib/platform';
 import { loadMyPickups, removeMyPickup, upsertMyPickup } from '../lib/storage';
 import { Switch } from './Controls';
+
+// 将长文件名拆分为可省略的主干与始终完整显示的扩展名
+function renderSplitFilename(name: string) {
+  const dotIdx = name.lastIndexOf('.');
+  const hasExt = dotIdx > 0 && dotIdx < name.length - 1 && name.length - dotIdx <= 12;
+  if (!hasExt) {
+    return (
+      <span className="filename-split filename-split-sm" title={name}>
+        <span className="filename-stem">{name}</span>
+      </span>
+    );
+  }
+  return (
+    <span className="filename-split filename-split-sm" title={name}>
+      <span className="filename-stem">{name.slice(0, dotIdx)}</span>
+      <span className="filename-ext">{name.slice(dotIdx)}</span>
+    </span>
+  );
+}
 
 interface PickupSendModalProps {
   serverConfig: ServerConfig | null;
@@ -69,7 +89,7 @@ export const PickupSendModal: React.FC<PickupSendModalProps> = ({
     QRCode.toDataURL(url, {
       width: 210,
       margin: 1,
-      color: { dark: '#111318', light: '#ffffff' },
+      color: { dark: '#000000', light: '#ffffff' },
     })
       .then((dataUrl) => {
         if (alive) setQrDataUrl(dataUrl);
@@ -151,7 +171,7 @@ export const PickupSendModal: React.FC<PickupSendModalProps> = ({
       });
       setMyPickups(nextList);
       setResult(created);
-      onToast(`📦 取件码 #${created.code} 已生成`);
+      onToast(`取件码 #${created.code} 已生成`);
     } catch (err) {
       setErrorText(err instanceof Error ? err.message : '取件码上传失败');
     } finally {
@@ -183,90 +203,84 @@ export const PickupSendModal: React.FC<PickupSendModalProps> = ({
   return (
     <div className="modal-overlay" onClick={() => !uploading && onClose()}>
       <div
-        className="modal-sheet"
+        className="modal-sheet modal-sheet-lg"
         onClick={(e) => e.stopPropagation()}
-        style={{ maxWidth: 480, maxHeight: '88vh', overflowY: 'auto' }}
+        role="dialog"
+        aria-modal="true"
+        aria-label="取件码离线文件投递"
       >
         <div className="modal-head">
-          <h3>📦 取件码 · 离线文件投递</h3>
+          <h3 className="modal-head-title">
+            <Package size={18} className="lobby-card-title-icon" aria-hidden="true" />
+            <span>取件码 · 离线文件投递</span>
+          </h3>
           <button
             type="button"
-            className="btn btn-ghost btn-icon"
+            className="btn btn-ghost btn-icon modal-close-btn"
             disabled={uploading}
+            aria-label="关闭弹窗"
             onClick={onClose}
           >
-            <X size={16} />
+            <X size={16} aria-hidden="true" />
           </button>
         </div>
 
         {result ? (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            <div
-              style={{
-                padding: '18px 16px',
-                borderRadius: 20,
-                background: 'var(--glass-subtle)',
-                border: '1px solid var(--line-border)',
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                gap: 12,
-              }}
-            >
-              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'center' }}>
+          <div className="modal-stack">
+            <div className="modal-card-panel">
+              <div className="modal-pills-row">
                 <span className="pill pill-emerald">已就绪 · {result.files.length} 个文件</span>
                 {burnAfterRead && (
                   <span className="pill pill-warm">
-                    <Flame size={11} /> 取后即焚
+                    <Flame size={11} aria-hidden="true" /> 取后即焚
                   </span>
                 )}
                 {password.trim() && (
                   <span className="pill pill-neutral">
-                    <Lock size={11} /> 加密取件
+                    <Lock size={11} aria-hidden="true" /> 加密取件
                   </span>
                 )}
               </div>
               {qrDataUrl && (
-                <div className="radar-qr-ring">
-                  <img src={qrDataUrl} alt="取件码二维码" style={{ width: 164, height: 164 }} />
+                <div className="qr-quiet-frame">
+                  <img src={qrDataUrl} alt={`取件码 ${result.code} 的二维码`} className="qr-img-pickup" />
                 </div>
               )}
-              <div style={{ textAlign: 'center' }}>
-                <div className="radar-code-display mono" style={{ fontSize: 30 }}>
+              <div className="modal-code-box">
+                <div className="radar-code-display mono modal-code-lg">
                   {result.code}
                 </div>
-                <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>
+                <div className="modal-sub-caption">
                   {formatExpiryTime(result.expiresAt)}
                 </div>
               </div>
             </div>
 
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+            <div className="lobby-two-btn-grid">
               <button
                 type="button"
-                className="btn btn-soft"
+                className="btn btn-soft lobby-touch-pill"
                 onClick={() => void handleCopy(result.code, 'code')}
               >
-                {copiedType === 'code' ? <Check size={14} /> : <Copy size={14} />}
+                {copiedType === 'code' ? <Check size={14} aria-hidden="true" /> : <Copy size={14} aria-hidden="true" />}
                 {copiedType === 'code' ? '已复制' : '复制取件码'}
               </button>
               <button
                 type="button"
-                className="btn btn-jelly"
+                className="btn btn-jelly lobby-touch-pill"
                 onClick={() =>
                   void handleCopy(`${window.location.origin}/p/${result.code}`, 'link')
                 }
               >
-                {copiedType === 'link' ? <Check size={14} /> : <QrCode size={14} />}
+                {copiedType === 'link' ? <Check size={14} aria-hidden="true" /> : <QrCode size={14} aria-hidden="true" />}
                 {copiedType === 'link' ? '已复制链接' : '复制提取链接'}
               </button>
             </div>
 
-            <div style={{ display: 'flex', gap: 8 }}>
+            <div className="pickup-action-row">
               <button
                 type="button"
-                className="btn btn-glass btn-sm"
-                style={{ flex: 1 }}
+                className="btn btn-glass btn-sm pickup-action-flex lobby-touch-pill"
                 onClick={() => {
                   onClose();
                   onOpenCodePage(result.code);
@@ -276,8 +290,7 @@ export const PickupSendModal: React.FC<PickupSendModalProps> = ({
               </button>
               <button
                 type="button"
-                className="btn btn-glass btn-sm"
-                style={{ flex: 1 }}
+                className="btn btn-glass btn-sm pickup-action-flex lobby-touch-pill"
                 onClick={() => {
                   setResult(null);
                   setFiles([]);
@@ -285,14 +298,24 @@ export const PickupSendModal: React.FC<PickupSendModalProps> = ({
                   setPassword('');
                 }}
               >
-                <Plus size={13} /> 再投递一批
+                <Plus size={13} aria-hidden="true" /> 再投递一批
               </button>
             </div>
           </div>
         ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div className="modal-stack">
             <div
+              role="button"
+              tabIndex={uploading ? -1 : 0}
+              aria-label="选择或拖拽要上传的文件"
+              className={`pickup-dropzone ${uploading ? 'disabled' : ''}`}
               onClick={() => !uploading && inputRef.current?.click()}
+              onKeyDown={(e) => {
+                if (!uploading && (e.key === 'Enter' || e.key === ' ')) {
+                  e.preventDefault();
+                  inputRef.current?.click();
+                }
+              }}
               onDragOver={(e) => e.preventDefault()}
               onDrop={(e) => {
                 e.preventDefault();
@@ -300,27 +323,19 @@ export const PickupSendModal: React.FC<PickupSendModalProps> = ({
                   appendFiles(e.dataTransfer.files);
                 }
               }}
-              style={{
-                padding: '18px 14px',
-                borderRadius: 18,
-                border: '1.5px dashed var(--line-strong)',
-                background: 'var(--glass-subtle)',
-                textAlign: 'center',
-                cursor: uploading ? 'not-allowed' : 'pointer',
-              }}
             >
-              <UploadCloud size={26} style={{ color: 'var(--accent)', marginBottom: 6 }} />
-              <div style={{ fontSize: 13.5, fontWeight: 700 }}>
+              <UploadCloud size={26} className="pickup-dropzone-icon" aria-hidden="true" />
+              <div className="pickup-dropzone-title">
                 点击或拖拽添加文件（单文件 ≤ {maxFileMB}MB，总计 ≤ {maxTotalMB}MB）
               </div>
-              <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 3 }}>
+              <div className="pickup-dropzone-sub">
                 生成 6 位数字取件码，跨设备随时提取
               </div>
               <input
                 ref={inputRef}
                 type="file"
                 multiple
-                style={{ display: 'none' }}
+                hidden
                 onChange={(e) => {
                   if (e.target.files) appendFiles(e.target.files);
                   e.target.value = '';
@@ -329,45 +344,38 @@ export const PickupSendModal: React.FC<PickupSendModalProps> = ({
             </div>
 
             {files.length > 0 && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 160, overflowY: 'auto' }}>
+              <div className="pickup-file-list">
                 {files.map((f, idx) => {
                   const uploaded = progressMap[idx] || 0;
                   const pct = f.size > 0 ? Math.min(100, Math.round((uploaded / f.size) * 100)) : 0;
                   return (
-                    <div
-                      key={`${f.name}-${f.size}`}
-                      style={{
-                        padding: '7px 10px',
-                        borderRadius: 12,
-                        background: 'var(--glass-bg-strong)',
-                        border: '1px solid var(--line-border)',
-                        display: 'flex',
-                        flexDirection: 'column',
-                        gap: 4,
-                      }}
-                    >
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-                        <span style={{ fontSize: 12.5, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {f.name}
-                        </span>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-                          <span className="mono" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                    <div key={`${f.name}-${f.size}`} className="pickup-file-row">
+                      <div className="pickup-file-top">
+                        {renderSplitFilename(f.name)}
+                        <div className="pickup-file-meta">
+                          <span className="mono pickup-file-size">
                             {formatBytes(f.size)}
                           </span>
                           {!uploading && (
                             <button
                               type="button"
-                              className="btn btn-ghost btn-icon"
-                              style={{ width: 22, height: 22 }}
+                              className="btn btn-ghost btn-icon pickup-file-remove"
+                              aria-label={`移除文件 ${f.name}`}
                               onClick={() => setFiles((prev) => prev.filter((_, i) => i !== idx))}
                             >
-                              <X size={12} />
+                              <X size={12} aria-hidden="true" />
                             </button>
                           )}
                         </div>
                       </div>
                       {uploading && (
-                        <div className="progress-rail">
+                        <div
+                          className="progress-rail"
+                          role="progressbar"
+                          aria-valuenow={pct}
+                          aria-valuemin={0}
+                          aria-valuemax={100}
+                        >
                           <div className="progress-bar" style={{ width: `${pct}%` }} />
                         </div>
                       )}
@@ -377,10 +385,8 @@ export const PickupSendModal: React.FC<PickupSendModalProps> = ({
               </div>
             )}
 
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-sub)' }}>
-                取件码有效期
-              </span>
+            <div className="lobby-field-group">
+              <span className="lobby-field-label">取件码有效期</span>
               <div className="segmented full">
                 {([1, 24, 72] as const).map((h) => (
                   <button
@@ -405,7 +411,7 @@ export const PickupSendModal: React.FC<PickupSendModalProps> = ({
 
             <div className="input-group">
               <span className="input-prefix-icon">
-                <Lock size={14} />
+                <Lock size={14} aria-hidden="true" />
               </span>
               <input
                 className="field-input with-prefix"
@@ -425,7 +431,7 @@ export const PickupSendModal: React.FC<PickupSendModalProps> = ({
               disabled={uploading || files.length === 0}
               onClick={() => void handleUpload()}
             >
-              <Package size={16} />
+              <Package size={16} aria-hidden="true" />
               <span>
                 {uploading
                   ? '正在上传生成取件码...'
@@ -436,38 +442,26 @@ export const PickupSendModal: React.FC<PickupSendModalProps> = ({
         )}
 
         {myPickups.length > 0 && (
-          <div style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid var(--line-border)', display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <div style={{ fontSize: 12.5, fontWeight: 800, color: 'var(--text-sub)' }}>
+          <div className="pickup-my-section">
+            <div className="pickup-my-title">
               我的取件码（{myPickups.length}）
             </div>
             {myPickups.slice(0, 6).map((item) => (
-              <div
-                key={item.code}
-                style={{
-                  padding: '8px 10px',
-                  borderRadius: 14,
-                  background: 'var(--glass-bg-strong)',
-                  border: '1px solid var(--line-border)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  gap: 8,
-                }}
-              >
-                <div style={{ minWidth: 0 }}>
-                  <div className="mono" style={{ fontSize: 14, fontWeight: 800, display: 'flex', alignItems: 'center', gap: 5 }}>
+              <div key={item.code} className="pickup-my-row">
+                <div className="lobby-room-meta">
+                  <div className="mono lobby-room-code">
                     <span>#{item.code}</span>
-                    {item.burnAfterRead && <Flame size={11} style={{ color: 'var(--accent)' }} />}
-                    {item.hasPassword && <Lock size={11} style={{ color: 'var(--accent)' }} />}
+                    {item.burnAfterRead && <Flame size={11} className="lobby-room-lock" aria-hidden="true" />}
+                    {item.hasPassword && <Lock size={11} className="lobby-room-lock" aria-hidden="true" />}
                   </div>
-                  <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                  <div className="lobby-room-sub mono">
                     {item.fileCount} 文件 · {formatBytes(item.totalSize)} · {formatExpiryTime(item.expiresAt)}
                   </div>
                 </div>
-                <div style={{ display: 'flex', gap: 4 }}>
+                <div className="lobby-room-actions">
                   <button
                     type="button"
-                    className="btn btn-soft btn-sm"
+                    className="btn btn-soft btn-sm lobby-touch-pill"
                     onClick={() => {
                       onClose();
                       onOpenCodePage(item.code);
@@ -477,24 +471,24 @@ export const PickupSendModal: React.FC<PickupSendModalProps> = ({
                   </button>
                   <button
                     type="button"
-                    className="btn btn-ghost btn-icon"
-                    style={{ width: 28, height: 28 }}
+                    className="btn btn-ghost btn-icon lobby-touch-icon"
                     title="复制取件链接"
+                    aria-label={`复制取件码 ${item.code} 的链接`}
                     onClick={async () => {
                       const url = `${window.location.origin}/p/${item.code}`;
                       if (await copyTextToClipboard(url)) onToast(`已复制 #${item.code} 取件链接`);
                     }}
                   >
-                    <Copy size={13} />
+                    <Copy size={13} aria-hidden="true" />
                   </button>
                   <button
                     type="button"
-                    className="btn btn-danger-soft btn-icon"
-                    style={{ width: 28, height: 28 }}
+                    className="btn btn-danger-soft btn-icon lobby-touch-icon"
                     title="撤销并销毁"
+                    aria-label={`撤销取件码 ${item.code}`}
                     onClick={() => void handleRevoke(item)}
                   >
-                    <Trash2 size={13} />
+                    <Trash2 size={13} aria-hidden="true" />
                   </button>
                 </div>
               </div>
@@ -531,17 +525,30 @@ export const PickupLookupModal: React.FC<PickupLookupModalProps> = ({
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-sheet" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 380 }}>
+      <div
+        className="modal-sheet modal-sheet-sm"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label="输入取件码提取文件"
+      >
         <div className="modal-head">
-          <h3>🔑 输入取件码提取文件</h3>
-          <button type="button" className="btn btn-ghost btn-icon" onClick={onClose}>
-            <X size={16} />
+          <h3 className="modal-head-title">
+            <KeyRound size={18} className="lobby-card-title-icon" aria-hidden="true" />
+            <span>输入取件码提取文件</span>
+          </h3>
+          <button
+            type="button"
+            className="btn btn-ghost btn-icon modal-close-btn"
+            aria-label="关闭弹窗"
+            onClick={onClose}
+          >
+            <X size={16} aria-hidden="true" />
           </button>
         </div>
-        <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <form onSubmit={handleSubmit} className="modal-stack">
           <input
-            className="field-input mono"
-            style={{ height: 50, fontSize: 20, fontWeight: 800, textAlign: 'center', letterSpacing: '0.2em' }}
+            className="field-input mono pickup-code-input"
             value={codeInput}
             onChange={(e) => {
               setCodeInput(e.target.value);
@@ -550,6 +557,7 @@ export const PickupLookupModal: React.FC<PickupLookupModalProps> = ({
             placeholder="000000"
             maxLength={32}
             autoFocus
+            aria-label="6 位数字取件码"
           />
           {err && <div className="alert-strip">{err}</div>}
           <button type="submit" className="btn btn-jelly btn-xl">

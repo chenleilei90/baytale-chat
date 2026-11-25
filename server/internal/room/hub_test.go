@@ -775,3 +775,141 @@ func TestReportStoreAppendAndNoPlaintextIP(t *testing.T) {
 		t.Fatalf("举报记录字段异常: %+v", parsed)
 	}
 }
+
+func TestRecallMessageTimeWindow(t *testing.T) {
+	cfg := newTestConfig(t)
+	now := time.Now()
+	hub, err := NewHub(cfg)
+	if err != nil {
+		t.Fatalf("初始化 Hub 失败: %v", err)
+	}
+	defer hub.Close()
+	hub.SetNowFunc(func() time.Time { return now })
+
+	days := 3
+	created, err := hub.CreateRoom(CreateRoomRequest{
+		Mode:          ModeFixed,
+		Code:          "recall-win",
+		RetentionDays: &days,
+	})
+	if err != nil {
+		t.Fatalf("创建房间失败: %v", err)
+	}
+
+	// 写入两条历史消息：一条 60 秒前（允许撤回），一条 160 秒前（超过 150 秒时限）
+	recentID := "msg-recent-60s"
+	expiredID := "msg-expired-160s"
+	if _, _, err := hub.History().AppendMessage(created.Code, days, CachedMessage{
+		ID:         recentID,
+		Kind:       "text",
+		SenderID:   "peer-a",
+		SenderName: "发送者A",
+		Text:       "刚刚发的消息",
+		Timestamp:  now.Add(-60 * time.Second).UnixMilli(),
+	}); err != nil {
+		t.Fatalf("写入近期消息失败: %v", err)
+	}
+	if _, _, err := hub.History().AppendMessage(created.Code, days, CachedMessage{
+		ID:         expiredID,
+		Kind:       "text",
+		SenderID:   "peer-a",
+		SenderName: "发送者A",
+		Text:       "超时很久的消息",
+		Timestamp:  now.Add(-160 * time.Second).UnixMilli(),
+	}); err != nil {
+		t.Fatalf("写入超时消息失败: %v", err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(hub.ServeWS))
+	defer srv.Close()
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+
+	// peer-a 与 peer-b 加入同一房间
+	connA, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("peer-a 连接失败: %v", err)
+	}
+	defer func() { _ = connA.Close() }()
+	_ = connA.WriteJSON(SignalEnvelope{
+		Type:     "join",
+		RoomCode: created.Code,
+		PeerID:   "peer-a",
+		Profile:  &PeerProfile{Name: "发送者A"},
+	})
+	var joinedA SignalEnvelope
+	if err := connA.ReadJSON(&joinedA); err != nil || joinedA.Type != "joined" {
+		t.Fatalf("peer-a 读取 joined 失败: %+v err=%v", joinedA, err)
+	}
+
+	connB, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("peer-b 连接失败: %v", err)
+	}
+	defer func() { _ = connB.Close() }()
+	_ = connB.WriteJSON(SignalEnvelope{
+		Type:     "join",
+		RoomCode: created.Code,
+		PeerID:   "peer-b",
+		Profile:  &PeerProfile{Name: "接收者B"},
+	})
+	var joinedB SignalEnvelope
+	if err := connB.ReadJSON(&joinedB); err != nil || joinedB.Type != "joined" {
+		t.Fatalf("peer-b 读取 joined 失败: %+v err=%v", joinedB, err)
+	}
+	// 消费掉 peer-a 收到的 peer_joined 通知
+	var peerJoinedNotice SignalEnvelope
+	if err := connA.ReadJSON(&peerJoinedNotice); err != nil || peerJoinedNotice.Type != "peer_joined" {
+		t.Fatalf("预期 peer-a 收到 peer_joined，实际: %+v err=%v", peerJoinedNotice, err)
+	}
+
+	// 用例 A：60 秒前消息允许撤回，历史缓存删除且全员收到 message_recalled
+	if err := connA.WriteJSON(SignalEnvelope{Type: "recall_message", MessageID: recentID}); err != nil {
+		t.Fatalf("发送撤回请求 A 失败: %v", err)
+	}
+	var recallA, recallB SignalEnvelope
+	if err := connA.ReadJSON(&recallA); err != nil || recallA.Type != "message_recalled" || recallA.MessageID != recentID {
+		t.Fatalf("用例 A 发送者应收到 message_recalled，实际: %+v err=%v", recallA, err)
+	}
+	if err := connB.ReadJSON(&recallB); err != nil || recallB.Type != "message_recalled" || recallB.MessageID != recentID {
+		t.Fatalf("用例 A 房内成员应收到 message_recalled，实际: %+v err=%v", recallB, err)
+	}
+	msgsAfterA, _ := hub.History().GetHistory(created.Code, days)
+	if len(msgsAfterA) != 1 || msgsAfterA[0].ID != expiredID {
+		t.Fatalf("用例 A 近期消息应已从缓存删除，仅剩超时消息，实际: %+v", msgsAfterA)
+	}
+
+	// 用例 C：纯 P2P 消息（服务端缓存不存在该 msgID）-> 照常向房内成员广播 message_recalled
+	p2pID := "msg-p2p-only-1"
+	if err := connA.WriteJSON(SignalEnvelope{Type: "recall_message", MessageID: p2pID}); err != nil {
+		t.Fatalf("发送撤回请求 C 失败: %v", err)
+	}
+	var recallCA, recallCB SignalEnvelope
+	if err := connA.ReadJSON(&recallCA); err != nil || recallCA.Type != "message_recalled" || recallCA.MessageID != p2pID {
+		t.Fatalf("用例 C 发送者应收到 message_recalled，实际: %+v err=%v", recallCA, err)
+	}
+	if err := connB.ReadJSON(&recallCB); err != nil || recallCB.Type != "message_recalled" || recallCB.MessageID != p2pID {
+		t.Fatalf("用例 C 房内成员应收到 message_recalled，实际: %+v err=%v", recallCB, err)
+	}
+
+	// 用例 B：160 秒前消息超过 150 秒时限 -> 拒绝撤回，保留缓存，仅发送者收到 RECALL_EXPIRED 错误，peer-b 收不到广播
+	if err := connA.WriteJSON(SignalEnvelope{Type: "recall_message", MessageID: expiredID}); err != nil {
+		t.Fatalf("发送撤回请求 B 失败: %v", err)
+	}
+	var errResp SignalEnvelope
+	if err := connA.ReadJSON(&errResp); err != nil {
+		t.Fatalf("用例 B 读取错误回包失败: %v", err)
+	}
+	if errResp.Type != "error" || errResp.ErrorCode != "RECALL_EXPIRED" {
+		t.Fatalf("用例 B 预期返回 error/RECALL_EXPIRED，实际: %+v", errResp)
+	}
+	msgsAfterB, _ := hub.History().GetHistory(created.Code, days)
+	if len(msgsAfterB) != 1 || msgsAfterB[0].ID != expiredID {
+		t.Fatalf("用例 B 超时消息应保留在历史缓存中，实际: %+v", msgsAfterB)
+	}
+	// 短暂等待确认 peer-b 未收到任何 message_recalled 广播
+	_ = connB.SetReadDeadline(time.Now().Add(120 * time.Millisecond))
+	var unexpected SignalEnvelope
+	if err := connB.ReadJSON(&unexpected); err == nil {
+		t.Fatalf("用例 B 房内其他成员不应收到任何消息，实际收到: %+v", unexpected)
+	}
+}

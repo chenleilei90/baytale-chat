@@ -2,7 +2,9 @@
 
 export type RoomMode = 'fixed' | 'ephemeral';
 
-export type ThemeMode = 'peach' | 'mint' | 'berry' | 'lime' | 'neon';
+export type ThemeMode = 'air' | 'mint' | 'berry' | 'peach' | 'lime';
+
+export type AppearanceMode = 'system' | 'light' | 'dark';
 
 export type PropThrowType = 'tomato' | 'flower' | 'freeze' | 'bomb';
 

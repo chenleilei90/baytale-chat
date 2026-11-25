@@ -1,5 +1,5 @@
 import React from 'react';
-import type { ThemeMode } from '../types';
+import type { AppearanceMode, ThemeMode } from '../types';
 import { THEME_OPTIONS } from '../lib/effects';
 
 interface SwitchProps {
@@ -9,7 +9,7 @@ interface SwitchProps {
   description?: string;
 }
 
-// Q弹拨动开关组件
+// iOS 风格 51×31 零描边开关组件
 export const Switch: React.FC<SwitchProps> = ({ checked, onChange, label, description }) => {
   return (
     <div
@@ -26,7 +26,9 @@ export const Switch: React.FC<SwitchProps> = ({ checked, onChange, label, descri
       }}
     >
       <div style={{ minWidth: 0 }}>
-        <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--text-main)' }}>{label}</div>
+        <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--text-primary)' }}>
+          {label}
+        </div>
         {description && (
           <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 1 }}>
             {description}
@@ -50,21 +52,63 @@ interface PalettePickerProps {
   onSelect: (theme: ThemeMode) => void;
 }
 
-// 5 款年轻灵感配色流光球切换器
+// 5 款纯色强调色切换器（双环阴影表达选中态）
 export const PalettePicker: React.FC<PalettePickerProps> = ({ theme, onSelect }) => {
   return (
-    <div className="palette-bar" title="切换多巴胺主题配色">
-      {THEME_OPTIONS.map((item) => (
-        <button
-          key={item.id}
-          type="button"
-          className={`theme-orb ${theme === item.id ? 'active' : ''}`}
-          style={{ background: item.orb }}
-          onClick={() => onSelect(item.id)}
-          title={`主题：${item.name}`}
-          aria-label={`切换主题为${item.name}`}
-        />
-      ))}
+    <div className="palette-bar" title="切换强调色" role="radiogroup" aria-label="强调色">
+      {THEME_OPTIONS.map((item) => {
+        const isActive = theme === item.id;
+        return (
+          <button
+            key={item.id}
+            type="button"
+            role="radio"
+            aria-checked={isActive}
+            className={`theme-orb ${isActive ? 'active' : ''}`}
+            style={{ backgroundColor: item.orb, color: item.orb }}
+            onClick={() => onSelect(item.id)}
+            title={`主题：${item.name}`}
+            aria-label={`切换强调色为${item.name}`}
+          />
+        );
+      })}
+    </div>
+  );
+};
+
+interface AppearancePickerProps {
+  appearance: AppearanceMode;
+  onSelect: (mode: AppearanceMode) => void;
+}
+
+const APPEARANCE_OPTIONS: { id: AppearanceMode; label: string }[] = [
+  { id: 'system', label: '跟随系统' },
+  { id: 'light', label: '浅色' },
+  { id: 'dark', label: '深色' },
+];
+
+// 外观模式分段切换器（跟随系统 / 浅色 / 深色）
+export const AppearancePicker: React.FC<AppearancePickerProps> = ({
+  appearance,
+  onSelect,
+}) => {
+  return (
+    <div className="appearance-picker" role="radiogroup" aria-label="外观模式">
+      {APPEARANCE_OPTIONS.map((item) => {
+        const isActive = appearance === item.id;
+        return (
+          <button
+            key={item.id}
+            type="button"
+            role="radio"
+            aria-checked={isActive}
+            className={`appearance-item ${isActive ? 'active' : ''}`}
+            onClick={() => onSelect(item.id)}
+          >
+            {item.label}
+          </button>
+        );
+      })}
     </div>
   );
 };

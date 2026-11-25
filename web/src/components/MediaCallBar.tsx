@@ -122,18 +122,17 @@ export const ScreenShareStage: React.FC<ScreenShareStageProps> = ({
   return (
     <div className="screen-stage-card">
       <div className="screen-stage-head">
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flexWrap: 'wrap' }}>
-          <span className="pill pill-emerald" style={{ height: 22, fontSize: 11 }}>
-            <MonitorUp size={11} /> 实时投屏中
+        <div className="screen-stage-meta">
+          <span className="pill pill-emerald screen-stage-badge">
+            <MonitorUp size={11} aria-hidden="true" /> 实时投屏中
           </span>
           {feeds.length > 1 ? (
-            <div style={{ display: 'flex', gap: 4 }}>
+            <div className="screen-stage-tabs">
               {feeds.map((f) => (
                 <button
                   key={f.id}
                   type="button"
-                  className={`btn btn-sm ${f.id === activeFeed.id ? 'btn-jelly' : 'btn-glass'}`}
-                  style={{ height: 24, fontSize: 11, padding: '0 8px' }}
+                  className={`btn btn-sm screen-stage-tab-btn ${f.id === activeFeed.id ? 'btn-primary' : 'btn-secondary'}`}
                   onClick={() => setSelectedId(f.id)}
                 >
                   {f.label}
@@ -141,42 +140,41 @@ export const ScreenShareStage: React.FC<ScreenShareStageProps> = ({
               ))}
             </div>
           ) : (
-            <span style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--text-main)' }}>
+            <span className="screen-stage-title">
               {activeFeed.label} 正在共享屏幕
             </span>
           )}
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <div className="screen-stage-actions">
           {activeFeed.isSelf && (
             <button
               type="button"
-              className="btn btn-danger btn-sm"
-              style={{ height: 25, fontSize: 11 }}
+              className="btn btn-danger btn-sm screen-stage-action-btn"
               onClick={onStopLocalScreen}
             >
-              <Square size={10} /> 停止共享
+              <Square size={10} aria-hidden="true" /> 停止共享
             </button>
           )}
           {!collapsed && (
             <button
               type="button"
-              className="btn btn-glass btn-sm"
-              style={{ height: 25, fontSize: 11 }}
+              className="btn btn-secondary btn-sm screen-stage-action-btn"
               onClick={handleFullscreen}
               title="全屏观看投屏"
+              aria-label="全屏观看投屏"
             >
-              <Maximize2 size={11} /> 全屏
+              <Maximize2 size={11} aria-hidden="true" /> 全屏
             </button>
           )}
           <button
             type="button"
-            className="btn btn-ghost btn-icon"
-            style={{ width: 25, height: 25 }}
+            className="btn btn-ghost btn-icon screen-stage-collapse-btn"
             onClick={() => setCollapsed((v) => !v)}
             title={collapsed ? '展开投屏画面' : '折叠投屏画面'}
+            aria-label={collapsed ? '展开投屏画面' : '折叠投屏画面'}
           >
-            {collapsed ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
+            {collapsed ? <ChevronDown size={14} aria-hidden="true" /> : <ChevronUp size={14} aria-hidden="true" />}
           </button>
         </div>
       </div>

@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import type {
+  AppearanceMode,
   PendingNearbyInvite,
   RecentRoom,
   RoomMode,
@@ -10,6 +11,7 @@ import type {
 } from './types';
 import {
   clearRecentRooms,
+  loadAppearance,
   loadRecentRooms,
   loadSavedFixedRooms,
   loadTheme,
@@ -17,6 +19,7 @@ import {
   loadUserProfile,
   removeRecentRoom,
   removeSavedFixedRoom,
+  saveAppearance,
   saveTheme,
   saveUserPrefs,
   saveUserProfile,
@@ -54,10 +57,15 @@ const FALLBACK_CONFIG: ServerConfig = {
   iceServers: [{ urls: ['stun:stun.cloudflare.com:3478', 'stun:stun.l.google.com:19302'] }],
 };
 
-// BayChat v3 主入口：驱动多巴胺 5 色主题切换、免账号百变身份、大厅与创意聊天室联动
+// BayChat 主入口：驱动 5 色强调色与浅/深外观切换、免账号身份、大厅与聊天室联动
 export const App: React.FC = () => {
   const [profile, setProfile] = useState<UserProfile>(() => loadUserProfile());
   const [theme, setTheme] = useState<ThemeMode>(() => loadTheme());
+  const [appearance, setAppearance] = useState<AppearanceMode>(() => loadAppearance());
+  const [systemDark, setSystemDark] = useState<boolean>(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return false;
+    return window.matchMedia('(prefers-color-scheme: dark)').matches;
+  });
   const [prefs, setPrefs] = useState<UserPrefs>(() => loadUserPrefs());
   const [savedFixedRooms, setSavedFixedRooms] = useState<SavedFixedRoom[]>(() =>
     loadSavedFixedRooms()
@@ -86,9 +94,32 @@ export const App: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    document.documentElement.setAttribute('data-theme', theme);
+    if (typeof window === 'undefined' || !window.matchMedia) return;
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    setSystemDark(mq.matches);
+    const onChange = (e: MediaQueryListEvent) => setSystemDark(e.matches);
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, []);
+
+  const resolvedAppearance: 'light' | 'dark' =
+    appearance === 'system' ? (systemDark ? 'dark' : 'light') : appearance;
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-accent', theme);
     saveTheme(theme);
   }, [theme]);
+
+  useEffect(() => {
+    const root = document.documentElement;
+    root.setAttribute('data-appearance', resolvedAppearance);
+    saveAppearance(appearance);
+    const bgColor = getComputedStyle(root).getPropertyValue('--bg').trim();
+    const metaThemeColor = document.querySelector('meta[name="theme-color"]');
+    if (metaThemeColor && bgColor) {
+      metaThemeColor.setAttribute('content', bgColor);
+    }
+  }, [appearance, resolvedAppearance]);
 
   useEffect(() => {
     fetchServerConfig(profile.clientId)
@@ -306,7 +337,7 @@ export const App: React.FC = () => {
   const handleSaveProfile = (next: UserProfile) => {
     saveUserProfile(next);
     setProfile(next);
-    pushToast('✨ 已换上新身份');
+    pushToast('已换上新身份');
   };
 
   const handleUpdatePrefs = (next: UserPrefs) => {
@@ -325,7 +356,9 @@ export const App: React.FC = () => {
         <PickupPage
           code={pickupRouteCode}
           theme={theme}
+          appearance={appearance}
           onSelectTheme={setTheme}
+          onSelectAppearance={setAppearance}
           onBackToLobby={handleBackFromPickupPage}
         />
       ) : null}
@@ -345,10 +378,12 @@ export const App: React.FC = () => {
             profile={profile}
             prefs={prefs}
             theme={theme}
+            appearance={appearance}
             serverConfig={serverConfig}
             savedFixedRooms={savedFixedRooms}
             recentRooms={recentRooms}
             onSelectTheme={setTheme}
+            onSelectAppearance={setAppearance}
             onUpdatePrefs={handleUpdatePrefs}
             onEditProfile={() => setProfileModalOpen(true)}
             onSwitchRoom={handleSwitchRoom}
@@ -367,6 +402,7 @@ export const App: React.FC = () => {
           profile={profile}
           prefs={prefs}
           theme={theme}
+          appearance={appearance}
           isActiveLobby={!pickupRouteCode && (!activeRoom || roomMinimized)}
           serverConfig={serverConfig}
           savedFixedRooms={savedFixedRooms}
@@ -374,6 +410,7 @@ export const App: React.FC = () => {
           initialJoinCode={initialJoinCode}
           initialNotice={lobbyNotice}
           onSelectTheme={setTheme}
+          onSelectAppearance={setAppearance}
           onUpdatePrefs={handleUpdatePrefs}
           onQuickRandomProfile={handleSaveProfile}
           onEditProfile={() => setProfileModalOpen(true)}
@@ -391,13 +428,13 @@ export const App: React.FC = () => {
         <div className="minimized-room-dock" onClick={() => setRoomMinimized(false)}>
           <span className="status-dot emerald" />
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div className="mono" style={{ fontSize: 13.5, fontWeight: 800 }}>
+            <div className="mono" style={{ fontSize: 13.5, fontWeight: 700 }}>
               房间 #{activeRoom.code} 后台运行中
             </div>
             <div
               style={{
                 fontSize: 11.5,
-                color: 'var(--text-sub)',
+                color: 'var(--text-secondary)',
                 overflow: 'hidden',
                 textOverflow: 'ellipsis',
                 whiteSpace: 'nowrap',

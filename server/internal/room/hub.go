@@ -26,6 +26,7 @@ const (
 	ephemeralIdleGrace     = 12 * time.Second
 	ephemeralInitialWindow = 45 * time.Second
 	burnedCodeRetention    = 24 * time.Hour
+	recallMaxWindowMs      = int64(150_000) // 消息撤回统一时限：120 秒 + 30 秒端到端时钟宽限
 )
 
 // PeerProfile 表示房间内成员的自定义昵称与头像信息
@@ -1605,13 +1606,34 @@ func (h *Hub) recallMessageInternal(sender *peerConn, msgID string) {
 	}
 	actorName := sender.profile.Name
 	retentionDays := rm.RetentionDays
+	nowMs := h.now().UnixMilli()
 	peers := make([]*peerConn, 0, len(rm.peers))
 	for _, p := range rm.peers {
 		peers = append(peers, p)
 	}
 	h.mu.Unlock()
 
-	// 校验归属权：若消息在服务器缓存中属于他人，严禁广播撤回事件；阅后即焚（无缓存）时仍广播并由各终端二次校验发送者
+	// 若服务端历史缓存中存在该消息，先校验发送者归属与 2 分钟撤回时限（120s + 30s 宽限）
+	cachedMsgs, _ := h.historyStore.GetHistory(rm.Code, retentionDays)
+	for _, m := range cachedMsgs {
+		if m.ID != msgID {
+			continue
+		}
+		if sender.id != "" && m.SenderID != sender.id {
+			return
+		}
+		if m.Timestamp > 0 && nowMs-m.Timestamp > recallMaxWindowMs {
+			h.sendEnvelope(sender, SignalEnvelope{
+				Type:      "error",
+				ErrorCode: "RECALL_EXPIRED",
+				Error:     "消息已超过 2 分钟，无法撤回",
+			})
+			return
+		}
+		break
+	}
+
+	// 校验归属权并物理删除缓存；阅后即焚或纯 P2P 未留存消息仍照常广播，由接收端自行判断时限
 	meta, _, forbidden := h.historyStore.DeleteMessage(rm.Code, msgID, sender.id, retentionDays)
 	if forbidden {
 		return

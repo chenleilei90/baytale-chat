@@ -1,0 +1,980 @@
+/* ==========================================================================
+   BayChat 2.0 大厅、取件页与辅助弹窗专属样式
+   遵循 Bay Design 2.0 红线：纯色层级阶差 · 零全局描边 · 零渐变 · 零毛玻璃
+   ========================================================================== */
+
+/* 页面主画布容器（纯色背景，无装饰伪元素） */
+.lobby-shell {
+  position: relative;
+  width: 100%;
+  max-width: 100vw;
+  height: 100%;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+/* 顶部导航栏右侧控制区 */
+.lobby-nav-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex-shrink: 0;
+}
+
+.lobby-theme-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.lobby-user-name {
+  font-size: var(--fs-callout);
+  font-weight: 700;
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+
+/* 大厅双栏对齐 */
+.lobby-stage-start {
+  align-items: start;
+}
+
+/* 顶部状态概览区 */
+.lobby-hero-clickable {
+  cursor: pointer;
+}
+
+.lobby-hero-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.lobby-hero-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.lobby-hero-title {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text-primary);
+}
+
+.lobby-hero-desc {
+  font-size: var(--fs-footnote);
+  color: var(--text-secondary);
+  margin-top: 4px;
+  line-height: 1.5;
+}
+
+/* 大厅主表单 */
+.lobby-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.lobby-field-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.lobby-field-hint {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.lobby-field-label {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.lobby-code-input {
+  height: 54px;
+  font-size: var(--fs-headline);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  padding-right: 116px;
+}
+
+.lobby-input-suffix {
+  right: 8px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.lobby-clear-btn {
+  padding: 0 6px;
+}
+
+.lobby-cta-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.lobby-cta-primary {
+  flex: 1;
+  min-width: 180px;
+}
+
+.lobby-control-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-top: 2px;
+}
+
+.lobby-advanced-toggle {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.lobby-advanced-toggle.open {
+  color: var(--accent);
+}
+
+.lobby-advanced-summary {
+  font-size: var(--fs-footnote);
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.lobby-advanced-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding-top: 14px;
+  border-top: 0.5px solid var(--separator);
+}
+
+.candy-badge-ephemeral {
+  background: var(--warning);
+  color: var(--on-accent);
+}
+
+.candy-badge-fixed {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.candy-card-title {
+  font-size: var(--fs-callout);
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.candy-card-desc {
+  font-size: var(--fs-footnote);
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+
+.lobby-capacity-seg {
+  height: 44px;
+  align-items: center;
+}
+
+/* 右侧副栏卡片 */
+.lobby-aside {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.lobby-bento-card {
+  padding: 18px;
+}
+
+.lobby-bento-card-lg {
+  padding: 20px;
+}
+
+.lobby-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.lobby-card-head-lg {
+  margin-bottom: 14px;
+}
+
+.lobby-card-title {
+  font-size: var(--fs-callout);
+  font-weight: 700;
+  color: var(--text-primary);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.lobby-card-title-icon {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.lobby-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.lobby-profile-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.lobby-avatar-trigger {
+  background: transparent;
+  padding: 0;
+  border-radius: 50%;
+  cursor: pointer;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.lobby-inline-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.lobby-profile-info {
+  min-width: 0;
+  flex: 1;
+}
+
+.lobby-profile-name {
+  font-size: var(--fs-headline);
+  font-weight: 700;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lobby-profile-sub {
+  font-size: var(--fs-footnote);
+  color: var(--text-muted);
+  margin-top: 3px;
+}
+
+.lobby-clear-recent-btn {
+  height: 26px;
+  padding: 0 8px;
+  font-size: var(--fs-footnote);
+}
+
+/* 最近与常驻收藏列表项 */
+.lobby-room-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.lobby-room-item {
+  padding: 10px 12px;
+  border-radius: var(--r-md);
+  background: var(--fill);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.lobby-room-meta {
+  min-width: 0;
+  flex: 1;
+}
+
+.lobby-room-code {
+  font-size: var(--fs-callout);
+  font-weight: 700;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.lobby-room-lock {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.lobby-room-sub {
+  font-size: var(--fs-caption);
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.lobby-room-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+/* 无描边空态卡片 */
+.lobby-empty-card {
+  padding: 16px 14px;
+  border-radius: var(--r-md);
+  background: var(--fill);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.lobby-empty-title {
+  font-size: var(--fs-subhead);
+  font-weight: 600;
+  color: var(--text-primary);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.lobby-empty-desc {
+  font-size: var(--fs-footnote);
+  color: var(--text-secondary);
+  line-height: 1.55;
+}
+
+/* 离线取件码入口卡片 */
+.lobby-pickup-desc {
+  font-size: var(--fs-footnote);
+  color: var(--text-secondary);
+  margin-bottom: 12px;
+  line-height: 1.5;
+}
+
+.lobby-two-btn-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+/* 附近设备发现区 */
+.lobby-nearby-box {
+  margin-top: 10px;
+}
+
+.lobby-nearby-empty {
+  padding: 12px;
+  border-radius: var(--r-sm);
+  background: var(--fill);
+  font-size: var(--fs-footnote);
+  color: var(--text-secondary);
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  line-height: 1.5;
+}
+
+.lobby-nearby-strip {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.lobby-nearby-card {
+  flex-direction: column;
+  height: auto;
+  padding: 10px 12px;
+  min-width: 88px;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+.lobby-nearby-name {
+  font-size: var(--fs-footnote);
+  font-weight: 700;
+  max-width: 78px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+
+.lobby-nearby-plat {
+  font-size: var(--fs-caption);
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+/* 图标按钮通用触摸热区（桌面紧凑 30px，移动端自动扩展 >= 44px） */
+.lobby-touch-icon {
+  width: 30px;
+  height: 30px;
+}
+
+.modal-close-btn {
+  width: 34px;
+  height: 34px;
+}
+
+/* ==========================================================================
+   弹窗通用布局与二维码白色静区
+   ========================================================================== */
+.modal-sheet-sm {
+  max-width: 380px;
+}
+
+.modal-sheet-md {
+  max-width: 400px;
+}
+
+.modal-sheet-lg {
+  max-width: 480px;
+}
+
+.modal-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.modal-card-panel {
+  padding: 20px 16px;
+  border-radius: var(--r-lg);
+  background: var(--fill);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+}
+
+.modal-pills-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+/* 深色模式下强制白色静区与高对比度 */
+.qr-quiet-frame {
+  background: #ffffff;
+  padding: 12px;
+  border-radius: var(--r-md);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.qr-quiet-frame img {
+  display: block;
+}
+
+.qr-img-invite {
+  width: 172px;
+  height: 172px;
+}
+
+.qr-img-pickup {
+  width: 164px;
+  height: 164px;
+}
+
+.modal-code-box {
+  text-align: center;
+}
+
+.modal-code-lg {
+  font-size: 30px;
+  color: var(--text-primary);
+}
+
+.modal-code-md {
+  font-size: 28px;
+  color: var(--text-primary);
+}
+
+.modal-sub-caption {
+  font-size: var(--fs-footnote);
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
+.modal-actions-end {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.modal-body-text {
+  margin: 0;
+  font-size: var(--fs-callout);
+  color: var(--text-secondary);
+  line-height: 1.55;
+}
+
+.modal-invite-peer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+}
+
+.modal-invite-info {
+  min-width: 0;
+  flex: 1;
+}
+
+.modal-invite-name {
+  font-size: var(--fs-body);
+  font-weight: 700;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.modal-invite-desc {
+  font-size: var(--fs-footnote);
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+.modal-head-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 个人身份名片弹窗 */
+.profile-preview-card {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  padding: 14px;
+  border-radius: var(--r-md);
+  background: var(--fill);
+}
+
+.profile-preview-actions {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.profile-btn-row {
+  display: flex;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.profile-hint-text {
+  font-size: var(--fs-footnote);
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+/* ==========================================================================
+   取件码弹窗与取件独立页
+   ========================================================================== */
+.pickup-dropzone {
+  padding: 20px 14px;
+  border-radius: var(--r-md);
+  background: var(--fill);
+  text-align: center;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  transition: background-color 150ms ease;
+}
+
+.pickup-dropzone:hover:not(.disabled) {
+  background: var(--fill-strong);
+}
+
+.pickup-dropzone.disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.pickup-dropzone-icon {
+  color: var(--accent);
+}
+
+.pickup-dropzone-title {
+  font-size: var(--fs-callout);
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.pickup-dropzone-sub {
+  font-size: var(--fs-footnote);
+  color: var(--text-muted);
+}
+
+.pickup-file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 168px;
+  overflow-y: auto;
+}
+
+.pickup-file-row {
+  padding: 8px 10px;
+  border-radius: var(--r-sm);
+  background: var(--fill);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.pickup-file-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.pickup-file-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.pickup-file-size {
+  font-size: var(--fs-caption);
+  color: var(--text-muted);
+}
+
+.pickup-file-remove {
+  width: 24px;
+  height: 24px;
+}
+
+.pickup-my-section {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 0.5px solid var(--separator);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pickup-my-title {
+  font-size: var(--fs-subhead);
+  font-weight: 700;
+  color: var(--text-secondary);
+}
+
+.pickup-my-row {
+  padding: 9px 12px;
+  border-radius: var(--r-md);
+  background: var(--fill);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.pickup-code-input {
+  height: 50px;
+  font-size: 20px;
+  font-weight: 700;
+  text-align: center;
+  letter-spacing: 0.2em;
+}
+
+.pickup-action-row {
+  display: flex;
+  gap: 8px;
+}
+
+.pickup-action-flex {
+  flex: 1;
+}
+
+/* 长文件名安全截断（主干省略，扩展名始终完整保留） */
+.filename-split {
+  display: flex;
+  align-items: baseline;
+  min-width: 0;
+  max-width: 100%;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.filename-split-sm {
+  font-size: 12.5px;
+}
+
+.filename-split-md {
+  font-size: var(--fs-callout);
+}
+
+.filename-stem {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.filename-ext {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+/* /p/{code} 取件独立页 */
+.pickup-nav-title {
+  font-size: var(--fs-body);
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.pickup-page-wrap {
+  max-width: 560px;
+  margin: 24px auto;
+  width: 100%;
+}
+
+.pickup-page-card {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.pickup-state-box {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-items: center;
+  justify-content: center;
+  padding: 28px 12px;
+  text-align: center;
+}
+
+.pickup-state-icon {
+  color: var(--text-muted);
+}
+
+.pickup-state-icon-accent {
+  color: var(--accent);
+}
+
+.pickup-state-title {
+  font-size: var(--fs-body);
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.pickup-state-desc {
+  font-size: var(--fs-footnote);
+  color: var(--text-secondary);
+}
+
+.pickup-unlock-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-headline);
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.pickup-info-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.pickup-code-display {
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--text-primary);
+}
+
+.pickup-download-row {
+  padding: 12px 14px;
+  border-radius: var(--r-md);
+  background: var(--fill);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.pickup-download-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+}
+
+.pickup-download-meta {
+  font-size: var(--fs-caption);
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.pickup-download-btn {
+  text-decoration: none;
+  flex-shrink: 0;
+}
+
+/* 加载旋转动画 */
+.bay-spin {
+  animation: baySpin 1s linear infinite;
+}
+
+@keyframes baySpin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ==========================================================================
+   移动端响应式与最小 44px 触控热区规范（BM-09.02）
+   ========================================================================== */
+@media (max-width: 880px) {
+  .lobby-top-nav {
+    height: auto;
+    min-height: 52px;
+    padding: 8px 12px;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    row-gap: 8px;
+    column-gap: 8px;
+    max-width: calc(100vw - 20px);
+    box-sizing: border-box;
+  }
+
+  /* 移动端顶栏第一行：左侧品牌/返回按钮 + 右侧头像/取件码 */
+  .lobby-top-nav .brand-pill {
+    order: 1;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .lobby-nav-actions {
+    display: contents;
+  }
+
+  .lobby-top-nav .user-chip {
+    order: 2;
+    flex-shrink: 0;
+    min-width: 44px;
+    min-height: 44px;
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    justify-content: center;
+  }
+
+  /* 移动端顶栏第二行：外观分段切换器 + 强调色圆点独立成行，绝不横向溢出 */
+  .lobby-theme-controls {
+    order: 3;
+    width: 100%;
+    max-width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding-top: 8px;
+    border-top: 0.5px solid var(--separator);
+  }
+
+  .lobby-theme-controls .appearance-picker,
+  .lobby-theme-controls .palette-bar {
+    max-width: 100%;
+  }
+
+  .bento-scroll,
+  .bento-stage,
+  .glass-bento {
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  .bento-scroll {
+    overflow-x: hidden;
+  }
+
+  .lobby-touch-icon,
+  .modal-close-btn,
+  .pickup-file-remove {
+    min-width: 44px;
+    min-height: 44px;
+    width: 44px;
+    height: 44px;
+  }
+
+  .lobby-touch-pill {
+    min-height: 44px;
+    padding: 0 12px;
+  }
+
+  .lobby-clear-btn {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .lobby-clear-recent-btn {
+    min-height: 44px;
+    padding: 0 12px;
+  }
+
+  .avatar-cell {
+    min-height: 44px;
+  }
+
+  .pickup-page-wrap {
+    margin: 8px auto;
+  }
+}
+
+@media (max-width: 560px) {
+  .lobby-theme-controls {
+    justify-content: flex-start;
+  }
+
+  .lobby-cta-primary {
+    min-width: 0;
+    width: 100%;
+  }
+}

@@ -7,11 +7,9 @@ import {
   Copy,
   Trash2,
   Send,
-  Sparkles,
   Dices,
   ClipboardPaste,
   AlertCircle,
-  Wand2,
   Clock,
   SlidersHorizontal,
   ChevronDown,
@@ -23,8 +21,16 @@ import {
   Smartphone,
   Laptop,
   KeyRound,
+  UserRound,
+  Compass,
+  HardDrive,
+  Headphones,
+  PenTool,
+  Timer,
+  Image as ImageIcon,
 } from 'lucide-react';
 import type {
+  AppearanceMode,
   NearbyDevice,
   NearbyInviteNotice,
   PendingNearbyInvite,
@@ -50,13 +56,14 @@ import { copyTextToClipboard, formatRelativeTime } from '../lib/platform';
 import { generateRandomName, pickRandomPresetAvatar } from '../lib/avatar';
 import type { UserPrefs } from '../lib/storage';
 import { Avatar } from './Avatar';
-import { PalettePicker, Switch } from './Controls';
+import { AppearancePicker, PalettePicker, Switch } from './Controls';
 import { PickupLookupModal, PickupSendModal } from './PickupModal';
 
 interface LobbyProps {
   profile: UserProfile;
   prefs: UserPrefs;
   theme: ThemeMode;
+  appearance: AppearanceMode;
   isActiveLobby: boolean;
   serverConfig: ServerConfig | null;
   savedFixedRooms: SavedFixedRoom[];
@@ -64,6 +71,7 @@ interface LobbyProps {
   initialJoinCode?: string;
   initialNotice?: string;
   onSelectTheme: (theme: ThemeMode) => void;
+  onSelectAppearance: (mode: AppearanceMode) => void;
   onUpdatePrefs: (next: UserPrefs) => void;
   onQuickRandomProfile: (next: UserProfile) => void;
   onEditProfile: () => void;
@@ -99,11 +107,12 @@ const FILE_LIMIT_PRESETS = [
   { mb: 0, label: '不限制' },
 ];
 
-// 多巴胺流光 Bento 启动台：声波脉冲雷达 + 5色主题球 + 糖果模式卡 + 创意玩法工坊
+// BayChat 大厅主视图：智能直达入口 + 外观/强调色控制 + 身份名片、历史收藏与附近设备发现
 export const Lobby: React.FC<LobbyProps> = ({
   profile,
   prefs,
   theme,
+  appearance,
   isActiveLobby,
   serverConfig,
   savedFixedRooms,
@@ -111,6 +120,7 @@ export const Lobby: React.FC<LobbyProps> = ({
   initialJoinCode,
   initialNotice,
   onSelectTheme,
+  onSelectAppearance,
   onUpdatePrefs,
   onQuickRandomProfile,
   onEditProfile,
@@ -127,7 +137,7 @@ export const Lobby: React.FC<LobbyProps> = ({
   const [showAdvanced, setShowAdvanced] = useState(false);
 
   const [mode, setMode] = useState<RoomMode>('ephemeral');
-  const [allowRandom, setAllowRandom] = useState(false); // 默认私密：不开放陌生人随机串门
+  const [allowRandom, setAllowRandom] = useState(false); // 默认私密：不开放陌生人随机加入
   const [privatePairOnly, setPrivatePairOnly] = useState(false);
   const [retentionDays, setRetentionDays] = useState(1);
   const [maxFileSizeMB, setMaxFileSizeMB] = useState<number>(
@@ -138,7 +148,7 @@ export const Lobby: React.FC<LobbyProps> = ({
   const [randomJoining, setRandomJoining] = useState(false);
   const [errorText, setErrorText] = useState(initialNotice || '');
 
-  // 不存在常驻房时的创建确认弹窗（B6）
+  // 不存在常驻房时的创建确认弹窗
   const [confirmCreateCode, setConfirmCreateCode] = useState<string | null>(null);
 
   // 取件码弹窗状态
@@ -268,7 +278,7 @@ export const Lobby: React.FC<LobbyProps> = ({
     else if (nextMode === 'fixed' && retentionDays === 1) setRetentionDays(3);
   };
 
-  // 单入口智能直达：留空一键开房；填口令/链接时先探测是否存在，6位数字不存在则报错，自定义码弹窗确认后建房
+  // 单入口智能直达：留空直接创建房间；填口令/链接时先探测是否存在，6位数字不存在则报错，自定义码弹窗确认后建房
   const handleUnifiedSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorText('');
@@ -279,7 +289,7 @@ export const Lobby: React.FC<LobbyProps> = ({
     setSubmitting(true);
     try {
       if (!code) {
-        // 留空：零配置秒开新房
+        // 留空：零配置直接创建新房间
         const summary = await createRoom({
           mode,
           password: cleanPwd || undefined,
@@ -317,7 +327,7 @@ export const Lobby: React.FC<LobbyProps> = ({
         if (existing.hasPassword) {
           if (!cleanPwd) {
             setNeedPassword(true);
-            setErrorText(`房间 #${code} 设有访问暗号，请输入密码后进入`);
+            setErrorText(`房间 #${code} 设有访问密码，请输入密码后进入`);
             return;
           }
           await verifyRoomPassword(code, cleanPwd);
@@ -363,7 +373,7 @@ export const Lobby: React.FC<LobbyProps> = ({
         retentionDays,
         maxFileSizeMB,
       });
-      onToast(`✨ 已创建专属常驻房间 #${summary.code}`);
+      onToast(`已创建专属常驻房间 #${summary.code}`);
       onEnterRoom(summary.code, cleanPwd, summary.mode, saveToFavorites, summary.ownerToken);
     } catch (err) {
       setErrorText(err instanceof Error ? err.message : '创建常驻房间失败');
@@ -382,7 +392,7 @@ export const Lobby: React.FC<LobbyProps> = ({
         fromName: profile.name,
         fromAvatar: profile.avatar,
       });
-      onToast(`📡 已向 ${dev.name} 发送传文件邀请`);
+      onToast(`已向 ${dev.name} 发送传输邀请`);
       onEnterRoom(res.room.code, '', 'ephemeral', false, res.ownerToken, {
         inviteId: res.inviteId,
         targetName: dev.name,
@@ -405,7 +415,7 @@ export const Lobby: React.FC<LobbyProps> = ({
         accept,
       });
       if (accept && res.roomCode) {
-        onToast(`📡 已接受 ${inv.fromName} 的邀请，正在进入房间`);
+        onToast(`已接受 ${inv.fromName} 的邀请，正在进入房间`);
         onEnterRoom(res.roomCode, '', 'ephemeral', false);
       } else if (!accept) {
         onToast(`已婉拒 ${inv.fromName} 的传输邀请`);
@@ -420,7 +430,7 @@ export const Lobby: React.FC<LobbyProps> = ({
     setRandomJoining(true);
     try {
       const target = await pickRandomPublicRoom();
-      onToast(`🎲 已为你空降免密房间 #${target.code}`);
+      onToast(`已进入公开房间 #${target.code}`);
       onEnterRoom(target.code, '', target.mode, false);
     } catch (err) {
       setErrorText(err instanceof Error ? err.message : '当前暂无可随机进入的免密公开房间');
@@ -502,12 +512,12 @@ export const Lobby: React.FC<LobbyProps> = ({
   const domainDisplay = serverConfig?.domain || window.location.host;
 
   return (
-    <div className="aurora-canvas">
-      {/* 顶部流光毛玻璃胶囊导航 */}
-      <header className="top-glass-nav">
+    <div className="lobby-shell">
+      {/* 顶部纯色导航栏 */}
+      <header className="top-glass-nav lobby-top-nav">
         <div className="brand-pill">
           <div className="brand-jelly-logo">
-            <Send size={18} />
+            <Send size={18} aria-hidden="true" />
           </div>
           <div>
             <div className="brand-title-text">湾聊 · BayChat</div>
@@ -517,73 +527,68 @@ export const Lobby: React.FC<LobbyProps> = ({
           </div>
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <PalettePicker theme={theme} onSelect={onSelectTheme} />
+        <div className="lobby-nav-actions">
+          <div className="lobby-theme-controls">
+            <AppearancePicker appearance={appearance} onSelect={onSelectAppearance} />
+            <PalettePicker theme={theme} onSelect={onSelectTheme} />
+          </div>
 
           <button
             type="button"
-            className="user-chip"
+            className="user-chip lobby-touch-pill"
             onClick={onEditProfile}
-            title="点击定制专属头像与昵称"
+            title="点击编辑个人头像与昵称"
+            aria-label={`编辑个人名片：${profile.name}`}
           >
             <Avatar name={profile.name} avatar={profile.avatar} size={32} />
-            <span
-              className="hide-mobile"
-              style={{
-                fontSize: 13.5,
-                fontWeight: 700,
-                maxWidth: 110,
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-              }}
-            >
+            <span className="hide-mobile lobby-user-name">
               {profile.name}
             </span>
           </button>
         </div>
       </header>
 
-      {/* 主体多巴胺双栏 Bento 舞台 */}
+      {/* 主体双栏工作区 */}
       <main className="bento-scroll">
-        <div className="bento-stage" style={{ alignItems: 'start' }}>
-          {/* 左主卡：声波引力头图 + 房间发射台 */}
+        <div className="bento-stage lobby-stage-start">
+          {/* 左主卡：连接状态概览 + 房间直达入口 */}
           <section className="glass-bento">
             <div className="sonic-hero">
-              <div className="sonic-rings" onClick={onEditProfile} style={{ cursor: 'pointer' }}>
+              <button
+                type="button"
+                className="sonic-rings lobby-avatar-trigger"
+                onClick={onEditProfile}
+                aria-label="编辑个人身份名片"
+              >
                 <Avatar name={profile.name} avatar={profile.avatar} size={46} />
-              </div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                  <span style={{ fontSize: 18, fontWeight: 800, letterSpacing: '-0.02em' }}>
-                    把文件与灵感，嗖一下传过去 ✨
+              </button>
+              <div className="lobby-hero-content">
+                <div className="lobby-hero-title-row">
+                  <span className="lobby-hero-title">
+                    跨设备文件直传与即时协作
                   </span>
                   <span className="pill pill-emerald">
-                    <span className="status-dot emerald" /> P2P 满速直连
+                    <span className="status-dot emerald" aria-hidden="true" /> P2P 点对点直连
                   </span>
                 </div>
-                <div style={{ fontSize: 12.5, color: 'var(--text-sub)', marginTop: 4 }}>
-                  跨公网终端直连 + TURN 智能兜底，支持 GB 级大文件直传、实时聊天、语音连麦与协作白板
+                <div className="lobby-hero-desc">
+                  跨网络终端直连与 TURN 中继兜底，支持大文件直传、实时聊天、语音通话与协作白板
                 </div>
               </div>
             </div>
 
-            <form
-              onSubmit={handleUnifiedSubmit}
-              style={{ display: 'flex', flexDirection: 'column', gap: 14 }}
-            >
-              {/* 单入口超级输入框：留空一键开房，填口令有就进/无就建 */}
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <form onSubmit={handleUnifiedSubmit} className="lobby-form">
+              {/* 单入口智能输入：留空直接新建房间，填口令有就进/无就建 */}
+              <div className="lobby-field-group">
                 <div className="lobby-field-head">
-                  <span>⚡ 快速直达口令 / 基地号 / 邀请链接</span>
-                  <span style={{ color: 'var(--accent)', fontWeight: 700 }}>
-                    {hasInputCode ? '输入口令直达进入' : '留空点按钮 0.5 秒开房'}
+                  <span>房间口令或邀请链接</span>
+                  <span className="lobby-field-hint">
+                    {hasInputCode ? '输入口令直接进入' : '留空点击即可新建房间'}
                   </span>
                 </div>
                 <div className="input-group">
                   <input
-                    className="field-input with-suffix mono"
-                    style={{ height: 54, fontSize: 16, fontWeight: 800, letterSpacing: '0.02em', paddingRight: 108 }}
+                    className="field-input with-suffix mono lobby-code-input"
                     value={roomInput}
                     onChange={(e) => {
                       setRoomInput(e.target.value);
@@ -591,30 +596,31 @@ export const Lobby: React.FC<LobbyProps> = ({
                       if (!e.target.value.trim()) setNeedPassword(false);
                     }}
                     onBlur={() => void probeRoomInput(roomInput)}
-                    placeholder="留空秒开，或输 849205 / bay-8888"
+                    placeholder="留空新建房间，或输入 849205 / bay-8888"
+                    aria-label="房间口令或邀请链接"
                   />
-                  <div className="input-suffix" style={{ right: 8, display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <div className="input-suffix lobby-input-suffix">
                     {roomInput && (
                       <button
                         type="button"
-                        className="btn btn-ghost btn-sm"
-                        style={{ padding: '0 6px' }}
+                        className="btn btn-ghost btn-sm lobby-clear-btn"
                         onClick={() => {
                           setRoomInput('');
                           setNeedPassword(false);
                           setErrorText('');
                         }}
                         title="清空"
+                        aria-label="清空房间口令"
                       >
-                        <X size={14} />
+                        <X size={14} aria-hidden="true" />
                       </button>
                     )}
                     <button
                       type="button"
-                      className="btn btn-soft btn-sm"
+                      className="btn btn-soft btn-sm lobby-touch-pill"
                       onClick={() => void handlePasteClipboard()}
                     >
-                      <ClipboardPaste size={13} /> 粘贴
+                      <ClipboardPaste size={13} aria-hidden="true" /> 粘贴
                     </button>
                   </div>
                 </div>
@@ -622,13 +628,13 @@ export const Lobby: React.FC<LobbyProps> = ({
 
               {/* 仅当探测到加密房或未展开高级设置但已填密码时展示 */}
               {(needPassword || (!showAdvanced && hasPasswordInput)) && (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                  <span style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--text-sub)' }}>
-                    输入房间暗号密码
+                <div className="lobby-field-group">
+                  <span className="lobby-field-label">
+                    输入房间访问密码
                   </span>
                   <div className="input-group">
                     <span className="input-prefix-icon">
-                      <Lock size={15} />
+                      <Lock size={15} aria-hidden="true" />
                     </span>
                     <input
                       className="field-input with-prefix"
@@ -638,7 +644,7 @@ export const Lobby: React.FC<LobbyProps> = ({
                         setRoomPassword(e.target.value);
                         setErrorText('');
                       }}
-                      placeholder="输入对方告知的暗号..."
+                      placeholder="输入对方告知的密码..."
                       autoFocus
                     />
                   </div>
@@ -647,118 +653,104 @@ export const Lobby: React.FC<LobbyProps> = ({
 
               {errorText && (
                 <div className="alert-strip">
-                  <AlertCircle size={15} />
+                  <AlertCircle size={15} aria-hidden="true" />
                   <span>{errorText}</span>
                 </div>
               )}
 
-              {/* 主行动栏：一键秒开/直达 + 随机串门 */}
-              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+              {/* 主行动栏：新建/直达房间 + 随机加入 */}
+              <div className="lobby-cta-row">
                 <button
                   type="submit"
-                  className="btn btn-jelly btn-xl"
-                  style={{ flex: 1, minWidth: 180 }}
+                  className="btn btn-jelly btn-xl lobby-cta-primary"
                   disabled={submitting || randomJoining}
                 >
-                  <Sparkles size={17} />
                   <span>
                     {submitting
-                      ? '正在直连房间...'
+                      ? '正在建立连接...'
                       : hasInputCode
-                        ? '直达进入房间'
+                        ? '进入指定房间'
                         : mode === 'fixed'
-                          ? '秒开常驻秘密基地'
-                          : '秒开快传房间'}
+                          ? '创建常驻房间'
+                          : '创建临时房间'}
                   </span>
-                  <ArrowRight size={17} />
+                  <ArrowRight size={17} aria-hidden="true" />
                 </button>
                 <button
                   type="button"
                   className="btn btn-soft btn-xl"
                   disabled={submitting || randomJoining}
                   onClick={() => void handleRandomJoin()}
-                  title="只进入无密码且允许串门的活跃房间"
+                  title="仅加入无密码且允许随机访问的活跃房间"
                 >
-                  <Dices size={17} />
-                  <span>{randomJoining ? '匹配中...' : '随机串门'}</span>
+                  <Dices size={17} aria-hidden="true" />
+                  <span>{randomJoining ? '匹配中...' : '随机加入'}</span>
                 </button>
               </div>
 
-              {/* 一行极简控制条：允许串门快捷胶囊 + 高级设置折叠开关 */}
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  gap: 8,
-                  flexWrap: 'wrap',
-                  paddingTop: 2,
-                }}
-              >
+              {/* 一行控制条：允许随机加入开关 + 高级设置折叠开关 */}
+              <div className="lobby-control-strip">
                 <button
                   type="button"
-                  className={`btn btn-sm ${!hasPasswordInput && allowRandom ? 'btn-soft' : 'btn-glass'}`}
+                  className={`btn btn-sm lobby-touch-pill ${!hasPasswordInput && allowRandom ? 'btn-soft' : 'btn-glass'}`}
                   disabled={hasPasswordInput}
                   onClick={() => {
                     const next = !allowRandom;
                     setAllowRandom(next);
-                    onToast(next ? '🌐 已开启陌生人随机串门' : '🔒 已关闭随机串门，仅限口令进入');
+                    onToast(next ? '已开启随机加入公开房间' : '已关闭随机加入，仅限口令进入');
                   }}
-                  title="默认关闭仅限口令进入，开启后允许陌生人随机串门"
+                  title="默认关闭仅限口令进入，开启后允许他人随机加入"
                 >
-                  {!hasPasswordInput && allowRandom ? <Globe size={13} /> : <Lock size={13} />}
+                  {!hasPasswordInput && allowRandom ? (
+                    <Globe size={13} aria-hidden="true" />
+                  ) : (
+                    <Lock size={13} aria-hidden="true" />
+                  )}
                   <span>
                     {hasPasswordInput
-                      ? '暗号保护中'
+                      ? '已设访问密码'
                       : allowRandom
-                        ? '允许随机串门 ✓'
+                        ? '允许随机加入'
                         : '仅限口令进入'}
                   </span>
                 </button>
 
                 <button
                   type="button"
-                  className="btn btn-ghost btn-sm"
+                  className={`btn btn-ghost btn-sm lobby-touch-pill lobby-advanced-toggle ${showAdvanced ? 'open' : ''}`}
                   onClick={() => setShowAdvanced((prev) => !prev)}
-                  style={{ color: showAdvanced ? 'var(--accent)' : 'var(--text-sub)', fontWeight: 700 }}
+                  aria-expanded={showAdvanced}
                 >
-                  <SlidersHorizontal size={13} />
+                  <SlidersHorizontal size={13} aria-hidden="true" />
                   <span>高级设置</span>
                   {!showAdvanced && (
-                    <span style={{ fontSize: 11.5, color: 'var(--text-muted)', fontWeight: 500 }}>
+                    <span className="lobby-advanced-summary">
                       ({summaryTag})
                     </span>
                   )}
-                  {showAdvanced ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                  {showAdvanced ? (
+                    <ChevronUp size={14} aria-hidden="true" />
+                  ) : (
+                    <ChevronDown size={14} aria-hidden="true" />
+                  )}
                 </button>
               </div>
 
-              {/* 高级设置折叠区（默认收起，保持页面极简） */}
+              {/* 高级设置折叠区（默认收起，保持页面简洁） */}
               {showAdvanced && (
-                <div
-                  style={{
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: 14,
-                    paddingTop: 12,
-                    borderTop: '1px solid var(--line-border)',
-                  }}
-                >
+                <div className="lobby-advanced-panel">
                   <div className="candy-mode-grid">
                     <button
                       type="button"
                       className={`candy-card ${mode === 'ephemeral' ? 'selected' : ''}`}
                       onClick={() => handleModeChange('ephemeral')}
                     >
-                      <div
-                        className="candy-badge-icon"
-                        style={{ background: 'linear-gradient(135deg, #ff5487, #ff965a)' }}
-                      >
-                        <Flame size={17} />
+                      <div className="candy-badge-icon candy-badge-ephemeral">
+                        <Flame size={17} aria-hidden="true" />
                       </div>
-                      <div style={{ fontSize: 14, fontWeight: 800 }}>闪传临时房 · 聊完销毁</div>
-                      <div style={{ fontSize: 11.5, color: 'var(--text-sub)', lineHeight: 1.4 }}>
-                        生成 6 位随机口令，离开后自动过期清空
+                      <div className="candy-card-title">临时房间 · 离开自动销毁</div>
+                      <div className="candy-card-desc">
+                        生成 6 位随机口令，会话结束后自动清理
                       </div>
                     </button>
 
@@ -767,25 +759,22 @@ export const Lobby: React.FC<LobbyProps> = ({
                       className={`candy-card ${mode === 'fixed' ? 'selected' : ''}`}
                       onClick={() => handleModeChange('fixed')}
                     >
-                      <div
-                        className="candy-badge-icon"
-                        style={{ background: 'linear-gradient(135deg, #8b5cf6, #06b6d4)' }}
-                      >
-                        <Pin size={17} />
+                      <div className="candy-badge-icon candy-badge-fixed">
+                        <Pin size={17} aria-hidden="true" />
                       </div>
-                      <div style={{ fontSize: 14, fontWeight: 800 }}>常驻秘密基地 · 长期保留</div>
-                      <div style={{ fontSize: 11.5, color: 'var(--text-sub)', lineHeight: 1.4 }}>
-                        固定房号，手机电脑随时丝滑重连
+                      <div className="candy-card-title">常驻房间 · 长期保留</div>
+                      <div className="candy-card-desc">
+                        固定房间号，多设备随时重新连接
                       </div>
                     </button>
                   </div>
 
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <div className="lobby-field-group">
                     <div className="lobby-field-head">
-                      <span>服务器消息与文件保鲜期（最长 7 天）</span>
-                      <span style={{ color: 'var(--accent)', fontWeight: 600 }}>
+                      <span>服务器消息与文件保留期（最长 7 天）</span>
+                      <span className="lobby-field-hint">
                         {retentionDays === 0
-                          ? '🔥 服务器零留存'
+                          ? '服务器零留存'
                           : `活跃起 ${retentionDays} 天后自动清空`}
                       </span>
                     </div>
@@ -811,12 +800,12 @@ export const Lobby: React.FC<LobbyProps> = ({
                     </div>
                   </div>
 
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <div className="lobby-field-group">
                     <div className="lobby-field-head">
                       <span>单附件传输大小上限</span>
-                      <span style={{ color: 'var(--accent)', fontWeight: 600 }}>
+                      <span className="lobby-field-hint">
                         {maxFileSizeMB === 0
-                          ? '♾️ 不限制（支持 GB 级流式直传）'
+                          ? '不限制（支持大文件流式直传）'
                           : `单文件 ≤ ${maxFileSizeMB >= 1024 ? `${(maxFileSizeMB / 1024).toFixed(maxFileSizeMB % 1024 === 0 ? 0 : 1)} GB` : `${maxFileSizeMB} MB`}`}
                       </span>
                     </div>
@@ -839,11 +828,11 @@ export const Lobby: React.FC<LobbyProps> = ({
                   </div>
 
                   <div className="lobby-two-col">
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                      <span style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--text-sub)' }}>
+                    <div className="lobby-field-group">
+                      <span className="lobby-field-label">
                         房间容量
                       </span>
-                      <div className="segmented full" style={{ height: 44, alignItems: 'center' }}>
+                      <div className="segmented full lobby-capacity-seg">
                         <button
                           type="button"
                           className={`seg-item ${privatePairOnly ? 'active' : ''}`}
@@ -861,20 +850,20 @@ export const Lobby: React.FC<LobbyProps> = ({
                       </div>
                     </div>
 
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                      <span style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--text-sub)' }}>
-                        暗号密码（可选）
+                    <div className="lobby-field-group">
+                      <span className="lobby-field-label">
+                        访问密码（可选）
                       </span>
                       <div className="input-group">
                         <span className="input-prefix-icon">
-                          <Lock size={15} />
+                          <Lock size={15} aria-hidden="true" />
                         </span>
                         <input
                           className="field-input with-prefix"
                           type="password"
                           value={roomPassword}
                           onChange={(e) => setRoomPassword(e.target.value)}
-                          placeholder="留空免密；设暗号禁随机"
+                          placeholder="留空免密；设密码禁随机"
                         />
                       </div>
                     </div>
@@ -884,8 +873,8 @@ export const Lobby: React.FC<LobbyProps> = ({
                     <Switch
                       checked={saveToFavorites}
                       onChange={setSaveToFavorites}
-                      label="收藏到「我的秘密基地」"
-                      description="下次打开网页直接一键空降进入房间"
+                      label="收藏到「常驻收藏」"
+                      description="下次打开网页可直接点击快速进入"
                     />
                   )}
                 </div>
@@ -893,16 +882,19 @@ export const Lobby: React.FC<LobbyProps> = ({
             </form>
           </section>
 
-          {/* 右侧 Bento 副栏：百变身份卡 + 秘密基地列表 + 创意玩法标签 */}
-          <aside style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
-            {/* 百变身份卡 */}
-            <div className="glass-bento" style={{ padding: 20 }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
-                <span style={{ fontSize: 14, fontWeight: 800 }}>🎭 我的百变身份</span>
-                <div style={{ display: 'flex', gap: 6 }}>
+          {/* 右侧副栏：身份名片 + 最近房间 + 常驻收藏 + 离线取件 + 附近设备 + 核心能力 */}
+          <aside className="lobby-aside">
+            {/* 身份名片卡 */}
+            <div className="glass-bento lobby-bento-card-lg">
+              <div className="lobby-card-head lobby-card-head-lg">
+                <span className="lobby-card-title">
+                  <UserRound size={15} className="lobby-card-title-icon" aria-hidden="true" />
+                  <span>我的身份名片</span>
+                </span>
+                <div className="lobby-card-actions">
                   <button
                     type="button"
-                    className="btn btn-soft btn-sm"
+                    className="btn btn-soft btn-sm lobby-touch-pill"
                     onClick={() =>
                       onQuickRandomProfile({
                         ...profile,
@@ -910,102 +902,107 @@ export const Lobby: React.FC<LobbyProps> = ({
                         avatar: pickRandomPresetAvatar(),
                       })
                     }
-                    title="随机换个新马甲"
+                    title="随机更换昵称与头像"
                   >
-                    <Dices size={13} /> 摇一摇
+                    <Dices size={13} aria-hidden="true" /> 随机生成
                   </button>
-                  <button type="button" className="btn btn-glass btn-sm" onClick={onEditProfile}>
-                    定制头像
+                  <button
+                    type="button"
+                    className="btn btn-glass btn-sm lobby-touch-pill"
+                    onClick={onEditProfile}
+                  >
+                    编辑名片
                   </button>
                 </div>
               </div>
 
-              <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-                <div onClick={onEditProfile} style={{ cursor: 'pointer' }}>
+              <div className="lobby-profile-row">
+                <button
+                  type="button"
+                  className="lobby-avatar-trigger"
+                  onClick={onEditProfile}
+                  aria-label="编辑个人身份名片"
+                >
                   <Avatar name={profile.name} avatar={profile.avatar} size={54} />
-                </div>
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 16, fontWeight: 800, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                </button>
+                <div className="lobby-profile-info">
+                  <div className="lobby-profile-name">
                     {profile.name}
                   </div>
-                  <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 3 }}>
-                    免注册账号 · 支持上传自拍与表情包当头像
+                  <div className="lobby-profile-sub">
+                    免注册即用 · 支持上传图片或选用预设头像
                   </div>
                 </div>
               </div>
             </div>
 
-            {/* 最近访问过的房间（包含临时闪传房与固定房，支持一键重进与自动失效清理） */}
+            {/* 最近访问过的房间（包含临时房与固定房，支持重进与自动失效清理） */}
             {recentRooms.length > 0 && (
-              <div className="glass-bento" style={{ padding: 18 }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-                  <span style={{ fontSize: 14, fontWeight: 800, display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-                    <Clock size={14} style={{ color: 'var(--accent)' }} />
-                    最近房间
+              <div className="glass-bento lobby-bento-card">
+                <div className="lobby-card-head">
+                  <span className="lobby-card-title">
+                    <Clock size={14} className="lobby-card-title-icon" aria-hidden="true" />
+                    <span>最近房间</span>
                   </span>
                   <button
                     type="button"
-                    className="btn btn-ghost btn-sm"
-                    style={{ height: 24, padding: '0 8px', fontSize: 11.5 }}
+                    className="btn btn-ghost btn-sm lobby-clear-recent-btn"
                     onClick={onClearRecentRooms}
                   >
                     清空
                   </button>
                 </div>
 
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <div className="lobby-room-list">
                   {recentRooms.slice(0, 6).map((item) => (
-                    <div
-                      key={item.code}
-                      style={{
-                        padding: '9px 12px',
-                        borderRadius: 16,
-                        background: 'var(--glass-bg-strong)',
-                        border: '1px solid var(--line-border)',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'space-between',
-                        gap: 8,
-                      }}
-                    >
-                      <div style={{ minWidth: 0 }}>
-                        <div className="mono" style={{ fontSize: 14, fontWeight: 800, display: 'flex', alignItems: 'center', gap: 5 }}>
+                    <div key={item.code} className="lobby-room-item">
+                      <div className="lobby-room-meta">
+                        <div className="mono lobby-room-code">
                           <span>#{item.code}</span>
-                          {item.hasPassword && <Lock size={11} style={{ color: 'var(--accent)' }} />}
+                          {item.hasPassword && (
+                            <Lock size={11} className="lobby-room-lock" aria-hidden="true" />
+                          )}
                         </div>
-                        <div style={{ fontSize: 11, color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 }}>
-                          <span>{item.mode === 'fixed' ? '📌 常驻' : '🔥 闪传'}</span>
+                        <div className="lobby-room-sub">
+                          <span className="lobby-inline-tag">
+                            {item.mode === 'fixed' ? (
+                              <Pin size={10} aria-hidden="true" />
+                            ) : (
+                              <Flame size={10} aria-hidden="true" />
+                            )}
+                            <span>{item.mode === 'fixed' ? '常驻' : '临时'}</span>
+                          </span>
                           <span>· {formatRelativeTime(item.lastVisitedAt)}</span>
                         </div>
                       </div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                      <div className="lobby-room-actions">
                         <button
                           type="button"
-                          className="btn btn-soft btn-sm"
+                          className="btn btn-soft btn-sm lobby-touch-pill"
                           onClick={() => void handleQuickEnterRecent(item)}
                         >
                           重进
                         </button>
                         <button
                           type="button"
-                          className="btn btn-ghost btn-icon"
-                          style={{ width: 28, height: 28 }}
+                          className="btn btn-ghost btn-icon lobby-touch-icon"
                           title="复制邀请链接"
+                          aria-label={`复制房间 ${item.code} 的邀请链接`}
                           onClick={async () => {
                             const url = `${window.location.origin}/?room=${encodeURIComponent(item.code)}`;
                             if (await copyTextToClipboard(url)) onToast(`已复制 #${item.code} 链接`);
                           }}
                         >
-                          <Copy size={13} />
+                          <Copy size={13} aria-hidden="true" />
                         </button>
                         <button
                           type="button"
-                          className="btn btn-ghost btn-icon"
-                          style={{ width: 28, height: 28 }}
+                          className="btn btn-ghost btn-icon lobby-touch-icon"
                           title="移除此记录"
+                          aria-label={`移除房间 ${item.code} 的最近记录`}
                           onClick={() => onRemoveRecentRoom(item.code)}
                         >
-                          <Trash2 size={13} />
+                          <Trash2 size={13} aria-hidden="true" />
                         </button>
                       </div>
                     </div>
@@ -1014,78 +1011,67 @@ export const Lobby: React.FC<LobbyProps> = ({
               </div>
             )}
 
-            {/* 常驻秘密基地 */}
-            <div className="glass-bento" style={{ padding: 18 }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-                <span style={{ fontSize: 14, fontWeight: 800 }}>📌 我的秘密基地</span>
+            {/* 常驻收藏房间 */}
+            <div className="glass-bento lobby-bento-card">
+              <div className="lobby-card-head">
+                <span className="lobby-card-title">
+                  <Pin size={14} className="lobby-card-title-icon" aria-hidden="true" />
+                  <span>常驻收藏</span>
+                </span>
                 <span className="pill pill-accent mono">{savedFixedRooms.length}</span>
               </div>
 
               {savedFixedRooms.length === 0 ? (
-                <div
-                  style={{
-                    padding: '16px 14px',
-                    borderRadius: 18,
-                    background: 'var(--glass-subtle)',
-                    border: '1.5px dashed var(--line-strong)',
-                    fontSize: 12.5,
-                    color: 'var(--text-sub)',
-                    lineHeight: 1.55,
-                  }}
-                >
-                  还没有收藏常驻房间～创建一个「专属秘密基地」，就能固定在这里，手机和电脑随时互扔文件与截图！
+                <div className="lobby-empty-card">
+                  <div className="lobby-empty-title">
+                    <Pin size={14} className="lobby-card-title-icon" aria-hidden="true" />
+                    <span>暂无常驻收藏房间</span>
+                  </div>
+                  <div className="lobby-empty-desc">
+                    在左侧「高级设置」中选择常驻房间并勾选收藏，即可固定在此处，方便多设备随时重连与互传文件。
+                  </div>
                 </div>
               ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <div className="lobby-room-list">
                   {savedFixedRooms.map((item) => (
-                    <div
-                      key={item.code}
-                      style={{
-                        padding: '10px 12px',
-                        borderRadius: 16,
-                        background: 'var(--glass-bg-strong)',
-                        border: '1px solid var(--line-border)',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'space-between',
-                        gap: 8,
-                      }}
-                    >
-                      <div style={{ minWidth: 0 }}>
-                        <div className="mono" style={{ fontSize: 14.5, fontWeight: 800, display: 'flex', alignItems: 'center', gap: 5 }}>
+                    <div key={item.code} className="lobby-room-item">
+                      <div className="lobby-room-meta">
+                        <div className="mono lobby-room-code">
                           <span>#{item.code}</span>
-                          {item.hasPassword && <Lock size={12} style={{ color: 'var(--accent)' }} />}
+                          {item.hasPassword && (
+                            <Lock size={12} className="lobby-room-lock" aria-hidden="true" />
+                          )}
                         </div>
-                        <div style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>常驻直连通道</div>
+                        <div className="lobby-room-sub">常驻直连通道</div>
                       </div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                      <div className="lobby-room-actions">
                         <button
                           type="button"
-                          className="btn btn-jelly btn-sm"
+                          className="btn btn-jelly btn-sm lobby-touch-pill"
                           onClick={() => void handleQuickEnterSaved(item)}
                         >
-                          空降
+                          进入
                         </button>
                         <button
                           type="button"
-                          className="btn btn-ghost btn-icon"
-                          style={{ width: 28, height: 28 }}
+                          className="btn btn-ghost btn-icon lobby-touch-icon"
                           title="复制邀请链接"
+                          aria-label={`复制常驻房间 ${item.code} 的邀请链接`}
                           onClick={async () => {
                             const url = `${window.location.origin}/?room=${encodeURIComponent(item.code)}`;
                             if (await copyTextToClipboard(url)) onToast(`已复制 #${item.code} 链接`);
                           }}
                         >
-                          <Copy size={13} />
+                          <Copy size={13} aria-hidden="true" />
                         </button>
                         <button
                           type="button"
-                          className="btn btn-ghost btn-icon"
-                          style={{ width: 28, height: 28 }}
+                          className="btn btn-ghost btn-icon lobby-touch-icon"
                           title="取消收藏"
+                          aria-label={`取消收藏房间 ${item.code}`}
                           onClick={() => onRemoveSavedRoom(item.code)}
                         >
-                          <Trash2 size={13} />
+                          <Trash2 size={13} aria-hidden="true" />
                         </button>
                       </div>
                     </div>
@@ -1095,41 +1081,41 @@ export const Lobby: React.FC<LobbyProps> = ({
             </div>
 
             {/* 取件码离线投递入口卡 */}
-            <div className="glass-bento" style={{ padding: 18 }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-                <span style={{ fontSize: 14, fontWeight: 800, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                  <Package size={15} style={{ color: 'var(--accent)' }} />
-                  取件码 · 离线传文件
+            <div className="glass-bento lobby-bento-card">
+              <div className="lobby-card-head">
+                <span className="lobby-card-title">
+                  <Package size={15} className="lobby-card-title-icon" aria-hidden="true" />
+                  <span>取件码 · 离线传文件</span>
                 </span>
                 <span className="pill pill-accent">6位码</span>
               </div>
-              <div style={{ fontSize: 12, color: 'var(--text-sub)', marginBottom: 12, lineHeight: 1.5 }}>
+              <div className="lobby-pickup-desc">
                 对方不在线也能发：上传生成 6 位取件码，支持取后即焚与密码保护
               </div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              <div className="lobby-two-btn-grid">
                 <button
                   type="button"
-                  className="btn btn-jelly btn-sm"
+                  className="btn btn-jelly btn-sm lobby-touch-pill"
                   onClick={() => setPickupSendOpen(true)}
                 >
-                  <Package size={13} /> 发送文件
+                  <Package size={13} aria-hidden="true" /> 发送文件
                 </button>
                 <button
                   type="button"
-                  className="btn btn-soft btn-sm"
+                  className="btn btn-soft btn-sm lobby-touch-pill"
                   onClick={() => setPickupLookupOpen(true)}
                 >
-                  <KeyRound size={13} /> 输入取件码
+                  <KeyRound size={13} aria-hidden="true" /> 输入取件码
                 </button>
               </div>
             </div>
 
             {/* 附近同 Wi-Fi 设备发现卡 */}
-            <div className="glass-bento" style={{ padding: 18 }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-                <span style={{ fontSize: 14, fontWeight: 800, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                  <Radio size={15} style={{ color: 'var(--accent)' }} />
-                  附近设备（同 Wi-Fi 免输码）
+            <div className="glass-bento lobby-bento-card">
+              <div className="lobby-card-head">
+                <span className="lobby-card-title">
+                  <Radio size={15} className="lobby-card-title-icon" aria-hidden="true" />
+                  <span>附近设备（同局域网免输码）</span>
                 </span>
                 <span className="pill pill-neutral mono">{nearbyDevices.length}</span>
               </div>
@@ -1137,65 +1123,43 @@ export const Lobby: React.FC<LobbyProps> = ({
                 checked={prefs.nearbyDiscoverable}
                 onChange={(v) => onUpdatePrefs({ ...prefs, nearbyDiscoverable: v })}
                 label="允许附近设备发现我"
-                description="仅在首页前台运行时生效，点击头像即可直传"
+                description="仅在首页前台运行时生效，点击设备即可直传"
               />
               {prefs.nearbyDiscoverable && (
-                <div style={{ marginTop: 10 }}>
+                <div className="lobby-nearby-box">
                   {nearbyDevices.length === 0 ? (
-                    <div
-                      style={{
-                        padding: '10px 12px',
-                        borderRadius: 14,
-                        background: 'var(--glass-subtle)',
-                        fontSize: 12,
-                        color: 'var(--text-muted)',
-                      }}
-                    >
-                      正在雷达扫描同网络下的湾聊设备（手机或电脑打开大厅即可互相发现）...
+                    <div className="lobby-nearby-empty">
+                      <Radio size={15} className="lobby-card-title-icon" aria-hidden="true" />
+                      <span>
+                        正在扫描同一网络下的湾聊设备（手机或电脑打开大厅即可互相发现）...
+                      </span>
                     </div>
                   ) : (
-                    <div style={{ display: 'flex', gap: 8, overflowX: 'auto', paddingBottom: 4 }}>
+                    <div className="lobby-nearby-strip">
                       {nearbyDevices.map((dev) => (
                         <button
                           key={dev.clientId}
                           type="button"
-                          className="btn btn-glass"
+                          className="btn btn-glass lobby-nearby-card"
                           disabled={invitingId === dev.clientId}
                           onClick={() => void handleInviteNearbyDevice(dev)}
-                          style={{
-                            flexDirection: 'column',
-                            height: 'auto',
-                            padding: '10px 12px',
-                            minWidth: 88,
-                            gap: 5,
-                            flexShrink: 0,
-                          }}
                           title={`点击向 ${dev.name} 发送传输邀请`}
                         >
                           <Avatar name={dev.name} avatar={dev.avatar} size={36} />
-                          <span
-                            style={{
-                              fontSize: 12,
-                              fontWeight: 700,
-                              maxWidth: 78,
-                              overflow: 'hidden',
-                              textOverflow: 'ellipsis',
-                              whiteSpace: 'nowrap',
-                            }}
-                          >
+                          <span className="lobby-nearby-name">
                             {dev.name}
                           </span>
-                          <span
-                            style={{
-                              fontSize: 10.5,
-                              color: 'var(--text-muted)',
-                              display: 'inline-flex',
-                              alignItems: 'center',
-                              gap: 3,
-                            }}
-                          >
-                            {dev.device === 'android' ? <Smartphone size={10} /> : <Laptop size={10} />}
-                            {invitingId === dev.clientId ? '邀请中' : dev.device === 'android' ? 'Android' : 'Web'}
+                          <span className="lobby-nearby-plat">
+                            {dev.device === 'android' ? (
+                              <Smartphone size={10} aria-hidden="true" />
+                            ) : (
+                              <Laptop size={10} aria-hidden="true" />
+                            )}
+                            {invitingId === dev.clientId
+                              ? '邀请中'
+                              : dev.device === 'android'
+                                ? 'Android'
+                                : 'Web'}
                           </span>
                         </button>
                       ))}
@@ -1206,18 +1170,32 @@ export const Lobby: React.FC<LobbyProps> = ({
             </div>
 
             {/* 核心能力概览卡 */}
-            <div className="glass-bento" style={{ padding: 18 }}>
-              <div style={{ fontSize: 13, fontWeight: 800, marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
-                <Wand2 size={15} style={{ color: 'var(--accent)' }} />
-                房间核心能力
+            <div className="glass-bento lobby-bento-card">
+              <div className="lobby-card-head">
+                <span className="lobby-card-title">
+                  <Compass size={15} className="lobby-card-title-icon" aria-hidden="true" />
+                  <span>房间核心能力</span>
+                </span>
               </div>
               <div className="feature-tag-cloud">
-                <span className="feature-mini-pill">📦 GB 级 P2P 文件直传</span>
-                <span className="feature-mini-pill">🎧 语音连麦与投屏</span>
-                <span className="feature-mini-pill">🎨 多人协作白板</span>
-                <span className="feature-mini-pill">🍅 同步番茄自习室</span>
-                <span className="feature-mini-pill">⏱ 0~7天可控缓存</span>
-                <span className="feature-mini-pill">🖼️ 粘贴截图原图直发</span>
+                <span className="feature-mini-pill">
+                  <HardDrive size={13} aria-hidden="true" /> 大文件 P2P 直传
+                </span>
+                <span className="feature-mini-pill">
+                  <Headphones size={13} aria-hidden="true" /> 语音连麦与投屏
+                </span>
+                <span className="feature-mini-pill">
+                  <PenTool size={13} aria-hidden="true" /> 多人协作白板
+                </span>
+                <span className="feature-mini-pill">
+                  <Timer size={13} aria-hidden="true" /> 同步专注计时
+                </span>
+                <span className="feature-mini-pill">
+                  <Clock size={13} aria-hidden="true" /> 0~7 天可控缓存
+                </span>
+                <span className="feature-mini-pill">
+                  <ImageIcon size={13} aria-hidden="true" /> 剪贴板图片直发
+                </span>
               </div>
             </div>
           </aside>
@@ -1227,31 +1205,41 @@ export const Lobby: React.FC<LobbyProps> = ({
       {/* 不存在常驻房时创建确认弹窗 */}
       {confirmCreateCode && (
         <div className="modal-overlay" onClick={() => setConfirmCreateCode(null)}>
-          <div className="modal-sheet" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 400 }}>
+          <div
+            className="modal-sheet modal-sheet-md"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label={`确认创建常驻房间 #${confirmCreateCode}`}
+          >
             <div className="modal-head">
-              <h3>📌 是否创建常驻房间 #{confirmCreateCode}？</h3>
+              <h3 className="modal-head-title">
+                <Pin size={17} className="lobby-card-title-icon" aria-hidden="true" />
+                <span>是否创建常驻房间 #{confirmCreateCode}？</span>
+              </h3>
               <button
                 type="button"
-                className="btn btn-ghost btn-icon"
+                className="btn btn-ghost btn-icon modal-close-btn"
+                aria-label="关闭弹窗"
                 onClick={() => setConfirmCreateCode(null)}
               >
-                <X size={16} />
+                <X size={16} aria-hidden="true" />
               </button>
             </div>
-            <p style={{ margin: 0, fontSize: 13.5, color: 'var(--text-sub)', lineHeight: 1.55 }}>
+            <p className="modal-body-text">
               未找到房间 <strong className="mono">#{confirmCreateCode}</strong>。是否立即以此口令创建常驻房间并进入？
             </p>
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+            <div className="modal-actions-end">
               <button
                 type="button"
-                className="btn btn-glass"
+                className="btn btn-glass lobby-touch-pill"
                 onClick={() => setConfirmCreateCode(null)}
               >
                 取消
               </button>
               <button
                 type="button"
-                className="btn btn-jelly"
+                className="btn btn-jelly lobby-touch-pill"
                 onClick={() => void handleConfirmCreateFixedRoom()}
               >
                 确认创建并进入
@@ -1264,37 +1252,47 @@ export const Lobby: React.FC<LobbyProps> = ({
       {/* 收到附近设备邀请弹窗 */}
       {incomingInvite && (
         <div className="modal-overlay" onClick={() => void handleRespondIncomingInvite(false)}>
-          <div className="modal-sheet" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 380 }}>
+          <div
+            className="modal-sheet modal-sheet-sm"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label="附近设备传输邀请"
+          >
             <div className="modal-head">
-              <h3>📡 附近设备传文件邀请</h3>
+              <h3 className="modal-head-title">
+                <Radio size={17} className="lobby-card-title-icon" aria-hidden="true" />
+                <span>附近设备传输邀请</span>
+              </h3>
               <button
                 type="button"
-                className="btn btn-ghost btn-icon"
+                className="btn btn-ghost btn-icon modal-close-btn"
+                aria-label="婉拒并关闭弹窗"
                 onClick={() => void handleRespondIncomingInvite(false)}
               >
-                <X size={16} />
+                <X size={16} aria-hidden="true" />
               </button>
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '8px 0' }}>
+            <div className="modal-invite-peer">
               <Avatar name={incomingInvite.fromName} avatar={incomingInvite.fromAvatar} size={46} />
-              <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: 15, fontWeight: 800 }}>{incomingInvite.fromName}</div>
-                <div style={{ fontSize: 12.5, color: 'var(--text-sub)', marginTop: 2 }}>
-                  邀请你加入私密快传房间 <span className="mono">#{incomingInvite.roomCode}</span>
+              <div className="modal-invite-info">
+                <div className="modal-invite-name">{incomingInvite.fromName}</div>
+                <div className="modal-invite-desc">
+                  邀请你加入私密传输房间 <span className="mono">#{incomingInvite.roomCode}</span>
                 </div>
               </div>
             </div>
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+            <div className="modal-actions-end">
               <button
                 type="button"
-                className="btn btn-glass"
+                className="btn btn-glass lobby-touch-pill"
                 onClick={() => void handleRespondIncomingInvite(false)}
               >
                 婉拒
               </button>
               <button
                 type="button"
-                className="btn btn-jelly"
+                className="btn btn-jelly lobby-touch-pill"
                 onClick={() => void handleRespondIncomingInvite(true)}
               >
                 接受并进入

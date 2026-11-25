@@ -4,22 +4,21 @@ export interface PresetAvatar {
   id: string;
   label: string;
   emoji: string;
-  gradient: string;
 }
 
 export const PRESET_AVATARS: PresetAvatar[] = [
-  { id: 'aurora', label: '极光蓝', emoji: '🐋', gradient: 'linear-gradient(135deg, #3b82f6, #06b6d4)' },
-  { id: 'sunset', label: '晚霞橙', emoji: '🦊', gradient: 'linear-gradient(135deg, #f97316, #ec4899)' },
-  { id: 'forest', label: '青翠绿', emoji: '🌿', gradient: 'linear-gradient(135deg, #10b981, #14b8a6)' },
-  { id: 'violet', label: '星云紫', emoji: '🚀', gradient: 'linear-gradient(135deg, #8b5cf6, #6366f1)' },
-  { id: 'amber', label: '琥珀金', emoji: '⚡', gradient: 'linear-gradient(135deg, #f59e0b, #ef4444)' },
-  { id: 'sakura', label: '樱花粉', emoji: '🌸', gradient: 'linear-gradient(135deg, #f472b6, #a855f7)' },
-  { id: 'ocean', label: '深海青', emoji: '🐬', gradient: 'linear-gradient(135deg, #0284c7, #2563eb)' },
-  { id: 'mint', label: '薄荷冰', emoji: '🧊', gradient: 'linear-gradient(135deg, #22d3ee, #34d399)' },
-  { id: 'cat', label: '橘猫', emoji: '🐱', gradient: 'linear-gradient(135deg, #fb923c, #facc15)' },
-  { id: 'panda', label: '熊猫', emoji: '🐼', gradient: 'linear-gradient(135deg, #475569, #94a3b8)' },
-  { id: 'owl', label: '夜猫子', emoji: '🦉', gradient: 'linear-gradient(135deg, #4f46e5, #0ea5e9)' },
-  { id: 'robot', label: '机械师', emoji: '🤖', gradient: 'linear-gradient(135deg, #0f766e, #0284c7)' },
+  { id: 'aurora', label: '极光蓝', emoji: '🐋' },
+  { id: 'sunset', label: '晚霞橙', emoji: '🦊' },
+  { id: 'forest', label: '青翠绿', emoji: '🌿' },
+  { id: 'violet', label: '星云紫', emoji: '🚀' },
+  { id: 'amber', label: '琥珀金', emoji: '⚡' },
+  { id: 'sakura', label: '樱花粉', emoji: '🌸' },
+  { id: 'ocean', label: '深海青', emoji: '🐬' },
+  { id: 'mint', label: '薄荷冰', emoji: '🧊' },
+  { id: 'cat', label: '橘猫', emoji: '🐱' },
+  { id: 'panda', label: '熊猫', emoji: '🐼' },
+  { id: 'owl', label: '夜猫子', emoji: '🦉' },
+  { id: 'robot', label: '机械师', emoji: '🤖' },
 ];
 
 const ADJECTIVES = ['清风', '星海', '极光', '青云', '暮雨', '朝霞', '微光', '远航', '琥珀', '知秋'];
