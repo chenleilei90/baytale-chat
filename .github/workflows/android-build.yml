@@ -47,7 +47,7 @@ jobs:
           KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           if [ -n "$KEYSTORE_BASE64" ]; then
-            echo "$KEYSTORE_BASE64" | base64 -d > app/baychat-release.jks
+            printf '%s' "$KEYSTORE_BASE64" | tr -d '[:space:]' | base64 -d > app/baychat-release.jks
             cat > keystore.properties << EOF
           storeFile=baychat-release.jks
           storePassword=$STORE_PASSWORD
@@ -55,6 +55,7 @@ jobs:
           keyPassword=$KEY_PASSWORD
           EOF
             echo "Release signing configured from secrets."
+            keytool -list -keystore app/baychat-release.jks -storepass "$STORE_PASSWORD" | grep -E "Alias|SHA-256|SHA256" || true
           else
             echo "No release keystore secrets set; building release with fallback debug signing for direct testing."
           fi
