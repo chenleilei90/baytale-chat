@@ -14,9 +14,9 @@ server/internal/static/dist/*
 
 # 服务端运行时持久化数据与编译产物
 server/data/
-data/
-baychat
-baychat.exe
+/data/
+/baychat
+/baychat.exe
 *.exe
 *.out
 *.test
