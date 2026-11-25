@@ -8,22 +8,15 @@ import {
   Trash2,
   Paperclip,
   Image as ImageIcon,
-  Camera,
   Smile,
   Send,
   PanelLeft,
-  RefreshCw,
   Clock,
   UploadCloud,
   X,
   ChevronDown,
   Lock,
   Palette,
-  Zap,
-  EyeOff,
-  Clipboard,
-  Sparkles,
-  FolderArchive,
   Mic,
   Square,
   Search,
@@ -41,14 +34,12 @@ import QRCode from 'qrcode';
 import type {
   CachedMessage,
   ChatItem,
-  FunEffectType,
   HistoryMeta,
   PeerLinkStatus,
   PeerMediaState,
   PeerProfile,
   PomodoroMode,
   PomodoroState,
-  PropThrowType,
   ReplyQuote,
   RoomStats,
   RoomSummary,
@@ -71,7 +62,6 @@ import {
 import { WebRTCMeshManager } from '../lib/webrtc';
 import { compressChatImage } from '../lib/avatar';
 import {
-  captureScreenFrame,
   copyTextToClipboard,
   formatBytes,
   formatExpiryTime,
@@ -80,20 +70,18 @@ import {
   supportsScreenCapture,
   triggerBlobDownload,
 } from '../lib/platform';
-import { decodeSecretText, encodeSecretText, launchScreenEffect } from '../lib/effects';
+import { decodeSecretText, launchScreenEffect } from '../lib/effects';
 import { ambientEngine, playPomodoroChime, type AmbientSoundType } from '../lib/ambient';
 import {
   buildZipArchive,
   computeEntriesTotalBytes,
   extractDroppedItems,
-  type ZipEntryInput,
 } from '../lib/zip';
 import { getTabPeerId, type UserPrefs } from '../lib/storage';
 import { Avatar } from './Avatar';
 import { PalettePicker, Switch } from './Controls';
 import { MessageList } from './MessageList';
 import { InviteModal } from './InviteModal';
-import { ScreenshotModal } from './ScreenshotModal';
 import { WhiteboardModal, type RemoteCursorState } from './WhiteboardModal';
 import { StudyPomodoroCard } from './StudyPomodoroCard';
 import { RemoteAudioPlayer, ScreenShareStage, type ScreenFeedItem } from './MediaCallBar';
@@ -155,26 +143,11 @@ const RETENTION_STEPS = [
   { days: 5, label: '5天' },
   { days: 7, label: '7天' },
 ];
-const MOOD_PRESETS = [
-  '✨ 摸鱼待机',
-  '💻 专注搬砖',
-  '🎧 听歌中',
-  '🍜 干饭去',
-  '🎮 求带飞',
-  '📚 自习中',
-  '🌙 挂机陪伴',
-];
 const POMODORO_DURATIONS: Record<PomodoroMode, number> = {
   focus25: 25 * 60,
   deep45: 45 * 60,
   break5: 5 * 60,
 };
-const PROP_ITEMS: { type: PropThrowType; icon: string; label: string; verb: string }[] = [
-  { type: 'tomato', icon: '🍅', label: '砸番茄', verb: '砸了一颗大番茄' },
-  { type: 'flower', icon: '💐', label: '送鲜花', verb: '送了一束鲜花' },
-  { type: 'freeze', icon: '🧊', label: '冰冻TA', verb: '施放了冰冻术' },
-  { type: 'bomb', icon: '💣', label: '扔炸弹', verb: '扔了一枚小炸弹' },
-];
 const DEFAULT_ROOM_STATS: RoomStats = {
   totalMessages: 0,
   totalFiles: 0,
@@ -190,13 +163,7 @@ interface PendingPasteImage {
   compress: boolean;
 }
 
-interface SharedClipState {
-  text: string;
-  senderName: string;
-  updatedAt: number;
-}
-
-// 旗舰互动聊天室：支持同机双标签页直连、文件夹自动打包 ZIP、语音对讲、消息检索筛选、批量接收与内存自动回收
+// 精简高效互动聊天室：支持 P2P 文件直传、语音连麦、实时投屏、协作白板、自习番茄钟与消息检索筛选
 export const ChatRoom: React.FC<ChatRoomProps> = ({
   roomCode,
   password,
@@ -234,14 +201,9 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   // 语音录制状态
   const [recordingVoice, setRecordingVoice] = useState(false);
   const [recordSeconds, setRecordSeconds] = useState(0);
-  const [zippingFolder, setZippingFolder] = useState(false);
 
   const [inputText, setInputText] = useState('');
   const [replyingTo, setReplyingTo] = useState<ReplyQuote | null>(null);
-  const [secretMode, setSecretMode] = useState(false);
-  const [sharedClip, setSharedClip] = useState<SharedClipState | null>(null);
-  const [clipInput, setClipInput] = useState('');
-  const [shaking, setShaking] = useState(false);
 
   const [pendingPaste, setPendingPaste] = useState<PendingPasteImage | null>(null);
   const [showEmoji, setShowEmoji] = useState(false);
@@ -251,7 +213,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [showInvite, setShowInvite] = useState(false);
   const [showWhiteboard, setShowWhiteboard] = useState(false);
-  const [screenshotCanvas, setScreenshotCanvas] = useState<HTMLCanvasElement | null>(null);
 
   // 秘密基地成长统计与连续火花天数
   const [roomStats, setRoomStats] = useState<RoomStats>(DEFAULT_ROOM_STATS);
@@ -272,7 +233,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   const [wbCursors, setWbCursors] = useState<Record<string, RemoteCursorState>>({});
   const [wbInviteBanner, setWbInviteBanner] = useState<string | null>(null);
 
-  // 陪伴自习室：同步番茄钟 + 合成白噪音 + 成员实时状态胶囊
+  // 陪伴自习室：同步番茄钟 + 合成白噪音
   const [pomodoro, setPomodoro] = useState<PomodoroState>({
     running: false,
     mode: 'focus25',
@@ -283,9 +244,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   const [pomodoroDisplaySec, setPomodoroDisplaySec] = useState<number>(POMODORO_DURATIONS.focus25);
   const [ambientSound, setAmbientSound] = useState<AmbientSoundType>('off');
   const [ambientVolume, setAmbientVolume] = useState<number>(0.32);
-  const [selfMood, setSelfMood] = useState<string>(MOOD_PRESETS[0]);
-  const [showMoodPicker, setShowMoodPicker] = useState(false);
-  const [peerMoods, setPeerMoods] = useState<Record<string, string>>({});
   const [lightboxData, setLightboxData] = useState<{
     src: string;
     fileName?: string;
@@ -311,7 +269,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   const voiceCancelledRef = useRef(false);
   const messageEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const folderInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const typingTimerRef = useRef<number | null>(null);
@@ -322,7 +279,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   const recordStartRef = useRef<number>(0);
   const localMicStreamRef = useRef<MediaStream | null>(null);
   const localScreenStreamRef = useRef<MediaStream | null>(null);
-  const selfMoodRef = useRef<string>(selfMood);
   const pomodoroRef = useRef<PomodoroState>(pomodoro);
   const pomodoroDoneStampRef = useRef<number>(0);
   const recordedTransferIdsRef = useRef<Set<string>>(new Set());
@@ -338,7 +294,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   peersRef.current = peers;
   serverConfigRef.current = serverConfig;
   historyMetaRef.current = historyMeta;
-  selfMoodRef.current = selfMood;
   pomodoroRef.current = pomodoro;
   wbStateRef.current = { bgStyle: wbBgStyle, strokes: wbStrokes, notes: wbNotes };
   showWhiteboardRef.current = showWhiteboard;
@@ -587,11 +542,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     }
   }, [messages.length, searchKeyword, filterTab]);
 
-  const triggerShake = useCallback(() => {
-    setShaking(true);
-    window.setTimeout(() => setShaking(false), 520);
-  }, []);
-
   const appendSystemMessage = useCallback((text: string) => {
     setMessages((prev) => [
       ...prev,
@@ -788,13 +738,11 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     setPeers({});
     setLinkStatuses({});
     setTypingPeers({});
-    setSharedClip(null);
     setReplyingTo(null);
     setRemoteAudioStreams({});
     setRemoteScreenStreams({});
     setPeerMediaStates({});
     setSpeakingPeers({});
-    setPeerMoods({});
     setWbStrokes([]);
     setWbNotes([]);
     setWbCursors({});
@@ -854,26 +802,8 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       onTyping: (peerId, isTyping) => {
         setTypingPeers((prev) => ({ ...prev, [peerId]: isTyping }));
       },
-      onFunEffect: (peerId, fxType) => {
-        const sender = peersRef.current[peerId];
-        launchScreenEffect(fxType);
-        if (fxType === 'poke') {
-          triggerShake();
-          appendSystemMessage(`⚡ ${sender?.name || '对方'} 戳了戳你！`);
-        }
-      },
       onReaction: (peerId, msgId, emoji) => {
         toggleMessageReaction(msgId, emoji, peerId);
-      },
-      onClipboardSync: (peerId, text, updatedAt) => {
-        const sender = peersRef.current[peerId];
-        setSharedClip({
-          text,
-          senderName: sender?.name || '对方',
-          updatedAt,
-        });
-        bumpUnreadIfHidden();
-        onToast(`⚡ ${sender?.name || '对方'} 投递了新的跨端闪贴板内容`);
       },
       onRemoteAudioStream: (peerId, stream) => {
         setRemoteAudioStreams((prev) => {
@@ -898,21 +828,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       onPeerMediaState: (peerId, state) => {
         setPeerMediaStates((prev) => ({ ...prev, [peerId]: state }));
       },
-      onPeerMood: (peerId, mood) => {
-        setPeerMoods((prev) => ({ ...prev, [peerId]: mood }));
-      },
-      onPropThrow: (peerId, propType, targetPeerId, targetName) => {
-        const senderName = peersRef.current[peerId]?.name || '伙伴';
-        const meta = PROP_ITEMS.find((p) => p.type === propType);
-        launchScreenEffect(propType);
-        if (targetPeerId === selfPeerId && (propType === 'tomato' || propType === 'bomb')) {
-          triggerShake();
-        }
-        const receiverLabel = targetPeerId === selfPeerId ? '你' : targetName;
-        appendSystemMessage(
-          `${meta?.icon || '✨'} ${senderName} 朝 ${receiverLabel} ${meta?.verb || '扔出了互动道具'}！`
-        );
-      },
       onPomodoroSync: (_peerId, state) => {
         setPomodoro((cur) => (state.updatedAt >= cur.updatedAt ? state : cur));
       },
@@ -920,7 +835,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         applyWhiteboardEvent(peerId, event);
       },
       onPeerDataReady: (peerId) => {
-        mesh.sendMoodToPeer(peerId, selfMoodRef.current);
         if (pomodoroRef.current.running || pomodoroRef.current.updatedAt > 0) {
           mesh.sendPomodoroToPeer(peerId, pomodoroRef.current);
         }
@@ -1034,7 +948,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         };
         setLinkStatuses(pruneByActive);
         setTypingPeers(pruneByActive);
-        setPeerMoods(pruneByActive);
         setPeerMediaStates(pruneByActive);
         setSpeakingPeers(pruneByActive);
         setWbCursors(pruneByActive);
@@ -1076,11 +989,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           return next;
         });
         setTypingPeers((prev) => {
-          const next = { ...prev };
-          delete next[peerId];
-          return next;
-        });
-        setPeerMoods((prev) => {
           const next = { ...prev };
           delete next[peerId];
           return next;
@@ -1209,7 +1117,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     stopAllLocalMedia,
     toggleMessageReaction,
     trackObjectUrl,
-    triggerShake,
   ]);
 
   useEffect(() => {
@@ -1281,15 +1188,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       return haystack.includes(kw);
     });
   }, [messages, searchKeyword, filterTab]);
-
-  const handleTriggerFunEffect = (fxType: FunEffectType) => {
-    launchScreenEffect(fxType);
-    meshRef.current?.broadcastEffect(fxType);
-    if (fxType === 'poke') {
-      triggerShake();
-      appendSystemMessage('⚡ 你戳了戳房间里的小伙伴！');
-    }
-  };
 
   // 一键语音连麦：动态挂载 WebRTC 音频轨道并通知全房
   const handleToggleVoiceCall = async () => {
@@ -1391,22 +1289,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   const handleEmitWhiteboard = (ev: WhiteboardEvent) => {
     applyWhiteboardEvent(null, ev);
     meshRef.current?.broadcastWhiteboard(ev);
-  };
-
-  // 向指定伙伴投掷趣味道具
-  const handleThrowPropToPeer = (target: PeerProfile, propType: PropThrowType) => {
-    const meta = PROP_ITEMS.find((p) => p.type === propType);
-    launchScreenEffect(propType);
-    meshRef.current?.broadcastPropThrow(propType, target.peerId, target.name);
-    appendSystemMessage(`${meta?.icon || '✨'} 你朝 ${target.name} ${meta?.verb || '扔出了道具'}！`);
-  };
-
-  // 切换我的实时状态胶囊并广播
-  const handleSelectSelfMood = (mood: string) => {
-    setSelfMood(mood);
-    setShowMoodPicker(false);
-    meshRef.current?.broadcastMood(mood);
-    onToast(`状态已更新：${mood}`);
   };
 
   // 全房同步番茄钟控制
@@ -1538,28 +1420,14 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     onToast('💾 已导出聊天记录到本地');
   };
 
-  const handlePushSharedClipboard = (rawText?: string) => {
-    const val = (rawText ?? clipInput).trim();
-    if (!val) {
-      onToast('请先输入或粘贴要投递的闪贴板文本');
-      return;
-    }
-    const now = Date.now();
-    setSharedClip({ text: val, senderName: profile.name, updatedAt: now });
-    setClipInput('');
-    const sent = meshRef.current?.broadcastClipboard(val, now) || 0;
-    onToast(sent > 0 ? '⚡ 已秒同步至房间所有设备的闪贴板' : '⚡ 已存入顶部闪贴板槽');
-  };
-
   const handleSendText = () => {
     const clean = inputText.trim();
     if (!clean) return;
 
-    const wireText = secretMode ? encodeSecretText(clean) : clean;
     const id = `msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const timestamp = Date.now();
     const quote = replyingTo || undefined;
-    const p2pSent = meshRef.current?.broadcastText(id, wireText, timestamp, quote) || 0;
+    const p2pSent = meshRef.current?.broadcastText(id, clean, timestamp, quote) || 0;
 
     setMessages((prev) => [
       ...prev,
@@ -1572,7 +1440,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         isSelf: true,
         timestamp,
         text: clean,
-        isSecret: secretMode,
         replyTo: quote,
       },
     ]);
@@ -1584,7 +1451,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         senderId: selfPeerId,
         senderName: profile.name,
         senderAvatar: profile.avatar,
-        text: wireText,
+        text: clean,
         replyToId: quote?.id,
         replyToSender: quote?.senderName,
         replyToPreview: quote?.preview,
@@ -1596,7 +1463,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
 
     setInputText('');
     setReplyingTo(null);
-    if (secretMode) setSecretMode(false);
     meshRef.current?.broadcastTyping(false);
     signalingRef.current?.recordActivity('message', 0);
   };
@@ -1877,42 +1743,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     }
   };
 
-  // 将选中的文件夹打包成标准 UTF-8 ZIP 后直传（打包前先校验附件大小上限）
-  const handlePickFolderFiles = async (files: FileList | null) => {
-    if (!files || files.length === 0) return;
-    if ((meshRef.current?.getConnectedPeerCount() || 0) === 0) {
-      onToast('文件夹打包传输需先等对方加入建立 P2P 连接');
-      return;
-    }
-
-    const entries: ZipEntryInput[] = [];
-    let rootName = 'folder';
-    for (let i = 0; i < files.length; i++) {
-      const f = files[i];
-      const rel = (f as File & { webkitRelativePath?: string }).webkitRelativePath || f.name;
-      if (i === 0 && rel.includes('/')) {
-        rootName = rel.split('/')[0] || 'folder';
-      }
-      entries.push({ path: rel, file: f });
-    }
-
-    const estimatedBytes = computeEntriesTotalBytes(entries);
-    if (!checkAttachmentAllowed(estimatedBytes, `${rootName}.zip`)) {
-      return;
-    }
-
-    setZippingFolder(true);
-    try {
-      const zipFile = await buildZipArchive(entries, rootName);
-      onToast(`📁 已将「${rootName}」（${entries.length} 个文件）打包为 ZIP 并开始 P2P 发送`);
-      await sendFiles([zipFile]);
-    } catch (err) {
-      onToast(err instanceof Error ? err.message : '文件夹打包失败，请检查文件权限或体积');
-    } finally {
-      setZippingFolder(false);
-    }
-  };
-
   const handleSendPendingPaste = async () => {
     if (!pendingPaste) return;
     const item = pendingPaste;
@@ -1954,21 +1784,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     if (extraFiles.length > 0) {
       e.preventDefault();
       void sendFiles(extraFiles);
-    }
-  };
-
-  const handleStartScreenshot = async () => {
-    if (!supportsScreenCapture()) {
-      onToast('网页截屏需 HTTPS 安全上下文，当前可直接用系统截图后 Ctrl+V 粘贴发送');
-      return;
-    }
-    try {
-      const canvas = await captureScreenFrame();
-      setScreenshotCanvas(canvas);
-    } catch (err) {
-      if ((err as DOMException)?.name !== 'NotAllowedError') {
-        onToast(err instanceof Error ? err.message : '截屏失败');
-      }
     }
   };
 
@@ -2076,21 +1891,18 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         onToast('拖拽文件夹直传需先等对方进入房间建立 P2P 连接');
         return;
       }
-      setZippingFolder(true);
       try {
         for (const folder of folders) {
           const estBytes = computeEntriesTotalBytes(folder.entries);
           if (!checkAttachmentAllowed(estBytes, `${folder.name}.zip`)) {
             continue;
           }
+          onToast(`📦 正在将文件夹「${folder.name}」打包为 ZIP...`);
           const zipFile = await buildZipArchive(folder.entries, folder.name);
-          onToast(`📁 已自动将文件夹「${folder.name}」（${folder.entries.length}项）打包为 ZIP 发送`);
           await sendFiles([zipFile]);
         }
       } catch (err) {
         onToast(err instanceof Error ? err.message : '文件夹打包失败');
-      } finally {
-        setZippingFolder(false);
       }
     }
   };
@@ -2127,7 +1939,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
 
   return (
     <div
-      className={`aurora-canvas ${shaking ? 'shake-screen' : ''}`}
+      className="aurora-canvas"
       onDragEnter={handleDragEnter}
       onDragOver={(e) => e.preventDefault()}
       onDragLeave={handleDragLeave}
@@ -2178,10 +1990,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         </div>
 
         <div className="nav-right-group">
-          <div className="hide-mobile">
-            <PalettePicker theme={theme} onSelect={onSelectTheme} />
-          </div>
-
           {/* 语音连麦 & 实时屏幕共享快捷按钮 */}
           {micActive ? (
             <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
@@ -2466,16 +2274,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
 
           <button
             type="button"
-            className="btn btn-danger-soft btn-sm hide-mobile"
-            onClick={() => setConfirmClearOpen(true)}
-            title="一键立即清空服务器缓存聊天记录"
-          >
-            <Trash2 size={13} />
-            <span className="hide-mobile">秒清</span>
-          </button>
-
-          <button
-            type="button"
             className="btn btn-glass btn-sm"
             onClick={() => setShowInvite(true)}
             title="邀请二维码与链接"
@@ -2506,7 +2304,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       {/* 主体双栏毛玻璃 Bento */}
       <div className="chat-layout">
         <aside className={`chat-side-bento ${sidebarOpen ? 'open' : ''}`}>
-          {/* 移动端专属顶部房间快捷面板（把查找、保鲜期、秒清、销毁、主题色收纳整齐） */}
+          {/* 移动端专属顶部房间快捷面板 */}
           <div className="mobile-drawer-tools">
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
               <span className={`pill ${linkStatusPill.cls}`} style={{ height: 24, fontSize: 11.5 }}>
@@ -2521,10 +2319,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
               >
                 <X size={15} />
               </button>
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-              <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-sub)' }}>主题色</span>
-              <PalettePicker theme={theme} onSelect={onSelectTheme} />
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
               <button
@@ -2548,139 +2342,83 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
               >
                 <Clock size={12} /> {cacheShortLabel}
               </button>
-              <button
-                type="button"
-                className="btn btn-danger-soft btn-sm"
-                onClick={() => {
-                  setSidebarOpen(false);
-                  setConfirmClearOpen(true);
-                }}
-              >
-                <Trash2 size={12} /> 秒清缓存
-              </button>
-              {roomInfo?.mode === 'ephemeral' ? (
+              {roomInfo?.mode === 'ephemeral' && (
                 <button
                   type="button"
                   className="btn btn-danger btn-sm"
+                  style={{ gridColumn: '1 / -1' }}
                   onClick={() => {
                     setSidebarOpen(false);
                     setConfirmDestroyOpen(true);
                   }}
                 >
-                  <Flame size={12} /> 销毁房间
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  className="btn btn-glass btn-sm"
-                  onClick={() => {
-                    setSidebarOpen(false);
-                    handleExportChatLog();
-                  }}
-                >
-                  <FileDown size={12} /> 导出记录
+                  <Flame size={12} /> 销毁当前房间
                 </button>
               )}
             </div>
           </div>
 
-          {/* 秘密基地成长火花卡 */}
-          <div className="base-stats-card">
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <span style={{ fontSize: 12, fontWeight: 800, color: 'var(--accent)' }}>
-                🔥 基地火花 · 连续 {Math.max(1, roomStats.streakDays)} 天
-              </span>
-              <span className="mono" style={{ fontSize: 10.5, color: 'var(--text-muted)' }}>
-                {roomInfo?.mode === 'fixed' ? '永久养成' : '本场统计'}
-              </span>
+          {/* 秘密基地成长统计卡（常驻房或产生真实传输/专注记录时展示，临时空房保持清爽） */}
+          {(roomInfo?.mode === 'fixed' || roomStats.totalFiles > 0 || roomStats.totalPomodoros > 0) && (
+            <div className="base-stats-card">
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{ fontSize: 12, fontWeight: 800, color: 'var(--accent)' }}>
+                  🔥 基地火花 · 连续 {Math.max(1, roomStats.streakDays)} 天
+                </span>
+                <span className="mono" style={{ fontSize: 10.5, color: 'var(--text-muted)' }}>
+                  {roomInfo?.mode === 'fixed' ? '永久养成' : '本场统计'}
+                </span>
+              </div>
+              <div className="base-stats-grid">
+                <div className="base-stat-cell" title={`累计闪传 ${roomStats.totalFiles} 个文件`}>
+                  <div className="base-stat-val mono">{formatBytes(roomStats.totalBytes)}</div>
+                  <div className="base-stat-label">📦 {roomStats.totalFiles} 文件</div>
+                </div>
+                <div className="base-stat-cell" title="累计共同完成番茄专注次数">
+                  <div className="base-stat-val mono">{roomStats.totalPomodoros}</div>
+                  <div className="base-stat-label">🍅 番茄专注</div>
+                </div>
+                <div className="base-stat-cell" title="基地累计聊天互动数">
+                  <div className="base-stat-val mono">{roomStats.totalMessages}</div>
+                  <div className="base-stat-label">💬 互动数</div>
+                </div>
+              </div>
             </div>
-            <div className="base-stats-grid">
-              <div className="base-stat-cell" title={`累计闪传 ${roomStats.totalFiles} 个文件`}>
-                <div className="base-stat-val mono">{formatBytes(roomStats.totalBytes)}</div>
-                <div className="base-stat-label">📦 {roomStats.totalFiles} 文件</div>
-              </div>
-              <div className="base-stat-cell" title="累计共同完成番茄专注次数">
-                <div className="base-stat-val mono">{roomStats.totalPomodoros}</div>
-                <div className="base-stat-label">🍅 番茄专注</div>
-              </div>
-              <div className="base-stat-cell" title="基地累计聊天互动数">
-                <div className="base-stat-val mono">{roomStats.totalMessages}</div>
-                <div className="base-stat-label">💬 互动数</div>
-              </div>
-            </div>
-          </div>
+          )}
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, fontWeight: 800, color: 'var(--text-muted)' }}>
-              <span>👥 房间伙伴 ({peerList.length + 1}/{roomInfo?.maxPeers || 6})</span>
+              <span>👥 房间成员 ({peerList.length + 1}/{roomInfo?.maxPeers || 6})</span>
               <span style={{ color: wsConnected ? '#10b981' : '#f59e0b' }}>
                 {wsConnected ? '● 在线' : '● 重连'}
               </span>
             </div>
 
             <div
+              onClick={onEditProfile}
               style={{
                 padding: '9px 11px',
                 borderRadius: 16,
                 background: 'var(--glass-bg-strong)',
                 border: '1px solid var(--line-border)',
                 display: 'flex',
-                flexDirection: 'column',
-                gap: 6,
+                alignItems: 'center',
+                gap: 10,
+                cursor: 'pointer',
               }}
+              title="点击更换头像与昵称"
             >
-              <div
-                onClick={onEditProfile}
-                style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer' }}
-                title="点击更换头像与昵称"
-              >
-                <div className={micActive && !micMuted ? 'speaking-ring' : ''}>
-                  <Avatar name={profile.name} avatar={profile.avatar} size={34} />
+              <div className={micActive && !micMuted ? 'speaking-ring' : ''}>
+                <Avatar name={profile.name} avatar={profile.avatar} size={34} />
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13.5, fontWeight: 800, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {profile.name}（我）
                 </div>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 13.5, fontWeight: 800, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {profile.name}（我）
-                  </div>
-                  <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                    {micActive ? (micMuted ? '🔇 连麦静音' : '🎙️ 连麦说话中') : '点击变装改名 ✨'}
-                  </div>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                  {micActive ? (micMuted ? '🔇 连麦静音' : '🎙️ 连麦说话中') : '点击修改头像与昵称'}
                 </div>
               </div>
-
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
-                <button
-                  type="button"
-                  className="mood-badge"
-                  onClick={() => setShowMoodPicker((v) => !v)}
-                  title="切换我的实时状态标签并同步给全房伙伴"
-                >
-                  {selfMood} ▾
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-ghost btn-sm"
-                  style={{ height: 22, padding: '0 6px', fontSize: 11 }}
-                  onClick={handleOpenWhiteboard}
-                >
-                  🎨 协作白板
-                </button>
-              </div>
-
-              {showMoodPicker && (
-                <div className="mood-picker-grid">
-                  {MOOD_PRESETS.map((m) => (
-                    <button
-                      key={m}
-                      type="button"
-                      className={`btn btn-sm ${selfMood === m ? 'btn-jelly' : 'btn-glass'}`}
-                      style={{ height: 24, padding: '0 7px', fontSize: 11 }}
-                      onClick={() => handleSelectSelfMood(m)}
-                    >
-                      {m}
-                    </button>
-                  ))}
-                </div>
-              )}
             </div>
 
             {peerList.map((p) => {
@@ -2689,7 +2427,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
               const relay = st?.transport === 'relay-turn';
               const pMedia = peerMediaStates[p.peerId];
               const pSpeaking = Boolean(speakingPeers[p.peerId]);
-              const pMood = peerMoods[p.peerId];
               const sub = !ready
                 ? '正在握手...'
                 : relay
@@ -2705,74 +2442,47 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                     background: 'var(--glass-bg-strong)',
                     border: '1px solid var(--line-border)',
                     display: 'flex',
-                    flexDirection: 'column',
+                    alignItems: 'center',
+                    gap: 10,
                   }}
                 >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                    <div className={pSpeaking ? 'speaking-ring' : ''}>
-                      <Avatar name={p.name} avatar={p.avatar} size={34} />
-                    </div>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-                        <span style={{ fontSize: 13.5, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {p.name}
-                        </span>
-                        {pMedia?.micOn && (
-                          <span title={pMedia.micMuted ? '已静音' : '语音连麦中'} style={{ fontSize: 11 }}>
-                            {pMedia.micMuted ? '🔇' : '🎙️'}
-                          </span>
-                        )}
-                        {pMedia?.screenOn && (
-                          <span title="正在投屏" style={{ fontSize: 11 }}>
-                            🖥️
-                          </span>
-                        )}
-                      </div>
-                      <div style={{ fontSize: 11, color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
-                        <span className={`status-dot ${!ready ? 'pulse' : relay ? 'amber' : 'emerald'}`} />
-                        <span>{sub}</span>
-                        {pMood && <span className="mood-badge">{pMood}</span>}
-                      </div>
-                    </div>
-                    {!ready && (
-                      <button
-                        type="button"
-                        className="btn btn-ghost btn-icon"
-                        style={{ width: 26, height: 26 }}
-                        title="手动重建 P2P 连接"
-                        onClick={() => {
-                          meshRef.current?.reconnectPeer(p.peerId);
-                          onToast(`🔄 正在重新尝试与 ${p.name} 打洞直连...`);
-                        }}
-                      >
-                        <RotateCw size={13} />
-                      </button>
-                    )}
+                  <div className={pSpeaking ? 'speaking-ring' : ''}>
+                    <Avatar name={p.name} avatar={p.avatar} size={34} />
                   </div>
-
-                  {/* 指定伙伴趣味互动道具栏 */}
-                  {ready && (
-                    <div className="peer-props-row">
-                      <button
-                        type="button"
-                        className="prop-mini-btn"
-                        onClick={() => handleTriggerFunEffect('poke')}
-                        title={`戳一戳 ${p.name}`}
-                      >
-                        ⚡
-                      </button>
-                      {PROP_ITEMS.map((item) => (
-                        <button
-                          key={item.type}
-                          type="button"
-                          className="prop-mini-btn"
-                          onClick={() => handleThrowPropToPeer(p, item.type)}
-                          title={`向 ${p.name} ${item.label}`}
-                        >
-                          {item.icon}
-                        </button>
-                      ))}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                      <span style={{ fontSize: 13.5, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {p.name}
+                      </span>
+                      {pMedia?.micOn && (
+                        <span title={pMedia.micMuted ? '已静音' : '语音连麦中'} style={{ fontSize: 11 }}>
+                          {pMedia.micMuted ? '🔇' : '🎙️'}
+                        </span>
+                      )}
+                      {pMedia?.screenOn && (
+                        <span title="正在投屏" style={{ fontSize: 11 }}>
+                          🖥️
+                        </span>
+                      )}
                     </div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 4 }}>
+                      <span className={`status-dot ${!ready ? 'pulse' : relay ? 'amber' : 'emerald'}`} />
+                      <span>{sub}</span>
+                    </div>
+                  </div>
+                  {!ready && (
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-icon"
+                      style={{ width: 26, height: 26 }}
+                      title="手动重建 P2P 连接"
+                      onClick={() => {
+                        meshRef.current?.reconnectPeer(p.peerId);
+                        onToast(`🔄 正在重新尝试与 ${p.name} 打洞直连...`);
+                      }}
+                    >
+                      <RotateCw size={13} />
+                    </button>
                   )}
                 </div>
               );
@@ -2791,61 +2501,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             onSelectAmbient={handleSelectAmbient}
             onChangeVolume={handleChangeAmbientVolume}
           />
-
-          <div
-            style={{
-              padding: 13,
-              borderRadius: 18,
-              background: 'var(--glass-subtle)',
-              border: '1px solid var(--line-border)',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: 8,
-            }}
-          >
-            <div style={{ fontSize: 12.5, fontWeight: 800, display: 'flex', alignItems: 'center', gap: 5 }}>
-              <Clipboard size={14} style={{ color: 'var(--accent)' }} />
-              跨端秒拷闪贴板
-            </div>
-            <div style={{ fontSize: 11.5, color: 'var(--text-muted)', lineHeight: 1.4 }}>
-              把验证码、链接或命令粘进来，房间所有设备顶部一键秒拷！
-            </div>
-            <div style={{ display: 'flex', gap: 6 }}>
-              <input
-                className="field-input"
-                style={{ height: 34, fontSize: 12.5, borderRadius: 11, padding: '0 10px' }}
-                value={clipInput}
-                onChange={(e) => setClipInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault();
-                    handlePushSharedClipboard();
-                  }
-                }}
-                placeholder="输入或粘贴文本..."
-              />
-              <button
-                type="button"
-                className="btn btn-jelly btn-sm"
-                style={{ height: 34 }}
-                onClick={() => handlePushSharedClipboard()}
-              >
-                投递
-              </button>
-            </div>
-          </div>
-
-          {roomInfo?.mode === 'ephemeral' && (
-            <button
-              type="button"
-              className="btn btn-soft btn-sm"
-              onClick={() => void handleRotateEphemeralCode()}
-              disabled={rotatingCode}
-            >
-              <RefreshCw size={13} />
-              {rotatingCode ? '正在换新口令...' : '作废当前码并换个新口令'}
-            </button>
-          )}
 
           {savedFixedRooms.filter((r) => r.code !== roomCode).length > 0 && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -2870,7 +2525,11 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             </div>
           )}
 
-          <div style={{ marginTop: 'auto', display: 'flex', flexDirection: 'column', gap: 6, paddingTop: 8, borderTop: '1px solid var(--line-border)' }}>
+          <div style={{ marginTop: 'auto', display: 'flex', flexDirection: 'column', gap: 8, paddingTop: 10, borderTop: '1px solid var(--line-border)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+              <span style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--text-sub)' }}>主题色</span>
+              <PalettePicker theme={theme} onSelect={onSelectTheme} />
+            </div>
             <Switch
               checked={prefs.autoAcceptSmallFiles}
               onChange={(v) => onUpdatePrefs({ ...prefs, autoAcceptSmallFiles: v })}
@@ -2899,7 +2558,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
               <button
                 type="button"
                 className="btn btn-danger-soft btn-sm"
-                style={{ marginTop: 4 }}
+                style={{ marginTop: 2 }}
                 onClick={() => setConfirmDestroyOpen(true)}
               >
                 <Trash2 size={13} /> 彻底删除此常驻基地
@@ -2995,50 +2654,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             </div>
           )}
 
-          {/* 跨端共享闪贴板胶囊条 */}
-          {sharedClip && (
-            <div className="flash-clipboard-bar">
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flex: 1 }}>
-                <span className="pill pill-accent">
-                  <Zap size={12} /> 闪贴板 · {sharedClip.senderName}
-                </span>
-                <span
-                  className="mono"
-                  style={{
-                    fontSize: 13,
-                    fontWeight: 600,
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  {sharedClip.text}
-                </span>
-              </div>
-              <div style={{ display: 'flex', gap: 6 }}>
-                <button
-                  type="button"
-                  className="btn btn-jelly btn-sm"
-                  onClick={async () => {
-                    if (await copyTextToClipboard(sharedClip.text)) {
-                      onToast('已秒拷闪贴板内容 ✨');
-                    }
-                  }}
-                >
-                  <Copy size={12} /> 一键秒拷
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-ghost btn-icon"
-                  style={{ width: 28, height: 28 }}
-                  onClick={() => setSharedClip(null)}
-                >
-                  <X size={14} />
-                </button>
-              </div>
-            </div>
-          )}
-
           {/* 批量待接收文件快捷条（收到 >= 2 个大文件时自动弹出） */}
           {pendingIncomingFiles.length >= 2 && (
             <div className="batch-accept-bar">
@@ -3091,8 +2706,8 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                   </div>
                   <div style={{ fontSize: 13, color: 'var(--text-sub)', marginTop: 6 }}>
                     {peerList.length === 0
-                      ? '手机扫码或把口令甩给朋友，支持直接拖入整个文件夹自动打包 ZIP 秒传 ✨'
-                      : '已连上小伙伴！拖入文件/文件夹、发刮刮卡密信或画张涂鸦吧 🎨'}
+                      ? '手机扫码或发送口令给朋友，即可开始 P2P 文件直传与实时聊天'
+                      : '已连上伙伴，发消息、拖入文件或直接粘贴截图即可传输'}
                   </div>
                 </div>
 
@@ -3114,13 +2729,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                     onClick={handleOpenWhiteboard}
                   >
                     <Palette size={15} /> 多人协作白板
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-soft"
-                    onClick={() => handleTriggerFunEffect('confetti')}
-                  >
-                    <Sparkles size={15} /> 放个礼花
                   </button>
                 </div>
               </div>
@@ -3153,38 +2761,8 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             </div>
           )}
 
-          {/* 底部创意互动输入坞 */}
+          {/* 底部清爽输入坞 */}
           <div className="composer-zone">
-            <div className="vibe-fx-strip">
-              <button
-                type="button"
-                className={`fx-chip ${secretMode ? 'secret-on' : ''}`}
-                onClick={() => setSecretMode((v) => !v)}
-                title="开启后发出的消息将覆盖流光刮刮卡涂层，点击才揭晓"
-              >
-                <EyeOff size={13} />
-                {secretMode ? '✨ 防窥密信：已开启' : '🕵️ 防窥密信'}
-              </button>
-
-              <div className="vibe-fx-inner">
-                <button type="button" className="fx-chip" onClick={() => handleTriggerFunEffect('confetti')}>
-                  🎉 放礼花
-                </button>
-                <button type="button" className="fx-chip" onClick={() => handleTriggerFunEffect('hearts')}>
-                  💖 比心雨
-                </button>
-                <button type="button" className="fx-chip" onClick={() => handleTriggerFunEffect('fire')}>
-                  🔥 燃起来
-                </button>
-                <button type="button" className="fx-chip" onClick={() => handleTriggerFunEffect('rocket')}>
-                  🚀 起飞
-                </button>
-                <button type="button" className="fx-chip" onClick={() => handleTriggerFunEffect('poke')}>
-                  ⚡ 戳一戳
-                </button>
-              </div>
-            </div>
-
             <div className="composer-pod">
               {replyingTo && (
                 <div className="composer-reply-bar">
@@ -3293,9 +2871,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                 placeholder={
                   pendingPaste
                     ? '配上一句说明，按 Enter 发出图片...'
-                    : secretMode
-                      ? '✨ 输入防窥密信，对方点击刮开才可见...'
-                      : '聊点什么，或发送文件、截图...'
+                    : '聊点什么，或直接粘贴截图、拖入文件...'
                 }
               />
 
@@ -3331,21 +2907,13 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                     className="tool-pill"
                     onClick={() => imageInputRef.current?.click()}
                   >
-                    <ImageIcon size={14} /> 美图
-                  </button>
-                  <button
-                    type="button"
-                    className="tool-pill"
-                    onClick={handleOpenWhiteboard}
-                    title="打开多人实时同屏协作白板（同步光标、笔迹与共享便签）"
-                  >
-                    <Palette size={14} /> 白板
+                    <ImageIcon size={14} /> 图片
                   </button>
                   <button
                     type="button"
                     className={`tool-pill ${recordingVoice ? 'recording-pill' : ''}`}
                     onClick={() => void handleToggleVoiceRecord()}
-                    title="点击开始/停止录制语音对讲消息（最长 60 秒）"
+                    title="点击开始/停止录制语音消息（最长 60 秒）"
                   >
                     {recordingVoice ? (
                       <>
@@ -3360,26 +2928,18 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                   <button
                     type="button"
                     className="tool-pill"
-                    onClick={() => setShowEmoji((v) => !v)}
-                    title="插入表情"
+                    onClick={handleOpenWhiteboard}
+                    title="打开多人实时协作白板"
                   >
-                    <Smile size={15} />
+                    <Palette size={14} /> 白板
                   </button>
                   <button
                     type="button"
                     className="tool-pill"
-                    onClick={() => folderInputRef.current?.click()}
-                    disabled={zippingFolder}
-                    title="选择整个文件夹自动打包成 ZIP 后走 P2P 直传"
+                    onClick={() => setShowEmoji((v) => !v)}
+                    title="插入表情"
                   >
-                    <FolderArchive size={14} /> {zippingFolder ? '打包中...' : '文件夹'}
-                  </button>
-                  <button
-                    type="button"
-                    className="tool-pill hide-mobile"
-                    onClick={() => void handleStartScreenshot()}
-                  >
-                    <Camera size={14} /> 截图
+                    <Smile size={15} />
                   </button>
                 </div>
 
@@ -3393,7 +2953,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                     else handleSendText();
                   }}
                 >
-                  <span>{secretMode ? '密信发出' : '发送'}</span>
+                  <span>发送</span>
                   <Send size={13} />
                 </button>
               </div>
@@ -3405,18 +2965,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                 style={{ display: 'none' }}
                 onChange={(e) => {
                   if (e.target.files) void sendFiles(e.target.files);
-                  e.target.value = '';
-                }}
-              />
-              <input
-                ref={folderInputRef}
-                type="file"
-                multiple
-                // 借助 webkitdirectory 属性支持直接选择整个文件夹自动打 ZIP 发送
-                {...({ webkitdirectory: '', directory: '' } as Record<string, string>)}
-                style={{ display: 'none' }}
-                onChange={(e) => {
-                  void handlePickFolderFiles(e.target.files);
                   e.target.value = '';
                 }}
               />
@@ -3486,22 +3034,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             });
           }}
           onClose={() => setShowWhiteboard(false)}
-        />
-      )}
-
-      {screenshotCanvas && (
-        <ScreenshotModal
-          sourceCanvas={screenshotCanvas}
-          onClose={() => setScreenshotCanvas(null)}
-          onSend={(blob, caption) => {
-            setScreenshotCanvas(null);
-            void sendImageBlob(blob, {
-              fileName: `screenshot-${Date.now()}.png`,
-              isScreenshot: true,
-              caption,
-              compress: false,
-            });
-          }}
         />
       )}
 

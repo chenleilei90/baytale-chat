@@ -29,7 +29,6 @@ import {
 } from '../lib/signaling';
 import { copyTextToClipboard } from '../lib/platform';
 import { generateRandomName, pickRandomPresetAvatar } from '../lib/avatar';
-import { launchScreenEffect } from '../lib/effects';
 import { Avatar } from './Avatar';
 import { PalettePicker, Switch } from './Controls';
 
@@ -237,11 +236,7 @@ export const Lobby: React.FC<LobbyProps> = ({
     <div className="aurora-canvas">
       {/* 顶部流光毛玻璃胶囊导航 */}
       <header className="top-glass-nav">
-        <div
-          className="brand-pill"
-          onClick={() => launchScreenEffect('confetti')}
-          title="点我放个礼花 🎉"
-        >
+        <div className="brand-pill">
           <div className="brand-jelly-logo">
             <Send size={18} />
           </div>
@@ -299,7 +294,7 @@ export const Lobby: React.FC<LobbyProps> = ({
                   </span>
                 </div>
                 <div style={{ fontSize: 12.5, color: 'var(--text-sub)', marginTop: 4 }}>
-                  跨公网终端直连 + 服务器智能兜底，支持防窥刮刮卡密信、手绘霓虹涂鸦与跨端闪贴板
+                  跨公网终端直连 + TURN 智能兜底，支持 GB 级大文件直传、实时聊天、语音连麦与协作白板
                 </div>
               </div>
             </div>
@@ -727,19 +722,19 @@ export const Lobby: React.FC<LobbyProps> = ({
               )}
             </div>
 
-            {/* 创意黑科技实验室展示卡 */}
+            {/* 核心能力概览卡 */}
             <div className="glass-bento" style={{ padding: 18 }}>
               <div style={{ fontSize: 13, fontWeight: 800, marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
                 <Wand2 size={15} style={{ color: 'var(--accent)' }} />
-                房间内置好玩技能
+                房间核心能力
               </div>
               <div className="feature-tag-cloud">
+                <span className="feature-mini-pill">📦 GB 级 P2P 文件直传</span>
                 <span className="feature-mini-pill">🎧 语音连麦与投屏</span>
-                <span className="feature-mini-pill">🎨 多人同屏白板</span>
+                <span className="feature-mini-pill">🎨 多人协作白板</span>
                 <span className="feature-mini-pill">🍅 同步番茄自习室</span>
-                <span className="feature-mini-pill">💥 砸番茄/送鲜花道具</span>
-                <span className="feature-mini-pill">📁 文件夹自动打ZIP</span>
-                <span className="feature-mini-pill">🕵️ 防窥刮刮卡密信</span>
+                <span className="feature-mini-pill">⏱ 0~7天可控缓存</span>
+                <span className="feature-mini-pill">🖼️ 粘贴截图原图直发</span>
               </div>
             </div>
           </aside>

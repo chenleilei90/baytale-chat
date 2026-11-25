@@ -252,19 +252,6 @@ select {
   }
 }
 
-/* 戳一戳窗口震动特效 */
-@keyframes nudgeShake {
-  0%, 100% { transform: translateX(0); }
-  15% { transform: translateX(-9px) rotate(-0.6deg); }
-  30% { transform: translateX(8px) rotate(0.6deg); }
-  45% { transform: translateX(-6px); }
-  60% { transform: translateX(6px); }
-  75% { transform: translateX(-3px); }
-}
-.shake-screen {
-  animation: nudgeShake 0.48s cubic-bezier(0.36, 0.07, 0.19, 0.97);
-}
-
 /* ==========================================================================
    悬浮晶莹毛玻璃顶栏 (Floating Glass Capsule Bar)
    ========================================================================== */
@@ -289,7 +276,6 @@ select {
   display: inline-flex;
   align-items: center;
   gap: 10px;
-  cursor: pointer;
 }
 
 .brand-jelly-logo {
@@ -373,11 +359,6 @@ select {
 }
 .mobile-drawer-tools {
   display: none;
-}
-.vibe-fx-inner {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
 }
 .composer-tools-scroll {
   display: flex;
@@ -945,20 +926,6 @@ select {
   overflow: hidden;
 }
 
-/* 跨端闪贴板亮色胶囊条 */
-.flash-clipboard-bar {
-  margin: 12px 16px 0;
-  padding: 9px 14px;
-  border-radius: 16px;
-  background: var(--glass-bg-strong);
-  border: 1.5px solid var(--line-strong);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  animation: popIn 0.28s cubic-bezier(0.34, 1.56, 0.64, 1);
-}
-
 @keyframes popIn {
   from {
     opacity: 0;
@@ -1362,52 +1329,13 @@ select {
 }
 
 /* ==========================================================================
-   底部互动输入坞 (Playful Interactive Composer Pod)
+   底部清爽输入坞 (Clean Interactive Composer Pod)
    ========================================================================== */
 .composer-zone {
   padding: 6px 16px 14px;
   display: flex;
   flex-direction: column;
   gap: 8px;
-}
-
-/* 氛围特效快捷胶囊栏 */
-.vibe-fx-strip {
-  max-width: 860px;
-  width: 100%;
-  margin: 0 auto;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.fx-chip {
-  height: 28px;
-  padding: 0 11px;
-  border-radius: 99px;
-  border: 1px solid var(--line-border);
-  background: var(--glass-bg-strong);
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-sub);
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
-}
-.fx-chip:hover {
-  transform: translateY(-2px) scale(1.05);
-  border-color: var(--accent);
-  color: var(--accent);
-}
-.fx-chip.secret-on {
-  background: linear-gradient(135deg, #6366f1, #ec4899);
-  border-color: transparent;
-  color: #ffffff;
-  box-shadow: 0 6px 16px rgba(236, 72, 153, 0.35);
 }
 
 .composer-pod {
@@ -1610,23 +1538,6 @@ select {
 .avatar-cell.active {
   border-color: var(--accent);
   background: var(--accent-soft);
-}
-
-.screenshot-canvas-wrap {
-  background: #121024;
-  border-radius: 18px;
-  border: 1.5px solid var(--line-border);
-  overflow: hidden;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  max-height: 62vh;
-}
-.screenshot-canvas-wrap canvas {
-  max-width: 100%;
-  max-height: 62vh;
-  display: block;
-  cursor: crosshair;
 }
 
 .alert-strip {
@@ -1839,56 +1750,6 @@ select {
   display: flex;
   flex-direction: column;
   gap: 6px;
-}
-
-/* 成员状态胶囊与道具快捷栏 */
-.mood-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  padding: 1px 7px;
-  border-radius: 99px;
-  font-size: 10.5px;
-  font-weight: 700;
-  background: var(--accent-soft);
-  color: var(--accent);
-  border: none;
-  cursor: pointer;
-}
-.mood-picker-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  padding: 8px;
-  border-radius: 12px;
-  background: var(--glass-bg-strong);
-  border: 1px solid var(--line-border);
-}
-.peer-props-row {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  margin-top: 6px;
-  padding-top: 6px;
-  border-top: 1px dashed var(--line-border);
-}
-.prop-mini-btn {
-  flex: 1;
-  height: 24px;
-  border-radius: 8px;
-  border: 1px solid var(--line-border);
-  background: var(--glass-subtle);
-  font-size: 12px;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  transition: transform 0.16s cubic-bezier(0.34, 1.56, 0.64, 1), border-color 0.16s ease;
-}
-.prop-mini-btn:hover {
-  transform: translateY(-1.5px) scale(1.08);
-  border-color: var(--accent);
-  background: var(--accent-soft);
 }
 
 /* 聊天搜索与分类筛选工具条 */
@@ -2204,31 +2065,10 @@ select {
     right: auto !important;
   }
 
-  /* 底部输入坞：单行可横滑特效条 + 单行可横滑工具栏，释放大量聊天可视空间 */
+  /* 底部输入坞：单行 5 工具精简排布，最大化聊天可视空间 */
   .composer-zone {
     padding: 6px 10px 8px;
     gap: 6px;
-  }
-  .vibe-fx-strip {
-    flex-wrap: nowrap;
-    justify-content: flex-start;
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-    scrollbar-width: none;
-    gap: 6px;
-    padding-bottom: 1px;
-  }
-  .vibe-fx-strip::-webkit-scrollbar {
-    display: none;
-  }
-  .vibe-fx-inner {
-    display: contents;
-  }
-  .fx-chip {
-    flex-shrink: 0;
-    height: 27px;
-    padding: 0 10px;
-    font-size: 11.5px;
   }
   .composer-pod {
     padding: 8px 10px;
@@ -2271,7 +2111,6 @@ select {
   }
 
   /* 聊天顶部横幅与筛选栏紧凑适配 */
-  .flash-clipboard-bar,
   .batch-accept-bar,
   .wb-invite-banner,
   .chat-filter-bar,
