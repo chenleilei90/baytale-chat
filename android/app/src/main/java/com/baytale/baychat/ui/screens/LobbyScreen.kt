@@ -75,6 +75,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.baytale.baychat.core.model.AppThemeMode
+import com.baytale.baychat.core.model.RecentRoom
 import com.baytale.baychat.core.model.RoomMode
 import com.baytale.baychat.core.model.SavedFixedRoom
 import com.baytale.baychat.core.util.FormatUtils
@@ -102,8 +103,9 @@ fun LobbyScreen(
     onJoinRoom: (rawInput: String, password: String) -> Unit,
     onRequestQrScan: () -> Unit,
     onRemoveSavedRoom: (String) -> Unit,
+    onRemoveRecentRoom: (String) -> Unit,
+    onClearRecentRooms: () -> Unit,
     onUpdateProfile: (String, String) -> Unit,
-    onRandomizeProfile: () -> Unit,
     onSelectTheme: (AppThemeMode) -> Unit,
     onUpdateServerUrl: (String) -> Unit,
     onClearPendingShare: () -> Unit,
@@ -542,6 +544,45 @@ fun LobbyScreen(
             }
         }
 
+        // 最近访问房间（自动记录临时闪传房与固定房，支持一键重进与清空）
+        if (state.recentRooms.isNotEmpty()) {
+            Card(
+                shape = RoundedCornerShape(22.dp),
+                colors = CardDefaults.cardColors(containerColor = colors.surface),
+                border = BorderStroke(1.dp, colors.border),
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text("🕒 最近房间", fontWeight = FontWeight.ExtraBold, fontSize = 14.5.sp, color = colors.textMain)
+                        TextButton(
+                            onClick = onClearRecentRooms,
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                            modifier = Modifier.height(28.dp),
+                        ) {
+                            Text("清空", fontSize = 12.sp, color = colors.textMuted)
+                        }
+                    }
+                    state.recentRooms.take(6).forEach { item ->
+                        RecentRoomRow(
+                            room = item,
+                            onEnter = { onJoinRoom(item.code, item.password) },
+                            onCopy = { onCopyInviteUrl(item.code) },
+                            onRemove = { onRemoveRecentRoom(item.code) },
+                        )
+                    }
+                }
+            }
+        }
+
         // 我的常驻秘密基地
         if (state.savedRooms.isNotEmpty()) {
             Card(
@@ -597,10 +638,14 @@ fun LobbyScreen(
                         Text("免注册 · 与网页端 chat.baytale.com 互通", fontSize = 11.5.sp, color = colors.textMuted)
                     }
                 }
-                TextButton(onClick = onRandomizeProfile) {
-                    Text("换个昵称", color = colors.accent, fontWeight = FontWeight.SemiBold)
+                TextButton(onClick = { showSettingsDialog = true }) {
+                    Text("改昵称", color = colors.accent, fontWeight = FontWeight.SemiBold)
                 }
             }
+        }
+        // 若有后台挂起房间浮窗，底部额外留白防止遮挡资料卡
+        if (state.activeRoom != null && state.roomMinimized) {
+            Spacer(Modifier.height(78.dp))
         }
     }
 
@@ -695,6 +740,57 @@ private fun SavedRoomRow(
 }
 
 @Composable
+private fun RecentRoomRow(
+    room: RecentRoom,
+    onEnter: () -> Unit,
+    onCopy: () -> Unit,
+    onRemove: () -> Unit,
+) {
+    val colors = LocalBayColors.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(colors.surfaceSubtle)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                Text("#${room.code}", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 14.sp, color = colors.textMain)
+                if (room.hasPassword) {
+                    Icon(Icons.Rounded.Lock, contentDescription = null, tint = colors.accent, modifier = Modifier.size(12.dp))
+                }
+            }
+            Text(
+                text = (if (room.mode == RoomMode.FIXED.wireValue) "📌 常驻" else "🔥 闪传") +
+                    " · ${FormatUtils.formatRelativeTime(room.lastVisitedAt)}",
+                fontSize = 11.sp,
+                color = colors.textMuted,
+            )
+        }
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+            Button(
+                onClick = onEnter,
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                modifier = Modifier.height(30.dp),
+                shape = RoundedCornerShape(10.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = colors.accent),
+            ) {
+                Text("重进", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            }
+            IconButton(onClick = onCopy, modifier = Modifier.size(30.dp)) {
+                Icon(Icons.Rounded.ContentCopy, contentDescription = "复制链接", tint = colors.textSub, modifier = Modifier.size(15.dp))
+            }
+            IconButton(onClick = onRemove, modifier = Modifier.size(30.dp)) {
+                Icon(Icons.Rounded.DeleteOutline, contentDescription = "移除", tint = colors.textMuted, modifier = Modifier.size(15.dp))
+            }
+        }
+    }
+}
+
+@Composable
 private fun ErrorBanner(text: String) {
     val colors = LocalBayColors.current
     Box(
@@ -718,15 +814,15 @@ private fun ProfileAndServerDialog(
     onSaveServerUrl: (String) -> Unit,
 ) {
     val colors = LocalBayColors.current
-    var name by remember { mutableStateOf(state.profile.name) }
-    var avatar by remember { mutableStateOf(state.profile.avatar) }
-    var serverUrl by remember { mutableStateOf(state.prefs.serverUrl) }
+    var name by remember(state.profile.name) { mutableStateOf(state.profile.name) }
+    var avatar by remember(state.profile.avatar) { mutableStateOf(state.profile.avatar) }
+    var serverUrl by remember(state.prefs.serverUrl) { mutableStateOf(state.prefs.serverUrl) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         shape = RoundedCornerShape(22.dp),
         containerColor = colors.surface,
-        title = { Text("资料、主题与服务器", fontWeight = FontWeight.ExtraBold) },
+        title = { Text("修改昵称、头像与设置", fontWeight = FontWeight.ExtraBold) },
         text = {
             Column(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
@@ -735,10 +831,15 @@ private fun ProfileAndServerDialog(
                 OutlinedTextField(
                     value = name,
                     onValueChange = { if (it.length <= 24) name = it },
-                    label = { Text("显示昵称") },
+                    label = { Text("显示昵称 (${name.trim().length}/24)") },
                     singleLine = true,
                     shape = RoundedCornerShape(12.dp),
                     modifier = Modifier.fillMaxWidth(),
+                    trailingIcon = {
+                        IconButton(onClick = { name = FormatUtils.generateRandomName() }) {
+                            Icon(Icons.Rounded.Casino, contentDescription = "随机生成昵称", tint = colors.accent)
+                        }
+                    },
                 )
                 Text("选择头像", fontSize = 12.5.sp, fontWeight = FontWeight.Bold, color = colors.textSub)
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {

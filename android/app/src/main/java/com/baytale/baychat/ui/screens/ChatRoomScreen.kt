@@ -56,6 +56,7 @@ import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.InsertDriveFile
 import androidx.compose.material.icons.rounded.LocalFireDepartment
 import androidx.compose.material.icons.rounded.Mood
+import androidx.compose.material.icons.rounded.PictureInPictureAlt
 import androidx.compose.material.icons.rounded.QrCode2
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
@@ -108,6 +109,7 @@ import com.baytale.baychat.core.model.ChatItem
 import com.baytale.baychat.core.model.ChatKind
 import com.baytale.baychat.core.model.FileTransferInfo
 import com.baytale.baychat.core.model.LinkTransportType
+import com.baytale.baychat.core.model.RecentRoom
 import com.baytale.baychat.core.model.RoomMode
 import com.baytale.baychat.core.model.TransferDirection
 import com.baytale.baychat.core.model.TransferStatus
@@ -137,7 +139,7 @@ fun ChatRoomScreen(
     onSendUris: (List<Uri>) -> Unit,
     onSendPendingShare: () -> Unit,
     onClearPendingShare: () -> Unit,
-    onAcceptFile: (peerId: String, transferId: String) -> Unit,
+    onAcceptFile: (peerId: String, transferId: String, resumeIfAvailable: Boolean) -> Unit,
     onRejectFile: (peerId: String, transferId: String) -> Unit,
     onCancelTransfer: (peerId: String, transferId: String) -> Unit,
     onReconnectPeer: (peerId: String) -> Unit,
@@ -152,6 +154,8 @@ fun ChatRoomScreen(
     onExportLog: () -> Unit,
     onClearHistory: () -> Unit,
     onRotateCode: () -> Unit,
+    onSwitchRecentRoom: (RecentRoom) -> Unit,
+    onMinimizeRoom: () -> Unit,
     onLeaveRoom: () -> Unit,
     onDestroyRoom: () -> Unit,
     onToast: (String) -> Unit,
@@ -252,8 +256,9 @@ fun ChatRoomScreen(
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                IconButton(onClick = onLeaveRoom, modifier = Modifier.size(38.dp)) {
-                    Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "离开房间", tint = colors.textMain)
+                // 左上角默认最小化挂起（不断开传输），彻底退出可在右上角设置内选择
+                IconButton(onClick = onMinimizeRoom, modifier = Modifier.size(38.dp)) {
+                    Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "挂起到后台返回大厅", tint = colors.textMain)
                 }
                 Column(
                     modifier = Modifier
@@ -291,17 +296,20 @@ fun ChatRoomScreen(
             }
 
             Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = { showSearch = !showSearch }, modifier = Modifier.size(38.dp)) {
+                IconButton(onClick = onMinimizeRoom, modifier = Modifier.size(36.dp)) {
+                    Icon(Icons.Rounded.PictureInPictureAlt, contentDescription = "最小化挂起房间", tint = colors.textSub, modifier = Modifier.size(20.dp))
+                }
+                IconButton(onClick = { showSearch = !showSearch }, modifier = Modifier.size(36.dp)) {
                     Icon(
                         Icons.Rounded.Search,
                         contentDescription = "查找消息",
                         tint = if (showSearch) colors.accent else colors.textSub,
                     )
                 }
-                IconButton(onClick = { showInviteDialog = true }, modifier = Modifier.size(38.dp)) {
+                IconButton(onClick = { showInviteDialog = true }, modifier = Modifier.size(36.dp)) {
                     Icon(Icons.Rounded.QrCode2, contentDescription = "邀请二维码", tint = colors.accent)
                 }
-                IconButton(onClick = { showSettingsSheet = true }, modifier = Modifier.size(38.dp)) {
+                IconButton(onClick = { showSettingsSheet = true }, modifier = Modifier.size(36.dp)) {
                     Icon(Icons.Rounded.Tune, contentDescription = "房间设置", tint = colors.textSub)
                 }
             }
@@ -960,6 +968,40 @@ fun ChatRoomScreen(
 
                 HorizontalDivider(color = colors.border)
 
+                // 最近房间快捷切换
+                val otherRecents = state.recentRooms.filterNot { it.code.equals(room.roomCode, ignoreCase = true) }
+                if (otherRecents.isNotEmpty()) {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("🕒 切换最近房间", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = colors.textMain)
+                        otherRecents.take(4).forEach { rec ->
+                            OutlinedButton(
+                                onClick = {
+                                    showSettingsSheet = false
+                                    onSwitchRecentRoom(rec)
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(12.dp),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text("#${rec.code}", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, color = colors.textMain)
+                                    Text(
+                                        text = (if (rec.mode == RoomMode.FIXED.wireValue) "常驻" else "闪传") +
+                                            " · ${FormatUtils.formatRelativeTime(rec.lastVisitedAt)}",
+                                        fontSize = 11.5.sp,
+                                        color = colors.textMuted,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    HorizontalDivider(color = colors.border)
+                }
+
                 // 管理操作按钮组
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(
@@ -990,21 +1032,34 @@ fun ChatRoomScreen(
                     }
                 }
 
-                Button(
-                    onClick = {
-                        showSettingsSheet = false
-                        showDestroyConfirm = true
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(14.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = colors.danger),
-                ) {
-                    Icon(Icons.Rounded.LocalFireDepartment, null, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                        if (room.roomInfo?.mode == RoomMode.FIXED.wireValue) "彻底删除此常驻基地" else "立即销毁房间并作废口令",
-                        fontWeight = FontWeight.Bold,
-                    )
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = {
+                            showSettingsSheet = false
+                            onLeaveRoom()
+                        },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(14.dp),
+                    ) {
+                        Text("退出并断开", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = colors.textMain)
+                    }
+                    Button(
+                        onClick = {
+                            showSettingsSheet = false
+                            showDestroyConfirm = true
+                        },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(14.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = colors.danger),
+                    ) {
+                        Icon(Icons.Rounded.LocalFireDepartment, null, modifier = Modifier.size(15.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            if (room.roomInfo?.mode == RoomMode.FIXED.wireValue) "删除基地" else "销毁房间",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp,
+                        )
+                    }
                 }
             }
         }
@@ -1109,7 +1164,7 @@ private fun ChatMessageRow(
     onLongPress: () -> Unit,
     onPreviewImage: (Any) -> Unit,
     onReact: (String) -> Unit,
-    onAcceptFile: (String, String) -> Unit,
+    onAcceptFile: (String, String, Boolean) -> Unit,
     onRejectFile: (String, String) -> Unit,
     onCancelTransfer: (String, String) -> Unit,
     onOpenLocalFile: (String, String) -> Unit,
@@ -1274,7 +1329,7 @@ private fun ChatMessageRow(
                     item.transfer?.let { tr ->
                         FileTransferCard(
                             transfer = tr,
-                            onAccept = { tr.targetPeerId?.let { pid -> onAcceptFile(pid, tr.transferId) } },
+                            onAccept = { resume -> tr.targetPeerId?.let { pid -> onAcceptFile(pid, tr.transferId, resume) } },
                             onReject = { tr.targetPeerId?.let { pid -> onRejectFile(pid, tr.transferId) } },
                             onCancel = { tr.targetPeerId?.let { pid -> onCancelTransfer(pid, tr.transferId) } },
                             onOpen = {
@@ -1319,22 +1374,26 @@ private fun ChatMessageRow(
 @Composable
 private fun FileTransferCard(
     transfer: FileTransferInfo,
-    onAccept: () -> Unit,
+    onAccept: (resumeIfAvailable: Boolean) -> Unit,
     onReject: () -> Unit,
     onCancel: () -> Unit,
     onOpen: () -> Unit,
 ) {
     val colors = LocalBayColors.current
-    val progress = if (transfer.fileSize > 0) {
+    val rawProgress = if (transfer.fileSize > 0) {
         (transfer.transferredBytes.toFloat() / transfer.fileSize.toFloat()).coerceIn(0f, 1f)
     } else 1f
+    val barProgress = if (transfer.status == TransferStatus.TRANSFERRING) maxOf(0.02f, rawProgress) else rawProgress
+    val pctNum = rawProgress * 100f
+    val pctLabel = if (pctNum > 0f && pctNum < 10f) String.format(java.util.Locale.US, "%.1f", pctNum) else pctNum.toInt().toString()
     val ext = transfer.fileName.substringAfterLast('.', "").take(4).uppercase()
+    val hasResume = transfer.canResumeBytes > 0L
 
     Card(
         shape = RoundedCornerShape(18.dp),
         colors = CardDefaults.cardColors(containerColor = colors.surface),
         border = BorderStroke(1.dp, colors.border),
-        modifier = Modifier.width(280.dp),
+        modifier = Modifier.width(288.dp),
     ) {
         Column(
             modifier = Modifier.padding(12.dp),
@@ -1377,7 +1436,7 @@ private fun FileTransferCard(
 
             if (transfer.status == TransferStatus.TRANSFERRING || transfer.status == TransferStatus.WAITING_ACCEPT) {
                 LinearProgressIndicator(
-                    progress = { progress },
+                    progress = { barProgress },
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(6.dp)
@@ -1390,40 +1449,73 @@ private fun FileTransferCard(
                     horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
                     Text(
-                        text = if (transfer.status == TransferStatus.WAITING_ACCEPT) "等待对方确认..."
-                        else "${(progress * 100).toInt()}% · ${FormatUtils.formatBytes(transfer.speedBps.toLong())}/s",
+                        text = when {
+                            transfer.status == TransferStatus.WAITING_ACCEPT -> "等待对方确认..."
+                            transfer.transferredBytes == 0L -> "已确认，等待数据流..."
+                            else -> "$pctLabel% · ${FormatUtils.formatBytes(transfer.transferredBytes)}/${FormatUtils.formatBytes(transfer.fileSize)} · ${FormatUtils.formatBytes(transfer.speedBps.toLong())}/s"
+                        },
                         fontFamily = FontFamily.Monospace,
-                        fontSize = 11.sp,
+                        fontSize = 10.5.sp,
                         color = colors.textSub,
+                        modifier = Modifier.weight(1f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
-                    if (transfer.status == TransferStatus.TRANSFERRING) {
+                    if (transfer.status == TransferStatus.TRANSFERRING && transfer.speedBps > 0) {
+                        Spacer(Modifier.width(4.dp))
                         Text(
                             text = FormatUtils.formatEta(transfer.etaSeconds),
                             fontFamily = FontFamily.Monospace,
-                            fontSize = 11.sp,
+                            fontSize = 10.5.sp,
                             color = colors.textMuted,
                         )
                     }
                 }
+                if (transfer.resumedFromBytes > 0L) {
+                    Text(
+                        text = "⚡ 已从 ${FormatUtils.formatBytes(transfer.resumedFromBytes)} 断点自动续传",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = colors.accent,
+                    )
+                }
             }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                 when (transfer.status) {
                     TransferStatus.OFFERING -> {
-                        Button(
-                            onClick = onAccept,
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
-                            modifier = Modifier.height(32.dp),
-                            shape = RoundedCornerShape(10.dp),
-                            colors = ButtonDefaults.buttonColors(containerColor = colors.accent),
-                        ) {
-                            Icon(Icons.Rounded.Download, null, modifier = Modifier.size(14.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text("接收", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        if (hasResume) {
+                            Button(
+                                onClick = { onAccept(true) },
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                                modifier = Modifier.height(32.dp),
+                                shape = RoundedCornerShape(10.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = colors.accent),
+                            ) {
+                                Text("断点续传 (${FormatUtils.formatBytes(transfer.canResumeBytes)})", fontSize = 11.5.sp, fontWeight = FontWeight.Bold)
+                            }
+                            OutlinedButton(
+                                onClick = { onAccept(false) },
+                                contentPadding = PaddingValues(horizontal = 9.dp, vertical = 0.dp),
+                                modifier = Modifier.height(32.dp),
+                                shape = RoundedCornerShape(10.dp),
+                            ) { Text("重下", fontSize = 11.5.sp) }
+                        } else {
+                            Button(
+                                onClick = { onAccept(true) },
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                                modifier = Modifier.height(32.dp),
+                                shape = RoundedCornerShape(10.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = colors.accent),
+                            ) {
+                                Icon(Icons.Rounded.Download, null, modifier = Modifier.size(14.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("接收", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
                         }
                         OutlinedButton(
                             onClick = onReject,
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
                             modifier = Modifier.height(32.dp),
                             shape = RoundedCornerShape(10.dp),
                         ) { Text("婉拒", fontSize = 12.sp) }

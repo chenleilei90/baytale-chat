@@ -384,11 +384,34 @@ class WebRtcMeshManager(
         val session = sessions.remove(remotePeerId) ?: return
         session.statsJob?.cancel()
         session.bufferedLowWaiter?.complete(Unit)
-        session.outgoing.values.forEach { it.cancelled = true }
+        session.outgoing.values.forEach { out ->
+            out.cancelled = true
+            if (out.info.status == TransferStatus.WAITING_ACCEPT || out.info.status == TransferStatus.TRANSFERRING) {
+                out.info = out.info.copy(
+                    status = TransferStatus.ERROR,
+                    errorMessage = "对方已离开或连接中断",
+                    speedBps = 0.0,
+                    etaSeconds = 0.0,
+                )
+                callbacks.onTransferUpdate(out.info)
+            }
+        }
         session.incomingById.values.forEach { inc ->
             inc.cancelled = true
+            // 断线时仅安全刷盘关闭流、保留 .part 断点文件，重连发送同文件即可无缝续传
+            runCatching { inc.outputStream?.flush() }
             runCatching { inc.outputStream?.close() }
-            runCatching { inc.tempFile?.delete() }
+            inc.outputStream = null
+            if (inc.info.status == TransferStatus.OFFERING || inc.info.status == TransferStatus.TRANSFERRING) {
+                val hasPartial = !inc.info.isImage && !inc.info.isAudio && inc.info.transferredBytes > 0L
+                inc.info = inc.info.copy(
+                    status = TransferStatus.ERROR,
+                    errorMessage = if (hasPartial) "对方已离开，已保留断点（重发同文件可续传）" else "对方已离开或连接中断",
+                    speedBps = 0.0,
+                    etaSeconds = 0.0,
+                )
+                callbacks.onTransferUpdate(inc.info)
+            }
         }
         session.receiveExecutor.shutdownNow()
         runCatching { session.chatChannel?.close() }
@@ -483,28 +506,75 @@ class WebRtcMeshManager(
         return created
     }
 
-    fun acceptIncomingTransfer(peerId: String, transferId: String) {
-        val session = sessions[peerId] ?: return
-        val inc = session.incomingById[transferId] ?: return
-        if (inc.accepted || inc.cancelled) return
+    private fun transferCacheDir(): File {
+        val dir = File(appContext.cacheDir, "baychat_transfers").apply { mkdirs() }
+        // 自动清理超过 24 小时的陈旧断点碎片，防止长期占用手机存储
+        val expireAt = System.currentTimeMillis() - 24L * 3600L * 1000L
+        dir.listFiles()?.forEach { f ->
+            if (f.isFile && f.name.endsWith(".part") && f.lastModified() < expireAt) {
+                runCatching { f.delete() }
+            }
+        }
+        return dir
+    }
 
-        val transferDir = File(appContext.cacheDir, "baychat_transfers").apply { mkdirs() }
-        val tmp = File(transferDir, "${transferId.replace(Regex("[^a-zA-Z0-9._-]"), "_")}.part")
+    private fun resumePartFile(fileName: String, fileSize: Long): File {
+        val keyHash = FormatUtils.bytesToHex(
+            MessageDigest.getInstance("SHA-256").digest("$fileName::$fileSize".toByteArray(Charsets.UTF_8))
+        ).take(20)
+        return File(transferCacheDir(), "resume_$keyHash.part")
+    }
+
+    fun acceptIncomingTransfer(peerId: String, transferId: String, resumeIfAvailable: Boolean = true): Boolean {
+        val session = sessions[peerId] ?: return false
+        if (!session.status.dataReady) return false
+        val inc = session.incomingById[transferId] ?: return false
+        if (inc.accepted || inc.cancelled) return false
+
+        val isResumableFile = !inc.info.isImage && !inc.info.isAudio && inc.info.fileSize > 0L
+        val tmp = if (isResumableFile) {
+            resumePartFile(inc.info.fileName, inc.info.fileSize)
+        } else {
+            File(transferCacheDir(), "${transferId.replace(Regex("[^a-zA-Z0-9._-]"), "_")}.part")
+        }
+
+        val existingLen = if (isResumableFile && resumeIfAvailable && tmp.exists()) tmp.length() else 0L
+        val resumeOffset = if (existingLen in 1L until inc.info.fileSize) existingLen else 0L
+        if (resumeOffset == 0L && tmp.exists()) {
+            runCatching { tmp.delete() }
+        }
+
         inc.tempFile = tmp
-        inc.outputStream = BufferedOutputStream(FileOutputStream(tmp), 64 * 1024)
+        inc.outputStream = BufferedOutputStream(FileOutputStream(tmp, resumeOffset > 0L), 64 * 1024)
         inc.accepted = true
         inc.lastReportAt = SystemClock.elapsedRealtime()
-        inc.lastReportBytes = 0L
-        inc.info = inc.info.copy(status = TransferStatus.TRANSFERRING)
+        inc.lastReportBytes = resumeOffset
+        inc.info = inc.info.copy(
+            status = TransferStatus.TRANSFERRING,
+            transferredBytes = resumeOffset,
+            resumedFromBytes = resumeOffset,
+        )
         callbacks.onTransferUpdate(inc.info)
 
-        sendChatJson(
+        val ok = sendChatJson(
             session,
             buildJsonObject {
                 put("kind", "file-accept")
                 put("transferId", transferId)
+                if (resumeOffset > 0L) put("offset", resumeOffset)
             }
         )
+        if (!ok) {
+            inc.cancelled = true
+            runCatching { inc.outputStream?.close() }
+            inc.outputStream = null
+            inc.info = inc.info.copy(status = TransferStatus.ERROR, errorMessage = "数据通道已断开，无法接收")
+            callbacks.onTransferUpdate(inc.info)
+            session.incomingById.remove(transferId)
+            session.incomingByStream.remove(inc.streamId)
+            return false
+        }
+        return true
     }
 
     fun rejectIncomingTransfer(peerId: String, transferId: String) {
@@ -668,6 +738,12 @@ class WebRtcMeshManager(
                 val msgId = obj["msgId"]?.jsonPrimitive?.content ?: "tr_$transferId"
                 val ts = obj["timestamp"]?.jsonPrimitive?.content?.toLongOrNull() ?: System.currentTimeMillis()
 
+                val resumableBytes = if (!isImage && !isAudio && fileSize > 0L) {
+                    val part = resumePartFile(fileName, fileSize)
+                    val len = if (part.exists()) part.length() else 0L
+                    if (len in 1L until fileSize) len else 0L
+                } else 0L
+
                 val info = FileTransferInfo(
                     transferId = transferId,
                     streamId = streamId,
@@ -680,6 +756,7 @@ class WebRtcMeshManager(
                     direction = TransferDirection.RECEIVE,
                     targetPeerId = session.peerId,
                     status = TransferStatus.OFFERING,
+                    canResumeBytes = resumableBytes,
                 )
                 val inc = IncomingTransfer(transferId, streamId, session.peerId, info)
                 session.incomingById[transferId] = inc
@@ -687,16 +764,26 @@ class WebRtcMeshManager(
                 callbacks.onFileOffer(session.peerId, info, msgId, caption, ts)
 
                 if (callbacks.shouldAutoAccept(info)) {
-                    acceptIncomingTransfer(session.peerId, transferId)
+                    acceptIncomingTransfer(session.peerId, transferId, resumeIfAvailable = true)
                 }
             }
 
             "file-accept" -> {
                 val transferId = obj["transferId"]?.jsonPrimitive?.content ?: return
-                val out = session.outgoing[transferId] ?: return
+                val out = session.outgoing[transferId]
+                if (out == null) {
+                    // 找不到对应发送任务（如已重载），主动回传 cancel 避免对端卡死
+                    sendChatJson(session, buildJsonObject {
+                        put("kind", "file-cancel")
+                        put("transferId", transferId)
+                    })
+                    return
+                }
                 if (!out.started && !out.cancelled) {
                     out.started = true
-                    scope.launch { pumpOutgoingFile(session, out) }
+                    val reqOffset = obj["offset"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L
+                    val startOffset = if (reqOffset in 1L until out.info.fileSize) reqOffset else 0L
+                    scope.launch { pumpOutgoingFile(session, out, startOffset) }
                 }
             }
 
@@ -744,8 +831,8 @@ class WebRtcMeshManager(
         }
     }
 
-    // 流式分片发送（支持任意 GB 级大文件，仅占用 ~48KB 读取缓冲 + 背压水位流控）
-    private suspend fun pumpOutgoingFile(session: PeerSession, out: OutgoingTransfer) {
+    // 流式分片发送（支持任意 GB 级大文件与断点偏移续传，仅占用 ~48KB 读取缓冲 + 背压水位流控）
+    private suspend fun pumpOutgoingFile(session: PeerSession, out: OutgoingTransfer, startOffset: Long = 0L) {
         val ch = session.fileChannel
         if (ch == null || ch.state() != DataChannel.State.OPEN) {
             out.info = out.info.copy(status = TransferStatus.ERROR, errorMessage = "P2P 数据通道未就绪")
@@ -754,14 +841,18 @@ class WebRtcMeshManager(
         }
 
         val sha = MessageDigest.getInstance("SHA-256")
-        out.info = out.info.copy(status = TransferStatus.TRANSFERRING)
-        callbacks.onTransferUpdate(out.info)
-
-        var sentBytes = 0L
+        var sentBytes = startOffset
         var chunkIndex = 0
         val totalSize = out.source.fileSize
         var lastReportAt = SystemClock.elapsedRealtime()
-        var lastReportBytes = 0L
+        var lastReportBytes = startOffset
+
+        out.info = out.info.copy(
+            status = TransferStatus.TRANSFERRING,
+            transferredBytes = startOffset,
+            resumedFromBytes = startOffset,
+        )
+        callbacks.onTransferUpdate(out.info)
 
         try {
             val inputStream = when {
@@ -771,6 +862,21 @@ class WebRtcMeshManager(
             } ?: throw IllegalStateException("无法读取所选文件")
 
             inputStream.use { stream ->
+                // 若存在断点偏移，精确跳过已接收的前 startOffset 字节
+                var remainingSkip = startOffset
+                val skipScratch = ByteArray(64 * 1024)
+                while (remainingSkip > 0L) {
+                    val skipped = stream.skip(remainingSkip)
+                    if (skipped > 0L) {
+                        remainingSkip -= skipped
+                    } else {
+                        val toRead = minOf(remainingSkip, skipScratch.size.toLong()).toInt()
+                        val read = stream.read(skipScratch, 0, toRead)
+                        if (read <= 0) break
+                        remainingSkip -= read.toLong()
+                    }
+                }
+
                 val readBuf = ByteArray(CHUNK_SIZE)
                 while (true) {
                     if (out.cancelled) return

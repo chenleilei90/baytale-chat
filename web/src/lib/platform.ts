@@ -5,6 +5,42 @@ export interface DiskWriteStream {
   write: (chunk: Uint8Array) => Promise<void>;
   close: () => Promise<void>;
   abort: () => Promise<void>;
+  initialOffset: number; // 断点续传时已存在于硬盘的字节偏移
+}
+
+interface WritableHandleLike {
+  getFile: () => Promise<File>;
+  createWritable: (opts?: { keepExistingData?: boolean }) => Promise<{
+    write: (data: BufferSource) => Promise<void>;
+    seek: (position: number) => Promise<void>;
+    close: () => Promise<void>;
+    abort: () => Promise<void>;
+  }>;
+}
+
+// 按 fileKey (fileName::fileSize) 缓存本标签页内直写硬盘的句柄，断线重连后可免选文件一键续传
+const resumeHandleCache = new Map<string, WritableHandleLike>();
+
+export function makeFileResumeKey(fileName: string, fileSize: number): string {
+  return `${fileName}::${fileSize}`;
+}
+
+export async function getCachedResumeOffset(fileName: string, fileSize: number): Promise<number> {
+  const handle = resumeHandleCache.get(makeFileResumeKey(fileName, fileSize));
+  if (!handle) return 0;
+  try {
+    const file = await handle.getFile();
+    if (file.size > 0 && file.size < fileSize) {
+      return file.size;
+    }
+  } catch {
+    resumeHandleCache.delete(makeFileResumeKey(fileName, fileSize));
+  }
+  return 0;
+}
+
+export function clearCachedResumeHandle(fileName: string, fileSize: number): void {
+  resumeHandleCache.delete(makeFileResumeKey(fileName, fileSize));
 }
 
 // 检查当前浏览器是否支持 File System Access API（支持 GB 级大文件流式直写硬盘）
@@ -12,38 +48,94 @@ export function supportsDirectDiskSave(): boolean {
   return typeof window !== 'undefined' && 'showSaveFilePicker' in window;
 }
 
-// 弹出系统保存对话框并打开流式写入句柄
-export async function openDiskWriteStream(suggestedName: string): Promise<DiskWriteStream | null> {
+async function createStreamFromHandle(
+  handle: WritableHandleLike,
+  resumeOffset: number
+): Promise<DiskWriteStream> {
+  const writable = await handle.createWritable({ keepExistingData: resumeOffset > 0 });
+  if (resumeOffset > 0) {
+    await writable.seek(resumeOffset);
+  }
+  return {
+    initialOffset: resumeOffset,
+    write: async (chunk: Uint8Array) => {
+      const copy = new Uint8Array(chunk.byteLength);
+      copy.set(chunk);
+      await writable.write(copy);
+    },
+    close: () => writable.close(),
+    abort: () => writable.abort(),
+  };
+}
+
+// 弹出系统保存对话框并打开流式写入句柄（同时缓存句柄以支持断线后一键续传）
+export async function openDiskWriteStream(
+  suggestedName: string,
+  expectedFileSize?: number
+): Promise<DiskWriteStream | null> {
   if (!supportsDirectDiskSave()) {
     return null;
   }
   try {
     const picker = (
       window as unknown as {
-        showSaveFilePicker: (opts: { suggestedName: string }) => Promise<{
-          createWritable: () => Promise<{
-            write: (data: BufferSource) => Promise<void>;
-            close: () => Promise<void>;
-            abort: () => Promise<void>;
-          }>;
-        }>;
+        showSaveFilePicker: (opts: { suggestedName: string }) => Promise<WritableHandleLike>;
       }
     ).showSaveFilePicker;
 
     const handle = await picker({ suggestedName });
-    const writable = await handle.createWritable();
-    return {
-      write: async (chunk: Uint8Array) => {
-        // 复制出干净的 ArrayBuffer 视图以满足 TypeScript BufferSource 约束
-        const copy = new Uint8Array(chunk.byteLength);
-        copy.set(chunk);
-        await writable.write(copy);
-      },
-      close: () => writable.close(),
-      abort: () => writable.abort(),
-    };
+    if (expectedFileSize && expectedFileSize > 0) {
+      resumeHandleCache.set(makeFileResumeKey(suggestedName, expectedFileSize), handle);
+    }
+    return await createStreamFromHandle(handle, 0);
   } catch (err) {
     // 用户取消弹窗则返回 null
+    if ((err as DOMException)?.name === 'AbortError') {
+      return null;
+    }
+    throw err;
+  }
+}
+
+// 打开断点续传写盘流：优先复用上次缓存句柄，否则允许用户选中硬盘里已下载一半的文件接着写
+export async function openDiskResumeStream(
+  fileName: string,
+  expectedFileSize: number
+): Promise<DiskWriteStream | null> {
+  if (!supportsDirectDiskSave()) {
+    return null;
+  }
+  const key = makeFileResumeKey(fileName, expectedFileSize);
+  const cached = resumeHandleCache.get(key);
+  if (cached) {
+    try {
+      const existing = await cached.getFile();
+      if (existing.size > 0 && existing.size < expectedFileSize) {
+        return await createStreamFromHandle(cached, existing.size);
+      }
+    } catch {
+      resumeHandleCache.delete(key);
+    }
+  }
+
+  try {
+    const openPicker = (
+      window as unknown as {
+        showOpenFilePicker?: (opts?: { multiple?: boolean }) => Promise<WritableHandleLike[]>;
+      }
+    ).showOpenFilePicker;
+    if (!openPicker) {
+      return await openDiskWriteStream(fileName, expectedFileSize);
+    }
+    const [handle] = await openPicker({ multiple: false });
+    if (!handle) return null;
+    const existing = await handle.getFile();
+    if (existing.size >= expectedFileSize) {
+      throw new Error('所选文件体积已不小于原文件，无法从此位置续传，请改用「直写硬盘」重新保存');
+    }
+    resumeHandleCache.set(key, handle);
+    return await createStreamFromHandle(handle, existing.size);
+  } catch (err) {
     if ((err as DOMException)?.name === 'AbortError') {
       return null;
     }
@@ -207,4 +299,17 @@ export function formatExpiryTime(expiresAt?: number): string {
     return `${hours} 小时 ${mins} 分钟后自动清空`;
   }
   return `${Math.max(1, mins)} 分钟后自动清空`;
+}
+
+// 格式化相对访问时间（用于最近房间列表）
+export function formatRelativeTime(timestampMs: number): string {
+  const diffSec = Math.max(0, Math.floor((Date.now() - timestampMs) / 1000));
+  if (diffSec < 60) return '刚刚';
+  const mins = Math.floor(diffSec / 60);
+  if (mins < 60) return `${mins} 分钟前`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days} 天前`;
+  return new Date(timestampMs).toLocaleDateString();
 }

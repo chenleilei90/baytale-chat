@@ -3,6 +3,7 @@ package com.baytale.baychat.core.storage
 import android.content.Context
 import com.baytale.baychat.BuildConfig
 import com.baytale.baychat.core.model.AppThemeMode
+import com.baytale.baychat.core.model.RecentRoom
 import com.baytale.baychat.core.model.SavedFixedRoom
 import com.baytale.baychat.core.model.UserProfile
 import com.baytale.baychat.core.util.FormatUtils
@@ -90,6 +91,33 @@ class AppPrefsStore(context: Context) {
         return next
     }
 
+    fun loadRecentRooms(): List<RecentRoom> {
+        val raw = sp.getString(KEY_RECENT_ROOMS, null) ?: return emptyList()
+        return runCatching {
+            json.decodeFromString(ListSerializer(RecentRoom.serializer()), raw)
+                .sortedByDescending { it.lastVisitedAt }
+        }.getOrDefault(emptyList())
+    }
+
+    fun upsertRecentRoom(room: RecentRoom): List<RecentRoom> {
+        val list = loadRecentRooms().filterNot { it.code.equals(room.code, ignoreCase = true) }.toMutableList()
+        list.add(0, room.copy(lastVisitedAt = System.currentTimeMillis()))
+        val trimmed = list.take(10)
+        sp.edit().putString(KEY_RECENT_ROOMS, json.encodeToString(ListSerializer(RecentRoom.serializer()), trimmed)).apply()
+        return trimmed
+    }
+
+    fun removeRecentRoom(code: String): List<RecentRoom> {
+        val next = loadRecentRooms().filterNot { it.code.equals(code, ignoreCase = true) }
+        sp.edit().putString(KEY_RECENT_ROOMS, json.encodeToString(ListSerializer(RecentRoom.serializer()), next)).apply()
+        return next
+    }
+
+    fun clearRecentRooms(): List<RecentRoom> {
+        sp.edit().remove(KEY_RECENT_ROOMS).apply()
+        return emptyList()
+    }
+
     companion object {
         private const val KEY_PRIVACY_ACCEPTED = "privacy_accepted_v1"
         private const val KEY_PROFILE = "user_profile"
@@ -99,5 +127,6 @@ class AppPrefsStore(context: Context) {
         private const val KEY_IMAGE_ORIGINAL = "image_original"
         private const val KEY_SERVER_URL = "server_url"
         private const val KEY_SAVED_ROOMS = "saved_fixed_rooms"
+        private const val KEY_RECENT_ROOMS = "recent_rooms_v1"
     }
 }

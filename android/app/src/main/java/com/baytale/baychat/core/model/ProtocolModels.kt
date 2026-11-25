@@ -128,6 +128,15 @@ data class SavedFixedRoom(
 )
 
 @Serializable
+data class RecentRoom(
+    val code: String,
+    val mode: String = "ephemeral", // ephemeral | fixed
+    val hasPassword: Boolean = false,
+    val password: String = "",
+    val lastVisitedAt: Long = System.currentTimeMillis(),
+)
+
+@Serializable
 data class ReplyQuote(
     val id: String,
     val senderName: String,
@@ -241,6 +250,8 @@ data class FileTransferInfo(
     val verified: Boolean = false,
     val localPath: String? = null,
     val savedDisplayPath: String? = null,
+    val resumedFromBytes: Long = 0L,
+    val canResumeBytes: Long = 0L,
     val errorMessage: String? = null,
 )
 

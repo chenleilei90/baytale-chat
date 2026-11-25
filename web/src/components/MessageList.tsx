@@ -31,7 +31,13 @@ interface MessageListProps {
   onReactMessage: (msgId: string, emoji: string) => void;
   onReplyMessage: (item: ChatItem) => void;
   onRecallMessage: (msgId: string) => void;
-  onAcceptFile: (peerId: string, transferId: string, toDisk: boolean, fileName: string) => void;
+  onAcceptFile: (
+    peerId: string,
+    transferId: string,
+    mode: 'memory' | 'disk' | 'resume',
+    fileName: string,
+    fileSize: number
+  ) => void;
   onRejectFile: (peerId: string, transferId: string) => void;
   onCancelTransfer: (peerId: string, transferId: string) => void;
   onPreviewImage: (src: string, fileName?: string, caption?: string) => void;
@@ -385,15 +391,26 @@ function transferIdOf(tr: FileTransferInfo): string {
 const DopamineFileCard: React.FC<{
   transfer: FileTransferInfo;
   canDirectDisk: boolean;
-  onAccept: (peerId: string, transferId: string, toDisk: boolean, fileName: string) => void;
+  onAccept: (
+    peerId: string,
+    transferId: string,
+    mode: 'memory' | 'disk' | 'resume',
+    fileName: string,
+    fileSize: number
+  ) => void;
   onReject: (peerId: string, transferId: string) => void;
   onCancel: (peerId: string, transferId: string) => void;
 }> = ({ transfer, canDirectDisk, onAccept, onReject, onCancel }) => {
-  const pct =
+  const rawPct =
     transfer.fileSize > 0
-      ? Math.min(100, Math.round((transfer.transferredBytes / transfer.fileSize) * 100))
+      ? Math.min(100, (transfer.transferredBytes / transfer.fileSize) * 100)
       : 100;
+  // 传输中给予最小 2% 可见填充条，避免 8GB+ 超大文件前几十 MB 看起来像空白槽
+  const barPct = transfer.status === 'transferring' ? Math.max(2, rawPct) : rawPct;
+  const pctLabel = rawPct > 0 && rawPct < 10 ? rawPct.toFixed(1) : String(Math.round(rawPct));
   const ext = extractExtension(transfer.fileName);
+  const isLargeFile = transfer.fileSize >= 500 * 1024 * 1024;
+  const hasCachedResume = Boolean(transfer.canResumeBytes && transfer.canResumeBytes > 0);
 
   return (
     <div className="file-bento-card">
@@ -419,43 +436,99 @@ const DopamineFileCard: React.FC<{
       {(transfer.status === 'transferring' || transfer.status === 'waiting_accept') && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
           <div className="progress-rail">
-            <div className="progress-bar" style={{ width: `${pct}%` }} />
+            <div className="progress-bar" style={{ width: `${barPct}%` }} />
           </div>
-          <div className="mono" style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: 'var(--text-muted)' }}>
+          <div className="mono" style={{ display: 'flex', justifyContent: 'space-between', gap: 6, fontSize: 11, color: 'var(--text-muted)', flexWrap: 'wrap' }}>
             <span>
               {transfer.status === 'waiting_accept'
-                ? '等待对方接收...'
-                : `${pct}% · ${formatBytes(transfer.speedBps)}/s`}
+                ? '等待对方确认接收...'
+                : transfer.transferredBytes === 0
+                  ? '已确认，等待数据流...'
+                  : `${pctLabel}% · ${formatBytes(transfer.transferredBytes)} / ${formatBytes(transfer.fileSize)} · ${formatBytes(transfer.speedBps)}/s`}
             </span>
-            {transfer.status === 'transferring' && (
-              <span>{formatDuration(transfer.etaSeconds)}</span>
+            {transfer.status === 'transferring' && transfer.speedBps > 0 && (
+              <span>剩余 {formatDuration(transfer.etaSeconds)}</span>
             )}
           </div>
+          {transfer.resumedFromBytes && transfer.resumedFromBytes > 0 && (
+            <div style={{ fontSize: 11, color: 'var(--accent)', fontWeight: 600 }}>
+              ⚡ 已从 {formatBytes(transfer.resumedFromBytes)} 断点自动续传
+            </div>
+          )}
         </div>
       )}
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
         {transfer.direction === 'receive' && transfer.status === 'offering' && transfer.targetPeerId && (
           <>
-            {canDirectDisk && (
+            {canDirectDisk && hasCachedResume && (
               <button
                 type="button"
                 className="btn btn-jelly btn-sm"
                 onClick={() =>
-                  onAccept(transfer.targetPeerId!, transfer.transferId, true, transfer.fileName)
+                  onAccept(
+                    transfer.targetPeerId!,
+                    transfer.transferId,
+                    'resume',
+                    transfer.fileName,
+                    transfer.fileSize
+                  )
                 }
               >
-                <HardDriveDownload size={13} /> 直写硬盘
+                <HardDriveDownload size={13} /> 断点续传 (已收 {formatBytes(transfer.canResumeBytes!)})
+              </button>
+            )}
+            {canDirectDisk && (
+              <button
+                type="button"
+                className={`btn btn-sm ${hasCachedResume ? 'btn-glass' : 'btn-jelly'}`}
+                onClick={() =>
+                  onAccept(
+                    transfer.targetPeerId!,
+                    transfer.transferId,
+                    'disk',
+                    transfer.fileName,
+                    transfer.fileSize
+                  )
+                }
+                title="边收边直接写入电脑硬盘，传几十 GB 也不占内存"
+              >
+                <HardDriveDownload size={13} /> {isLargeFile ? '直写硬盘 (推荐)' : '直写硬盘'}
+              </button>
+            )}
+            {canDirectDisk && !hasCachedResume && transfer.fileSize >= 50 * 1024 * 1024 && (
+              <button
+                type="button"
+                className="btn btn-soft btn-sm"
+                onClick={() =>
+                  onAccept(
+                    transfer.targetPeerId!,
+                    transfer.transferId,
+                    'resume',
+                    transfer.fileName,
+                    transfer.fileSize
+                  )
+                }
+                title="选择硬盘里上次中断未下完的半成品文件，从断点接着传"
+              >
+                续传半成品
               </button>
             )}
             <button
               type="button"
               className={`btn btn-sm ${canDirectDisk ? 'btn-glass' : 'btn-jelly'}`}
               onClick={() =>
-                onAccept(transfer.targetPeerId!, transfer.transferId, false, transfer.fileName)
+                onAccept(
+                  transfer.targetPeerId!,
+                  transfer.transferId,
+                  'memory',
+                  transfer.fileName,
+                  transfer.fileSize
+                )
               }
+              title={isLargeFile ? '超大文件不建议内存接收，容易爆浏览器内存，建议点「直写硬盘」' : '先收到浏览器内存再保存'}
             >
-              <Download size={13} /> 接收
+              <Download size={13} /> {isLargeFile && canDirectDisk ? '内存接收' : '接收'}
             </button>
             <button
               type="button"

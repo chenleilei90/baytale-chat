@@ -139,6 +139,15 @@ export interface SavedFixedRoom {
   lastVisitedAt: number;
 }
 
+// 最近访问过的房间记录（同时记录临时闪传房与常驻固定房，方便快速重进）
+export interface RecentRoom {
+  code: string;
+  mode: RoomMode;
+  hasPassword: boolean;
+  password?: string;
+  lastVisitedAt: number;
+}
+
 // 端到端连接路径状态
 export type LinkTransportType = 'connecting' | 'p2p-lan' | 'p2p-wan' | 'relay-turn' | 'disconnected';
 
@@ -206,6 +215,8 @@ export interface FileTransferInfo {
   verified?: boolean;
   objectUrl?: string; // 内存 Blob 下载或图片预览链接
   savedToDisk?: boolean; // 是否通过 File System Access API 流式直写硬盘
+  resumedFromBytes?: number; // 若本次传输从断点续传，记录起始字节偏移
+  canResumeBytes?: number; // 本地检测到可续传的已落盘字节数（大于 0 时显示断点续传按钮）
   errorMessage?: string;
 }
 

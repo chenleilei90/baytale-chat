@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import type {
+  RecentRoom,
   RoomMode,
   SavedFixedRoom,
   ServerConfig,
@@ -7,14 +8,18 @@ import type {
   UserProfile,
 } from './types';
 import {
+  clearRecentRooms,
+  loadRecentRooms,
   loadSavedFixedRooms,
   loadTheme,
   loadUserPrefs,
   loadUserProfile,
+  removeRecentRoom,
   removeSavedFixedRoom,
   saveTheme,
   saveUserPrefs,
   saveUserProfile,
+  upsertRecentRoom,
   upsertSavedFixedRoom,
   type UserPrefs,
 } from './lib/storage';
@@ -47,9 +52,12 @@ export const App: React.FC = () => {
   const [savedFixedRooms, setSavedFixedRooms] = useState<SavedFixedRoom[]>(() =>
     loadSavedFixedRooms()
   );
+  const [recentRooms, setRecentRooms] = useState<RecentRoom[]>(() => loadRecentRooms());
 
   const [serverConfig, setServerConfig] = useState<ServerConfig>(FALLBACK_CONFIG);
   const [activeRoom, setActiveRoom] = useState<ActiveRoomSession | null>(null);
+  const [roomMinimized, setRoomMinimized] = useState(false);
+  const [minimizedStatus, setMinimizedStatus] = useState('后台运行中');
   const [initialJoinCode, setInitialJoinCode] = useState<string>('');
   const [lobbyNotice, setLobbyNotice] = useState<string>('');
   const [profileModalOpen, setProfileModalOpen] = useState(false);
@@ -88,6 +96,14 @@ export const App: React.FC = () => {
         if (!info.hasPassword) {
           setActiveRoom({ code: info.code, password: '' });
           syncUrlRoom(info.code);
+          setRecentRooms(
+            upsertRecentRoom({
+              code: info.code,
+              mode: info.mode,
+              hasPassword: false,
+              lastVisitedAt: Date.now(),
+            })
+          );
           if (info.mode === 'fixed') {
             setSavedFixedRooms(
               upsertSavedFixedRoom({
@@ -98,10 +114,21 @@ export const App: React.FC = () => {
             );
           }
         } else {
-          const saved = loadSavedFixedRooms().find((r) => r.code === info.code);
+          const saved =
+            loadSavedFixedRooms().find((r) => r.code === info.code) ||
+            loadRecentRooms().find((r) => r.code === info.code);
           if (saved?.password) {
             setActiveRoom({ code: info.code, password: saved.password });
             syncUrlRoom(info.code);
+            setRecentRooms(
+              upsertRecentRoom({
+                code: info.code,
+                mode: info.mode,
+                hasPassword: true,
+                password: saved.password,
+                lastVisitedAt: Date.now(),
+              })
+            );
           } else {
             setInitialJoinCode(info.code);
           }
@@ -127,8 +154,19 @@ export const App: React.FC = () => {
     (code: string, password: string, mode: RoomMode, rememberFixed?: boolean) => {
       setLobbyNotice('');
       setInitialJoinCode('');
+      setRoomMinimized(false);
       setActiveRoom({ code, password });
       syncUrlRoom(code);
+
+      setRecentRooms(
+        upsertRecentRoom({
+          code,
+          mode,
+          hasPassword: Boolean(password),
+          password: password || undefined,
+          lastVisitedAt: Date.now(),
+        })
+      );
 
       if (mode === 'fixed' && rememberFixed) {
         setSavedFixedRooms(
@@ -144,14 +182,37 @@ export const App: React.FC = () => {
     []
   );
 
-  const handleSwitchRoom = useCallback((newCode: string, password: string) => {
-    setActiveRoom({ code: newCode, password });
-    syncUrlRoom(newCode);
+  const handleSwitchRoom = useCallback(
+    (newCode: string, password: string, mode: RoomMode = 'ephemeral') => {
+      setRoomMinimized(false);
+      setActiveRoom({ code: newCode, password });
+      syncUrlRoom(newCode);
+      setRecentRooms(
+        upsertRecentRoom({
+          code: newCode,
+          mode,
+          hasPassword: Boolean(password),
+          password: password || undefined,
+          lastVisitedAt: Date.now(),
+        })
+      );
+    },
+    []
+  );
+
+  const handleRemoveRecentRoom = useCallback((code: string) => {
+    setRecentRooms(removeRecentRoom(code));
   }, []);
+
+  const handleClearRecentRooms = useCallback(() => {
+    setRecentRooms(clearRecentRooms());
+    pushToast('已清空最近房间记录');
+  }, [pushToast]);
 
   const handleExitToLobby = useCallback(
     (notice?: string) => {
       setActiveRoom(null);
+      setRoomMinimized(false);
       setInitialJoinCode('');
       setLobbyNotice('');
       syncUrlRoom(null);
@@ -159,6 +220,11 @@ export const App: React.FC = () => {
     },
     [pushToast]
   );
+
+  const handleMinimizeRoom = useCallback(() => {
+    setRoomMinimized(true);
+    pushToast('房间已最小化挂起，连接与文件传输继续保持中');
+  }, [pushToast]);
 
   const handleSaveProfile = (next: UserProfile) => {
     saveUserProfile(next);
@@ -178,28 +244,42 @@ export const App: React.FC = () => {
 
   return (
     <>
-      {activeRoom ? (
-        <ChatRoom
-          roomCode={activeRoom.code}
-          password={activeRoom.password}
-          profile={profile}
-          prefs={prefs}
-          theme={theme}
-          serverConfig={serverConfig}
-          savedFixedRooms={savedFixedRooms}
-          onSelectTheme={setTheme}
-          onUpdatePrefs={handleUpdatePrefs}
-          onEditProfile={() => setProfileModalOpen(true)}
-          onSwitchRoom={handleSwitchRoom}
-          onExitToLobby={handleExitToLobby}
-          onToast={pushToast}
-        />
-      ) : (
+      {/* 最小化挂起时通过 display:none 保持 ChatRoom 组件存活，WS、WebRTC 与大文件传输 100% 不断线 */}
+      {activeRoom && (
+        <div
+          style={{
+            display: roomMinimized ? 'none' : 'contents',
+          }}
+        >
+          <ChatRoom
+            roomCode={activeRoom.code}
+            password={activeRoom.password}
+            profile={profile}
+            prefs={prefs}
+            theme={theme}
+            serverConfig={serverConfig}
+            savedFixedRooms={savedFixedRooms}
+            recentRooms={recentRooms}
+            onSelectTheme={setTheme}
+            onUpdatePrefs={handleUpdatePrefs}
+            onEditProfile={() => setProfileModalOpen(true)}
+            onSwitchRoom={handleSwitchRoom}
+            onRemoveRecentRoom={handleRemoveRecentRoom}
+            onMinimizeRoom={handleMinimizeRoom}
+            onStatusSummary={setMinimizedStatus}
+            onExitToLobby={handleExitToLobby}
+            onToast={pushToast}
+          />
+        </div>
+      )}
+
+      {(!activeRoom || roomMinimized) && (
         <Lobby
           profile={profile}
           theme={theme}
           serverConfig={serverConfig}
           savedFixedRooms={savedFixedRooms}
+          recentRooms={recentRooms}
           initialJoinCode={initialJoinCode}
           initialNotice={lobbyNotice}
           onSelectTheme={setTheme}
@@ -207,8 +287,55 @@ export const App: React.FC = () => {
           onEditProfile={() => setProfileModalOpen(true)}
           onEnterRoom={handleEnterRoom}
           onRemoveSavedRoom={handleRemoveSavedRoom}
+          onRemoveRecentRoom={handleRemoveRecentRoom}
+          onClearRecentRooms={handleClearRecentRooms}
           onToast={pushToast}
         />
+      )}
+
+      {/* 后台挂起房间悬浮胶囊条 */}
+      {activeRoom && roomMinimized && (
+        <div className="minimized-room-dock" onClick={() => setRoomMinimized(false)}>
+          <span className="status-dot emerald" />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div className="mono" style={{ fontSize: 13.5, fontWeight: 800 }}>
+              房间 #{activeRoom.code} 后台运行中
+            </div>
+            <div
+              style={{
+                fontSize: 11.5,
+                color: 'var(--text-sub)',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {minimizedStatus}
+            </div>
+          </div>
+          <button
+            type="button"
+            className="btn btn-jelly btn-sm"
+            onClick={(e) => {
+              e.stopPropagation();
+              setRoomMinimized(false);
+            }}
+          >
+            回到房间
+          </button>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            style={{ padding: '0 8px' }}
+            title="彻底断开该房间"
+            onClick={(e) => {
+              e.stopPropagation();
+              handleExitToLobby('已断开后台挂起的房间');
+            }}
+          >
+            断开
+          </button>
+        </div>
       )}
 
       {profileModalOpen && (

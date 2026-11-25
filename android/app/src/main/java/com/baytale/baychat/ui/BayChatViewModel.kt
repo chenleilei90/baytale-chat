@@ -14,6 +14,7 @@ import com.baytale.baychat.core.model.HistoryMeta
 import com.baytale.baychat.core.model.LinkTransportType
 import com.baytale.baychat.core.model.PeerLinkStatus
 import com.baytale.baychat.core.model.PeerProfile
+import com.baytale.baychat.core.model.RecentRoom
 import com.baytale.baychat.core.model.ReplyQuote
 import com.baytale.baychat.core.model.RoomMode
 import com.baytale.baychat.core.model.RoomSummary
@@ -77,11 +78,13 @@ data class BayChatUiState(
     val serverConfig: ServerConfig = ServerConfig(),
     val configLoaded: Boolean = false,
     val savedRooms: List<SavedFixedRoom> = emptyList(),
+    val recentRooms: List<RecentRoom> = emptyList(),
     val lobbyBusy: Boolean = false,
     val lobbyError: String? = null,
     val pendingJoinCode: String? = null,
     val pendingShare: PendingExternalShare = PendingExternalShare(),
     val activeRoom: ActiveRoomSession? = null,
+    val roomMinimized: Boolean = false,
     val toastMessage: String? = null,
 )
 
@@ -98,6 +101,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
             themeMode = store.loadTheme(),
             prefs = store.loadPrefs(),
             savedRooms = store.loadSavedRooms(),
+            recentRooms = store.loadRecentRooms(),
         )
     )
     val uiState: StateFlow<BayChatUiState> = _uiState.asStateFlow()
@@ -187,7 +191,18 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         val cleanName = name.trim().take(24).ifBlank { FormatUtils.generateRandomName() }
         val next = _uiState.value.profile.copy(name = cleanName, avatar = avatar)
         store.saveProfile(next)
-        _uiState.update { it.copy(profile = next) }
+        _uiState.update { st ->
+            st.copy(
+                profile = next,
+                activeRoom = st.activeRoom?.let { r ->
+                    r.copy(
+                        messages = r.messages.map { m ->
+                            if (m.isSelf) m.copy(senderName = next.name, senderAvatar = next.avatar) else m
+                        }
+                    )
+                }
+            )
+        }
         signaling?.updateProfile(
             PeerProfile(
                 peerId = selfPeerId,
@@ -196,7 +211,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                 joinedAt = System.currentTimeMillis(),
             )
         )
-        showToast("资料已更新 ✨")
+        showToast("已更新昵称为「${next.name}」")
     }
 
     fun randomizeProfile() {
@@ -221,6 +236,29 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         val next = store.removeSavedRoom(code)
         _uiState.update { it.copy(savedRooms = next) }
         showToast("已取消收藏 #$code")
+    }
+
+    fun removeRecentRoom(code: String) {
+        val next = store.removeRecentRoom(code)
+        _uiState.update { it.copy(recentRooms = next) }
+    }
+
+    fun clearRecentRooms() {
+        val next = store.clearRecentRooms()
+        _uiState.update { it.copy(recentRooms = next) }
+        showToast("已清空最近房间记录")
+    }
+
+    private fun recordRecentRoom(code: String, mode: String, hasPassword: Boolean, password: String) {
+        val updated = store.upsertRecentRoom(
+            RecentRoom(
+                code = code,
+                mode = mode,
+                hasPassword = hasPassword,
+                password = password,
+            )
+        )
+        _uiState.update { it.copy(recentRooms = updated) }
     }
 
     fun buildInviteUrl(code: String): String = api.buildInviteUrl(code)
@@ -260,6 +298,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                     )
                     _uiState.update { it.copy(savedRooms = saved) }
                 }
+                recordRecentRoom(summary.code, summary.mode, summary.hasPassword, password.trim())
                 enterRoomInternal(summary.code, password.trim(), summary)
             } catch (e: Exception) {
                 _uiState.update { it.copy(lobbyError = e.message ?: "创建房间失败") }
@@ -301,8 +340,13 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                     )
                     _uiState.update { it.copy(savedRooms = saved) }
                 }
+                recordRecentRoom(info.code, info.mode, info.hasPassword, cleanPwd)
                 enterRoomInternal(info.code, cleanPwd, info)
             } catch (e: ApiException) {
+                if (e.errorCode == "ROOM_NOT_FOUND" || e.errorCode == "ROOM_EXPIRED") {
+                    removeRecentRoom(code)
+                    showToast("房间 #$code 已销毁或过期，已从最近记录移除")
+                }
                 _uiState.update { it.copy(lobbyError = e.message, pendingJoinCode = code) }
             } catch (e: Exception) {
                 _uiState.update { it.copy(lobbyError = e.message ?: "无法连接到服务器") }
@@ -328,6 +372,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
             it.copy(
                 lobbyError = null,
                 pendingJoinCode = null,
+                roomMinimized = false,
                 activeRoom = ActiveRoomSession(
                     roomCode = code,
                     password = password,
@@ -884,8 +929,11 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         signaling?.recordActivity("message", 0)
     }
 
-    fun acceptFile(peerId: String, transferId: String) {
-        mesh?.acceptIncomingTransfer(peerId, transferId)
+    fun acceptFile(peerId: String, transferId: String, resumeIfAvailable: Boolean = true) {
+        val ok = mesh?.acceptIncomingTransfer(peerId, transferId, resumeIfAvailable) == true
+        if (!ok) {
+            showToast("⚠️ 发送方已离线或传输已失效，请让对方重新发送")
+        }
     }
 
     fun rejectFile(peerId: String, transferId: String) {
@@ -997,6 +1045,8 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                 )
             }.onSuccess { next ->
                 signaling?.destroyRoom()
+                removeRecentRoom(room.roomCode)
+                recordRecentRoom(next.code, next.mode, next.hasPassword, room.password)
                 enterRoomInternal(next.code, room.password, next)
                 showToast("已切换全新房间口令：${next.code}")
             }.onFailure {
@@ -1005,16 +1055,38 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    fun minimizeRoom() {
+        if (_uiState.value.activeRoom != null) {
+            _uiState.update { it.copy(roomMinimized = true) }
+            showToast("房间已在后台保持连接与传输")
+        }
+    }
+
+    fun restoreRoom() {
+        if (_uiState.value.activeRoom != null) {
+            _uiState.update { it.copy(roomMinimized = false) }
+        }
+    }
+
+    fun switchToRecentRoom(item: RecentRoom) {
+        signaling?.leaveRoom()
+        tearDownSession(stopService = false)
+        _uiState.update { it.copy(activeRoom = null, roomMinimized = false) }
+        joinRoom(item.code, item.password)
+    }
+
     fun leaveRoom() {
         signaling?.leaveRoom()
         tearDownSession(stopService = true)
-        _uiState.update { it.copy(activeRoom = null) }
+        _uiState.update { it.copy(activeRoom = null, roomMinimized = false) }
     }
 
     fun destroyRoom() {
+        val curCode = _uiState.value.activeRoom?.roomCode
         signaling?.destroyRoom()
         tearDownSession(stopService = true)
-        _uiState.update { it.copy(activeRoom = null) }
+        if (!curCode.isNullOrBlank()) removeRecentRoom(curCode)
+        _uiState.update { it.copy(activeRoom = null, roomMinimized = false) }
         showToast("房间与服务器缓存已彻底销毁")
     }
 

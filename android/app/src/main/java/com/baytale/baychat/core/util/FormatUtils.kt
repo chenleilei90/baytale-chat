@@ -81,6 +81,18 @@ object FormatUtils {
         return if (hours >= 24) "剩余 ${hours / 24} 天" else "剩余 ${hours.coerceAtLeast(1)} 小时"
     }
 
+    fun formatRelativeTime(timestampMs: Long): String {
+        val diffSec = ((System.currentTimeMillis() - timestampMs) / 1000L).coerceAtLeast(0L)
+        if (diffSec < 60L) return "刚刚"
+        val mins = diffSec / 60L
+        if (mins < 60L) return "${mins} 分钟前"
+        val hours = mins / 60L
+        if (hours < 24L) return "${hours} 小时前"
+        val days = hours / 24L
+        if (days < 30L) return "${days} 天前"
+        return SimpleDateFormat("MM-dd", Locale.getDefault()).format(Date(timestampMs))
+    }
+
     // 兼容完整链接（https://chat.baytale.com/?room=849205、/r/849205）、baychat://room/849205 与纯口令
     fun extractRoomCode(raw: String): String {
         val trimmed = raw.trim()

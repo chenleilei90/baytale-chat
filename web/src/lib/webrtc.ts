@@ -18,7 +18,11 @@ import type {
   WhiteboardEvent,
 } from '../types';
 import { bytesToHex, IncrementalSHA256 } from './sha256';
-import type { DiskWriteStream } from './platform';
+import {
+  clearCachedResumeHandle,
+  getCachedResumeOffset,
+  type DiskWriteStream,
+} from './platform';
 
 const DEFAULT_CHUNK_SIZE = 48 * 1024; // 48KB，跨全平台浏览器稳定无 SCTP 超限风险
 const HIGH_WATER_MARK = 1024 * 1024; // 1MB 发送缓冲区上限
@@ -95,6 +99,7 @@ type ChatPacket =
   | {
       kind: 'file-accept';
       transferId: string;
+      offset?: number; // 断点续传起始字节偏移（0 或缺省表示从头传输）
     }
   | {
       kind: 'file-reject';
@@ -462,11 +467,30 @@ export class WebRTCMeshManager {
     }
     for (const out of session.outgoing.values()) {
       out.cancelled = true;
+      if (out.info.status === 'waiting_accept' || out.info.status === 'transferring') {
+        out.info.status = 'error';
+        out.info.errorMessage = '对方已离开或连接中断';
+        out.info.speedBps = 0;
+        out.info.etaSeconds = 0;
+        this.callbacks.onTransferUpdate({ ...out.info });
+      }
     }
     for (const inc of session.incomingById.values()) {
       inc.cancelled = true;
       if (inc.diskStream) {
-        void inc.diskStream.abort().catch(() => {});
+        // 断线时安全关闭刷盘而不是 abort，保留硬盘中已写入的断点数据供重连续传
+        void inc.diskStream.close().catch(() => {});
+        inc.diskStream = null;
+      }
+      if (inc.info.status === 'offering' || inc.info.status === 'transferring') {
+        inc.info.status = 'error';
+        inc.info.errorMessage =
+          inc.info.savedToDisk && inc.info.transferredBytes > 0
+            ? '对方已离开，已保留断点（重发同文件可续传）'
+            : '对方已离开或连接中断';
+        inc.info.speedBps = 0;
+        inc.info.etaSeconds = 0;
+        this.callbacks.onTransferUpdate({ ...inc.info });
       }
     }
     try {
@@ -771,25 +795,52 @@ export class WebRTCMeshManager {
     return created;
   }
 
-  // 接收方同意接收文件（可选传入流式写盘句柄以实现 GB 级零内存落盘）
-  acceptIncomingTransfer(peerId: string, transferId: string, diskStream?: DiskWriteStream | null): void {
+  // 接收方同意接收文件（支持传入流式写盘句柄与断点续传偏移量）
+  acceptIncomingTransfer(
+    peerId: string,
+    transferId: string,
+    diskStream?: DiskWriteStream | null
+  ): boolean {
     const session = this.sessions.get(peerId);
-    if (!session) return;
+    if (!session || !session.status.dataReady) {
+      return false;
+    }
     const inc = session.incomingById.get(transferId);
-    if (!inc || inc.accepted || inc.cancelled) return;
+    if (!inc || inc.accepted || inc.cancelled) {
+      return false;
+    }
 
+    const resumeOffset = Math.max(0, Math.min(diskStream?.initialOffset || 0, inc.info.fileSize));
     inc.accepted = true;
     inc.diskStream = diskStream || null;
     inc.startedAt = performance.now();
     inc.lastProgressAt = inc.startedAt;
+    inc.lastProgressBytes = resumeOffset;
     inc.info.status = 'transferring';
     inc.info.savedToDisk = Boolean(diskStream);
+    inc.info.transferredBytes = resumeOffset;
+    inc.info.resumedFromBytes = resumeOffset > 0 ? resumeOffset : undefined;
     this.callbacks.onTransferUpdate({ ...inc.info });
 
-    this.sendChatPacket(session, {
+    const ok = this.sendChatPacket(session, {
       kind: 'file-accept',
       transferId,
+      offset: resumeOffset > 0 ? resumeOffset : undefined,
     });
+    if (!ok) {
+      inc.cancelled = true;
+      if (inc.diskStream) {
+        void inc.diskStream.close().catch(() => {});
+        inc.diskStream = null;
+      }
+      inc.info.status = 'error';
+      inc.info.errorMessage = '数据通道已断开，无法开始接收';
+      this.callbacks.onTransferUpdate({ ...inc.info });
+      session.incomingById.delete(transferId);
+      session.incomingByStream.delete(inc.streamId);
+      return false;
+    }
+    return true;
   }
 
   // 接收方拒绝文件
@@ -999,6 +1050,16 @@ export class WebRTCMeshManager {
         session.incomingByStream.set(pkt.streamId, inc);
         this.callbacks.onFileOffer(session.peerId, { ...info }, pkt.msgId || `tr_${pkt.transferId}`, pkt.caption, pkt.timestamp);
 
+        // 异步探测本地是否已有此大文件的未完成断点句柄，供 UI 显示「一键断点续传」按钮
+        if (!info.isImage && !info.isAudio) {
+          void getCachedResumeOffset(info.fileName, info.fileSize).then((resumeBytes) => {
+            if (resumeBytes > 0 && !inc.accepted && !inc.cancelled) {
+              inc.info.canResumeBytes = resumeBytes;
+              this.callbacks.onTransferUpdate({ ...inc.info });
+            }
+          });
+        }
+
         // 图片/截图或符合自动接收阈值的小文件直接开始流式接收
         if (this.callbacks.shouldAutoAccept(info)) {
           this.acceptIncomingTransfer(session.peerId, pkt.transferId, null);
@@ -1008,9 +1069,18 @@ export class WebRTCMeshManager {
 
       case 'file-accept': {
         const out = session.outgoing.get(pkt.transferId);
-        if (out && !out.started && !out.cancelled) {
+        if (!out) {
+          // 发送方已丢失任务上下文（如刷新过页面），立刻通知对端中止，避免接收方卡在 0% 死等
+          this.sendChatPacket(session, { kind: 'file-cancel', transferId: pkt.transferId });
+          break;
+        }
+        if (!out.started && !out.cancelled) {
           out.started = true;
-          void this.pumpOutgoingFile(session, out);
+          const startOffset =
+            typeof pkt.offset === 'number' && pkt.offset > 0 && pkt.offset < out.info.fileSize
+              ? Math.floor(pkt.offset)
+              : 0;
+          void this.pumpOutgoingFile(session, out, startOffset);
         }
         break;
       }
@@ -1064,8 +1134,12 @@ export class WebRTCMeshManager {
     }
   }
 
-  // 分片流式读取本地文件并带背压发送，绝不一次性将大文件读入内存
-  private async pumpOutgoingFile(session: PeerSession, out: OutgoingTransfer): Promise<void> {
+  // 分片流式读取本地文件并带背压发送，支持从指定字节 offset 断点续传，绝不一次性将大文件读入内存
+  private async pumpOutgoingFile(
+    session: PeerSession,
+    out: OutgoingTransfer,
+    startOffset = 0
+  ): Promise<void> {
     const ch = session.fileChannel;
     if (!ch || ch.readyState !== 'open') {
       out.info.status = 'error';
@@ -1078,14 +1152,16 @@ export class WebRTCMeshManager {
     const chunkSize = Math.max(16 * 1024, Math.min(DEFAULT_CHUNK_SIZE, maxMsg - 1024));
     const sha = new IncrementalSHA256();
 
-    out.info.status = 'transferring';
-    this.callbacks.onTransferUpdate({ ...out.info });
-
-    let offset = 0;
+    let offset = startOffset;
     let chunkIndex = 0;
     const totalSize = out.file.size;
     let lastReportAt = performance.now();
-    let lastReportBytes = 0;
+    let lastReportBytes = startOffset;
+
+    out.info.status = 'transferring';
+    out.info.transferredBytes = startOffset;
+    out.info.resumedFromBytes = startOffset > 0 ? startOffset : undefined;
+    this.callbacks.onTransferUpdate({ ...out.info });
 
     try {
       while (offset < totalSize) {
@@ -1178,6 +1254,7 @@ export class WebRTCMeshManager {
         if (inc.diskStream) {
           await inc.diskStream.close();
           inc.diskStream = null;
+          clearCachedResumeHandle(inc.info.fileName, inc.info.fileSize);
         } else {
           const blob = new Blob(inc.chunks, { type: inc.info.mimeType });
           inc.chunks = [];
@@ -1300,19 +1377,24 @@ function waitBufferedLow(channel: RTCDataChannel): Promise<void> {
       resolve();
       return;
     }
-    const onLow = () => {
-      cleanup();
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearInterval(pollTimer);
+      channel.removeEventListener('bufferedamountlow', finish);
+      channel.removeEventListener('close', finish);
+      channel.removeEventListener('error', finish);
       resolve();
     };
-    const onClose = () => {
-      cleanup();
-      resolve();
-    };
-    const cleanup = () => {
-      channel.removeEventListener('bufferedamountlow', onLow);
-      channel.removeEventListener('close', onClose);
-    };
-    channel.addEventListener('bufferedamountlow', onLow);
-    channel.addEventListener('close', onClose);
+    // 兼顾事件驱动与 80ms 定时兜底，彻底杜绝个别浏览器漏发 bufferedamountlow 导致大文件传输假死
+    const pollTimer = window.setInterval(() => {
+      if (channel.bufferedAmount <= LOW_WATER_MARK || channel.readyState !== 'open') {
+        finish();
+      }
+    }, 80);
+    channel.addEventListener('bufferedamountlow', finish);
+    channel.addEventListener('close', finish);
+    channel.addEventListener('error', finish);
   });
 }

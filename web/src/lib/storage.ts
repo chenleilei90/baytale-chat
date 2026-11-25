@@ -1,9 +1,10 @@
-import type { SavedFixedRoom, ThemeMode, UserProfile } from '../types';
+import type { RecentRoom, SavedFixedRoom, ThemeMode, UserProfile } from '../types';
 import { generateRandomName, pickRandomPresetAvatar } from './avatar';
 
 const KEY_PROFILE = 'baychat_profile_v1';
 const KEY_THEME = 'baychat_theme_v1';
 const KEY_SAVED_ROOMS = 'baychat_fixed_rooms_v1';
+const KEY_RECENT_ROOMS = 'baychat_recent_rooms_v1';
 const KEY_PREFS = 'baychat_prefs_v1';
 const KEY_TAB_PEER_ID = 'baychat_tab_peer_id_v1';
 
@@ -151,4 +152,47 @@ export function removeSavedFixedRoom(code: string): SavedFixedRoom[] {
     // 忽略异常
   }
   return next;
+}
+
+// 读取“最近进入的房间”列表（按访问时间倒序，最多保留 10 条）
+export function loadRecentRooms(): RecentRoom[] {
+  try {
+    const raw = localStorage.getItem(KEY_RECENT_ROOMS);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return (parsed as RecentRoom[]).sort((a, b) => b.lastVisitedAt - a.lastVisitedAt);
+  } catch {
+    return [];
+  }
+}
+
+export function upsertRecentRoom(room: RecentRoom): RecentRoom[] {
+  const list = loadRecentRooms().filter((r) => r.code !== room.code);
+  const next = [room, ...list].slice(0, 10);
+  try {
+    localStorage.setItem(KEY_RECENT_ROOMS, JSON.stringify(next));
+  } catch {
+    // 忽略异常
+  }
+  return next;
+}
+
+export function removeRecentRoom(code: string): RecentRoom[] {
+  const next = loadRecentRooms().filter((r) => r.code !== code);
+  try {
+    localStorage.setItem(KEY_RECENT_ROOMS, JSON.stringify(next));
+  } catch {
+    // 忽略异常
+  }
+  return next;
+}
+
+export function clearRecentRooms(): RecentRoom[] {
+  try {
+    localStorage.removeItem(KEY_RECENT_ROOMS);
+  } catch {
+    // 忽略异常
+  }
+  return [];
 }

@@ -29,6 +29,7 @@ import {
   MicOff,
   MonitorUp,
   PhoneOff,
+  Minimize2,
 } from 'lucide-react';
 import QRCode from 'qrcode';
 import type {
@@ -40,7 +41,9 @@ import type {
   PeerProfile,
   PomodoroMode,
   PomodoroState,
+  RecentRoom,
   ReplyQuote,
+  RoomMode,
   RoomStats,
   RoomSummary,
   SavedFixedRoom,
@@ -53,6 +56,7 @@ import type {
   WhiteboardStroke,
 } from '../types';
 import {
+  ApiError,
   buildCachedMediaUrl,
   createRoom,
   fetchRoomInfo,
@@ -65,6 +69,8 @@ import {
   copyTextToClipboard,
   formatBytes,
   formatExpiryTime,
+  formatRelativeTime,
+  openDiskResumeStream,
   openDiskWriteStream,
   playNoticeTone,
   supportsScreenCapture,
@@ -95,10 +101,14 @@ interface ChatRoomProps {
   theme: ThemeMode;
   serverConfig: ServerConfig;
   savedFixedRooms: SavedFixedRoom[];
+  recentRooms: RecentRoom[];
   onSelectTheme: (theme: ThemeMode) => void;
   onUpdatePrefs: (next: UserPrefs) => void;
   onEditProfile: () => void;
-  onSwitchRoom: (newCode: string, password: string) => void;
+  onSwitchRoom: (newCode: string, password: string, mode?: RoomMode) => void;
+  onRemoveRecentRoom: (code: string) => void;
+  onMinimizeRoom: () => void;
+  onStatusSummary?: (summary: string) => void;
   onExitToLobby: (notice?: string) => void;
   onToast: (msg: string) => void;
 }
@@ -172,10 +182,14 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   theme,
   serverConfig,
   savedFixedRooms,
+  recentRooms,
   onSelectTheme,
   onUpdatePrefs,
   onEditProfile,
   onSwitchRoom,
+  onRemoveRecentRoom,
+  onMinimizeRoom,
+  onStatusSummary,
   onExitToLobby,
   onToast,
 }) => {
@@ -1790,16 +1804,26 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   const handleAcceptFile = async (
     peerId: string,
     transferId: string,
-    toDisk: boolean,
-    fileName: string
+    mode: 'memory' | 'disk' | 'resume',
+    fileName: string,
+    fileSize: number
   ) => {
     try {
       let diskStream = null;
-      if (toDisk) {
-        diskStream = await openDiskWriteStream(fileName);
+      if (mode === 'disk') {
+        diskStream = await openDiskWriteStream(fileName, fileSize);
+        if (!diskStream) return;
+      } else if (mode === 'resume') {
+        diskStream = await openDiskResumeStream(fileName, fileSize);
         if (!diskStream) return;
       }
-      meshRef.current?.acceptIncomingTransfer(peerId, transferId, diskStream);
+      const started = meshRef.current?.acceptIncomingTransfer(peerId, transferId, diskStream);
+      if (!started) {
+        if (diskStream) void diskStream.close().catch(() => {});
+        onToast('⚠️ 发送方已离线或该传输已失效，请让对方重新发送文件');
+      } else if (diskStream && diskStream.initialOffset > 0) {
+        onToast(`⚡ 正在从 ${formatBytes(diskStream.initialOffset)} 断点续传「${fileName}」`);
+      }
     } catch (err) {
       onToast(err instanceof Error ? err.message : '无法打开保存位置');
     }
@@ -1814,8 +1838,8 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     onToast(`🚀 已开始批量接收 ${pendingIncomingFiles.length} 个文件`);
   };
 
-  // 切换常用固定房间前先探测是否需要密码
-  const handleSwitchSavedFixed = async (r: SavedFixedRoom) => {
+  // 切换常用固定房间或最近房间前先探测是否仍存在及是否需要密码
+  const handleSwitchSavedFixed = async (r: { code: string; password?: string; mode?: RoomMode }) => {
     setSidebarOpen(false);
     try {
       const info = await fetchRoomInfo(r.code);
@@ -1824,8 +1848,16 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         onExitToLobby(`房间 #${r.code} 设有密码，请在大厅输入密码进入`);
         return;
       }
-      onSwitchRoom(r.code, r.password || '');
+      onSwitchRoom(r.code, r.password || '', info.mode);
     } catch (err) {
+      if (
+        err instanceof ApiError &&
+        (err.errorCode === 'ROOM_NOT_FOUND' || err.errorCode === 'ROOM_EXPIRED')
+      ) {
+        onRemoveRecentRoom(r.code);
+        onToast(`房间 #${r.code} 已销毁或失效，已从最近记录移除`);
+        return;
+      }
       onToast(err instanceof Error ? err.message : '无法切换到该房间');
     }
   };
@@ -1842,8 +1874,9 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         maxFileSizeMB: effectiveMaxFileMB,
       });
       signalingRef.current?.destroyRoom();
+      onRemoveRecentRoom(roomCode);
       setShowInvite(false);
-      onSwitchRoom(nextRoom.code, password);
+      onSwitchRoom(nextRoom.code, password, 'ephemeral');
       onToast(`🎲 已换上全新口令：${nextRoom.code}`);
     } catch (err) {
       onToast(err instanceof Error ? err.message : '换码失败');
@@ -1864,6 +1897,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     ambientEngine.stop();
     stopAllLocalMedia();
     signalingRef.current?.destroyRoom();
+    onRemoveRecentRoom(roomCode);
     onExitToLobby('房间与服务器聊天缓存已彻底销毁 ✨');
   };
 
@@ -1924,6 +1958,21 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         : `最后聊天起保留 ${historyMeta.retentionDays} 天（最长 7 天）`;
 
   const inviteUrl = `${window.location.origin}/?room=${encodeURIComponent(roomCode)}`;
+
+  // 向外同步挂起胶囊条展示的实时状态（传输进度优先，其次展示在线连线状态）
+  useEffect(() => {
+    if (!onStatusSummary) return;
+    const activeTr = [...messages]
+      .reverse()
+      .find((m) => m.transfer?.status === 'transferring')?.transfer;
+    if (activeTr && activeTr.fileSize > 0) {
+      const pct = Math.min(100, (activeTr.transferredBytes / activeTr.fileSize) * 100);
+      onStatusSummary(`传输中 ${pct.toFixed(1)}% · ${activeTr.fileName}`);
+    } else {
+      const count = Object.keys(peers).length + 1;
+      onStatusSummary(`${linkStatusPill.text} · ${count}人`);
+    }
+  }, [messages, peers, linkStatusPill.text, onStatusSummary]);
 
   // 组装当前所有活跃的屏幕共享画面（自己 + 远端伙伴）
   const activeScreenFeeds: ScreenFeedItem[] = useMemo(() => {
@@ -2294,7 +2343,17 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             </button>
           )}
 
-          <button type="button" className="btn btn-glass btn-sm" onClick={handleLeave} title="离开房间">
+          <button
+            type="button"
+            className="btn btn-glass btn-sm"
+            onClick={onMinimizeRoom}
+            title="最小化挂起房间回大厅（保持 P2P 直连与文件传输不断线）"
+          >
+            <Minimize2 size={13} />
+            <span className="hide-mobile">挂起</span>
+          </button>
+
+          <button type="button" className="btn btn-glass btn-sm" onClick={handleLeave} title="离开并断开房间">
             <LogOut size={14} />
             <span className="hide-mobile">离开</span>
           </button>
@@ -2525,6 +2584,35 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             </div>
           )}
 
+          {recentRooms.filter(
+            (r) => r.code !== roomCode && !savedFixedRooms.some((s) => s.code === r.code)
+          ).length > 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div style={{ fontSize: 12, fontWeight: 800, color: 'var(--text-muted)' }}>
+                🕒 最近房间
+              </div>
+              {recentRooms
+                .filter(
+                  (r) => r.code !== roomCode && !savedFixedRooms.some((s) => s.code === r.code)
+                )
+                .slice(0, 4)
+                .map((r) => (
+                  <button
+                    key={r.code}
+                    type="button"
+                    className="btn btn-glass btn-sm"
+                    style={{ justifyContent: 'space-between' }}
+                    onClick={() => void handleSwitchSavedFixed(r)}
+                  >
+                    <span className="mono">#{r.code}</span>
+                    <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                      {formatRelativeTime(r.lastVisitedAt)}
+                    </span>
+                  </button>
+                ))}
+            </div>
+          )}
+
           <div style={{ marginTop: 'auto', display: 'flex', flexDirection: 'column', gap: 8, paddingTop: 10, borderTop: '1px solid var(--line-border)' }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
               <span style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--text-sub)' }}>主题色</span>
@@ -2742,8 +2830,8 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                 onReactMessage={handleReactMessage}
                 onReplyMessage={handleReplyMessage}
                 onRecallMessage={handleRecallMessage}
-                onAcceptFile={(peerId, tid, toDisk, fn) =>
-                  void handleAcceptFile(peerId, tid, toDisk, fn)
+                onAcceptFile={(peerId, tid, mode, fn, fsize) =>
+                  void handleAcceptFile(peerId, tid, mode, fn, fsize)
                 }
                 onRejectFile={(peerId, tid) => meshRef.current?.rejectIncomingTransfer(peerId, tid)}
                 onCancelTransfer={(peerId, tid) => meshRef.current?.cancelTransfer(peerId, tid)}

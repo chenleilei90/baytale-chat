@@ -12,8 +12,10 @@ import {
   ClipboardPaste,
   AlertCircle,
   Wand2,
+  Clock,
 } from 'lucide-react';
 import type {
+  RecentRoom,
   RoomMode,
   SavedFixedRoom,
   ServerConfig,
@@ -27,7 +29,7 @@ import {
   fetchRoomInfo,
   verifyRoomPassword,
 } from '../lib/signaling';
-import { copyTextToClipboard } from '../lib/platform';
+import { copyTextToClipboard, formatRelativeTime } from '../lib/platform';
 import { generateRandomName, pickRandomPresetAvatar } from '../lib/avatar';
 import { Avatar } from './Avatar';
 import { PalettePicker, Switch } from './Controls';
@@ -37,6 +39,7 @@ interface LobbyProps {
   theme: ThemeMode;
   serverConfig: ServerConfig | null;
   savedFixedRooms: SavedFixedRoom[];
+  recentRooms: RecentRoom[];
   initialJoinCode?: string;
   initialNotice?: string;
   onSelectTheme: (theme: ThemeMode) => void;
@@ -44,6 +47,8 @@ interface LobbyProps {
   onEditProfile: () => void;
   onEnterRoom: (code: string, password: string, mode: RoomMode, rememberFixed?: boolean) => void;
   onRemoveSavedRoom: (code: string) => void;
+  onRemoveRecentRoom: (code: string) => void;
+  onClearRecentRooms: () => void;
   onToast: (msg: string) => void;
 }
 
@@ -70,6 +75,7 @@ export const Lobby: React.FC<LobbyProps> = ({
   theme,
   serverConfig,
   savedFixedRooms,
+  recentRooms,
   initialJoinCode,
   initialNotice,
   onSelectTheme,
@@ -77,6 +83,8 @@ export const Lobby: React.FC<LobbyProps> = ({
   onEditProfile,
   onEnterRoom,
   onRemoveSavedRoom,
+  onRemoveRecentRoom,
+  onClearRecentRooms,
   onToast,
 }) => {
   const [tab, setTab] = useState<'create' | 'join'>(initialJoinCode ? 'join' : 'create');
@@ -215,6 +223,39 @@ export const Lobby: React.FC<LobbyProps> = ({
         setNeedPassword(true);
       }
       setErrorText(err instanceof Error ? err.message : '无法进入房间');
+    }
+  };
+
+  const handleQuickEnterRecent = async (item: RecentRoom) => {
+    setErrorText('');
+    try {
+      const info = await fetchRoomInfo(item.code);
+      if (info.hasPassword && !item.password) {
+        setTab('join');
+        setJoinInput(item.code);
+        setNeedPassword(true);
+        setErrorText('请输入该房间的访问密码');
+        return;
+      }
+      if (info.hasPassword && item.password) {
+        await verifyRoomPassword(item.code, item.password);
+      }
+      onEnterRoom(item.code, item.password || '', info.mode, false);
+    } catch (err) {
+      if (
+        err instanceof ApiError &&
+        (err.errorCode === 'ROOM_NOT_FOUND' || err.errorCode === 'ROOM_EXPIRED')
+      ) {
+        onRemoveRecentRoom(item.code);
+        onToast(`临时房间 #${item.code} 已销毁或过期，已从最近记录移除`);
+        return;
+      }
+      setTab('join');
+      setJoinInput(item.code);
+      if (err instanceof ApiError && err.errorCode === 'WRONG_PASSWORD') {
+        setNeedPassword(true);
+      }
+      setErrorText(err instanceof Error ? err.message : '无法进入该房间');
     }
   };
 
@@ -641,6 +682,85 @@ export const Lobby: React.FC<LobbyProps> = ({
                 </div>
               </div>
             </div>
+
+            {/* 最近访问过的房间（包含临时闪传房与固定房，支持一键重进与自动失效清理） */}
+            {recentRooms.length > 0 && (
+              <div className="glass-bento" style={{ padding: 18 }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+                  <span style={{ fontSize: 14, fontWeight: 800, display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                    <Clock size={14} style={{ color: 'var(--accent)' }} />
+                    最近房间
+                  </span>
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm"
+                    style={{ height: 24, padding: '0 8px', fontSize: 11.5 }}
+                    onClick={onClearRecentRooms}
+                  >
+                    清空
+                  </button>
+                </div>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {recentRooms.slice(0, 6).map((item) => (
+                    <div
+                      key={item.code}
+                      style={{
+                        padding: '9px 12px',
+                        borderRadius: 16,
+                        background: 'var(--glass-bg-strong)',
+                        border: '1px solid var(--line-border)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        gap: 8,
+                      }}
+                    >
+                      <div style={{ minWidth: 0 }}>
+                        <div className="mono" style={{ fontSize: 14, fontWeight: 800, display: 'flex', alignItems: 'center', gap: 5 }}>
+                          <span>#{item.code}</span>
+                          {item.hasPassword && <Lock size={11} style={{ color: 'var(--accent)' }} />}
+                        </div>
+                        <div style={{ fontSize: 11, color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 }}>
+                          <span>{item.mode === 'fixed' ? '📌 常驻' : '🔥 闪传'}</span>
+                          <span>· {formatRelativeTime(item.lastVisitedAt)}</span>
+                        </div>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <button
+                          type="button"
+                          className="btn btn-soft btn-sm"
+                          onClick={() => void handleQuickEnterRecent(item)}
+                        >
+                          重进
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-icon"
+                          style={{ width: 28, height: 28 }}
+                          title="复制邀请链接"
+                          onClick={async () => {
+                            const url = `${window.location.origin}/?room=${encodeURIComponent(item.code)}`;
+                            if (await copyTextToClipboard(url)) onToast(`已复制 #${item.code} 链接`);
+                          }}
+                        >
+                          <Copy size={13} />
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-icon"
+                          style={{ width: 28, height: 28 }}
+                          title="移除此记录"
+                          onClick={() => onRemoveRecentRoom(item.code)}
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* 常驻秘密基地 */}
             <div className="glass-bento" style={{ padding: 18 }}>
