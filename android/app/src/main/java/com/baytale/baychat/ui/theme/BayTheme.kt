@@ -69,48 +69,7 @@ data class BayColors(
     val isDark: Boolean,
     val fileTypeColors: BayFileTypeColors,
 ) {
-    // ------------------------------------------------------------------------
-    // Phase 1 兼容映射属性（确保旧页面在迁移完成前 100% 编译通过，Phase 2 结束后统一清理）
-    // ------------------------------------------------------------------------
-    @Deprecated("请迁移至 bg", ReplaceWith("bg"))
-    val background: Color get() = bg
-
-    @Deprecated("请迁移至 textPrimary", ReplaceWith("textPrimary"))
-    val textMain: Color get() = textPrimary
-
-    @Deprecated("请迁移至 textSecondary", ReplaceWith("textSecondary"))
-    val textSub: Color get() = textSecondary
-
-    @Deprecated("请迁移至 textTertiary", ReplaceWith("textTertiary"))
-    val textMuted: Color get() = textTertiary
-
-    @Deprecated("Bay Design 2.0 已废弃全局描边，请改用层级与填充色", ReplaceWith("Color.Transparent"))
-    val border: Color get() = Color.Transparent
-
-    @Deprecated("请迁移至 fill", ReplaceWith("fill"))
-    val surfaceSubtle: Color get() = fill
-
-    @Deprecated("请迁移至 success", ReplaceWith("success"))
-    val emerald: Color get() = success
-
-    @Deprecated("请迁移至 warning", ReplaceWith("warning"))
-    val amber: Color get() = warning
-
-    @Deprecated("请迁移至 accent", ReplaceWith("accent"))
-    val accentSecondary: Color get() = accent
-
-    @Deprecated(
-        "请迁移至 surface 或 surfaceElevated",
-        ReplaceWith("if (isDark) surfaceElevated else surface"),
-    )
-    val peerBubbleBg: Color get() = if (isDark) surfaceElevated else surface
-
-    @Deprecated("请迁移至 onAccent", ReplaceWith("onAccent"))
-    val selfBubbleText: Color get() = onAccent
 }
-
-/** Phase 1 兼容类型别名，供旧代码无缝过渡 */
-typealias BayChatColors = BayColors
 
 private val LightFileTypeColors = BayFileTypeColors(
     pdf = Color(0xFFFF3B30),
@@ -419,23 +378,4 @@ fun BayChatTheme(
             content = content,
         )
     }
-}
-
-/**
- * Phase 1 兼容重载，供尚未升级 AppearanceMode 的旧入口无缝编译。
- */
-@Deprecated(
-    "请迁移至 BayChatTheme(accent = ..., appearance = ...)",
-    ReplaceWith("BayChatTheme(accent = themeMode, appearance = AppearanceMode.SYSTEM, content = content)"),
-)
-@Composable
-fun BayChatTheme(
-    themeMode: AppThemeMode,
-    content: @Composable () -> Unit,
-) {
-    BayChatTheme(
-        accent = themeMode,
-        appearance = AppearanceMode.SYSTEM,
-        content = content,
-    )
 }
