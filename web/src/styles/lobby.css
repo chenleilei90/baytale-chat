@@ -1807,7 +1807,7 @@
 }
 
 .workspace-rail {
-  width: 248px;
+  width: clamp(200px, 14vw, 280px);
   flex-shrink: 0;
   background: var(--surface);
   display: flex;
@@ -2332,4 +2332,299 @@ html[data-appearance='dark'][data-accent='geek'] .lobby-kpi-card {
 
 html[data-appearance='dark'][data-accent='geek'] .btn-jelly {
   box-shadow: 0 8px 22px rgba(20, 184, 166, 0.24);
+}
+
+/* ==========================================================================
+   P2PLink 1:1 三栏式极客桌面工作台（Tab 1 首页直连视图）
+   ========================================================================== */
+.p2p-lobby-workbench {
+  display: grid;
+  grid-template-columns: minmax(220px, 3fr) minmax(0, 6fr) minmax(220px, 3fr);
+  gap: 14px;
+  min-height: calc(100dvh - 104px);
+  width: 100%;
+  align-items: stretch;
+}
+
+@media (max-width: 1200px) {
+  .p2p-lobby-workbench {
+    grid-template-columns: minmax(220px, 3fr) minmax(0, 7fr);
+  }
+  .p2p-lobby-workbench .p2p-col-right {
+    display: none;
+  }
+}
+
+@media (max-width: 880px) {
+  .p2p-lobby-workbench {
+    grid-template-columns: minmax(0, 1fr);
+    min-height: auto;
+  }
+}
+
+.p2p-col-panel {
+  background: var(--surface);
+  border: 1px solid var(--separator);
+  border-radius: var(--r-lg);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+}
+
+.p2p-col-left,
+.p2p-col-right {
+  padding: 12px;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.p2p-node-card {
+  border-radius: var(--r-md);
+  padding: 12px;
+  background: var(--fill);
+  border: 1px solid var(--accent-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+html[data-appearance='dark'][data-accent='geek'] .p2p-node-card {
+  background: linear-gradient(135deg, rgba(15, 23, 42, 0.92), rgba(14, 26, 43, 0.96));
+  border-color: rgba(20, 184, 166, 0.28);
+}
+
+.p2p-node-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.p2p-node-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.p2p-pulse-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--success);
+  box-shadow: 0 0 8px var(--success);
+  animation: p2pPing 1.6s ease-in-out infinite;
+}
+
+@keyframes p2pPing {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(0.82); }
+}
+
+.p2p-node-chip {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.p2p-node-name-btn {
+  border: none;
+  background: transparent;
+  padding: 0;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.p2p-node-fp {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10.5px;
+  color: var(--text-muted);
+}
+
+.p2p-peer-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow-y: auto;
+  max-height: 460px;
+}
+
+.p2p-peer-row {
+  width: 100%;
+  text-align: left;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border-radius: var(--r-md);
+  border: 1px solid transparent;
+  background: var(--fill);
+  cursor: pointer;
+  transition: all 150ms ease;
+}
+
+.p2p-peer-row:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.p2p-peer-meta {
+  min-width: 0;
+  flex: 1;
+}
+
+.p2p-peer-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.p2p-peer-name {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.p2p-peer-sub {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-top: 2px;
+  font-size: 10.5px;
+}
+
+.p2p-center-head {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--separator);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.p2p-center-body {
+  flex: 1;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow-y: auto;
+}
+
+.p2p-center-footer {
+  padding: 12px 16px;
+  border-top: 1px solid var(--separator);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: var(--surface);
+}
+
+.p2p-transfer-item {
+  border-radius: var(--r-md);
+  padding: 13px 14px;
+  background: var(--fill);
+  border: 1px solid var(--separator);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.p2p-transfer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.p2p-transfer-icon {
+  width: 34px;
+  height: 34px;
+  border-radius: var(--r-sm);
+  background: var(--success-soft);
+  color: var(--success);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.p2p-progress-track {
+  height: 6px;
+  width: 100%;
+  border-radius: 999px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.p2p-progress-fill {
+  height: 100%;
+  background: var(--success);
+  border-radius: 999px;
+}
+
+.p2p-dropzone-box {
+  width: 100%;
+  border-radius: var(--r-md);
+  border: 2px dashed var(--accent);
+  background: var(--accent-soft);
+  padding: 11px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.p2p-dropzone-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+}
+
+.p2p-dropzone-icon {
+  width: 34px;
+  height: 34px;
+  border-radius: var(--r-sm);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.p2p-quick-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 6px 10px;
+  border-radius: var(--r-sm);
+  background: var(--fill);
+  border: 1px solid var(--separator);
 }

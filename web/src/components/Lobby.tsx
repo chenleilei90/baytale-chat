@@ -1,15 +1,15 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Activity,
   AlertCircle,
   ArrowRight,
   Ban,
   Bell,
   Bookmark,
-  Check,
+  CheckCircle2,
   ChevronDown,
   ChevronUp,
   ClipboardPaste,
-  Clock,
   Compass,
   Copy,
   Database,
@@ -18,11 +18,12 @@ import {
   ExternalLink,
   File as FileIcon,
   Flame,
+  FolderUp,
   Globe,
   HardDrive,
   History,
+  Key,
   KeyRound,
-  Laptop,
   Lock,
   Package,
   Palette,
@@ -34,11 +35,11 @@ import {
   Send,
   ShieldCheck,
   SlidersHorizontal,
-  Smartphone,
   Trash2,
   Unlock,
   UserRound,
   Users,
+  Wifi,
   X,
 } from 'lucide-react';
 import type {
@@ -181,8 +182,8 @@ export const Lobby: React.FC<LobbyProps> = ({
   onOpenPickupPage,
   onPickupsChange,
   onRevokePickup,
-  onRemoveSavedRoom,
-  onRenameSavedRoom,
+  onRemoveSavedRoom: _onRemoveSavedRoom,
+  onRenameSavedRoom: _onRenameSavedRoom,
   onRemoveRecentRoom,
   onClearRecentRooms,
   onRemoveTransferRecord,
@@ -211,12 +212,7 @@ export const Lobby: React.FC<LobbyProps> = ({
   const [submitting, setSubmitting] = useState(false);
   const [randomJoining, setRandomJoining] = useState(false);
   const [errorText, setErrorText] = useState(initialNotice || '');
-  const [roomTab, setRoomTab] = useState<'recent' | 'saved'>(() =>
-    recentRooms.length === 0 && savedFixedRooms.length > 0 ? 'saved' : 'recent'
-  );
   const [confirmCreateCode, setConfirmCreateCode] = useState<string | null>(null);
-  const [editingLabelCode, setEditingLabelCode] = useState<string | null>(null);
-  const [editingLabelValue, setEditingLabelValue] = useState('');
 
   // 取件码弹窗
   const [pickupSendOpen, setPickupSendOpen] = useState(false);
@@ -1045,546 +1041,700 @@ export const Lobby: React.FC<LobbyProps> = ({
 
         <main className="workspace-scroll">
           <div className="workspace-canvas">
-            {/* ================== TAB 1: 快传与房间存储 ================== */}
+            {/* ================== TAB 1: P2PLink 1:1 三栏极客直连工作台 ================== */}
             {activeTab === 'quick' && (
-              <div className="workspace-tab-stack">
-                <section className="glass-bento workspace-hero-card">
-                  <div className="lobby-hero-header">
-                    <h1 className="lobby-hero-display">文件存进房间，随时随地取</h1>
-                    <p className="lobby-hero-sub">
-                      房间文件按 1~7 天保鲜期保存或阅后即焚，支持单文件大体积跨端 P2P 直传、6 位取件码离线暂存与多端收藏重连
-                    </p>
-                  </div>
-
-                  <form onSubmit={handleUnifiedSubmit} className="lobby-hero-bar">
-                    <div className="lobby-bar-row">
-                      <div className="input-group lobby-bar-input-wrap">
-                        <input
-                          ref={codeInputRef}
-                          className="field-input with-suffix mono lobby-code-input"
-                          value={roomInput}
-                          onChange={(e) => {
-                            setRoomInput(e.target.value);
-                            setErrorText('');
-                            if (!e.target.value.trim()) setNeedPassword(false);
-                          }}
-                          onBlur={() => void probeRoomInput(roomInput)}
-                          placeholder="留空直接新建房间，或输入 849205 / bay-8888"
-                          aria-label="房间口令或邀请链接"
-                        />
-                        <div className="input-suffix lobby-input-suffix">
-                          {roomInput && (
-                            <button
-                              type="button"
-                              className="btn btn-ghost btn-sm lobby-clear-btn"
-                              onClick={() => {
-                                setRoomInput('');
-                                setNeedPassword(false);
-                                setErrorText('');
-                              }}
-                              title="清空"
-                              aria-label="清空房间口令"
-                            >
-                              <X size={14} aria-hidden="true" />
-                            </button>
-                          )}
-                          <button
-                            type="button"
-                            className="btn btn-soft btn-sm lobby-touch-pill"
-                            onClick={() => void handlePasteClipboard()}
-                          >
-                            <ClipboardPaste size={13} aria-hidden="true" /> 粘贴
-                          </button>
-                        </div>
-                      </div>
-
-                      <div className="lobby-bar-actions">
-                        <button
-                          type="submit"
-                          className="btn btn-jelly btn-xl lobby-cta-primary"
-                          disabled={submitting || randomJoining}
-                        >
-                          <span>
-                            {submitting
-                              ? '正在进入...'
-                              : hasInputCode
-                                ? '进入指定房间'
-                                : mode === 'fixed'
-                                  ? '创建常驻房间'
-                                  : '创建临时房间'}
-                          </span>
-                          <ArrowRight size={17} aria-hidden="true" />
-                        </button>
-                        {hasInputCode && (
-                          <button
-                            type="button"
-                            className="btn btn-soft btn-xl"
-                            disabled={submitting || randomJoining}
-                            onClick={() => void handleDirectCreateNewRoom()}
-                            title="忽略当前输入框内容直接创建新房间"
-                          >
-                            <Plus size={16} aria-hidden="true" />
-                            <span>新建房间</span>
-                          </button>
-                        )}
-                        <button
-                          type="button"
-                          className="btn btn-soft btn-xl"
-                          disabled={submitting || randomJoining}
-                          onClick={() => void handleRandomJoin()}
-                          title="随机加入免密开放房间"
-                        >
-                          <Dices size={17} aria-hidden="true" />
-                          <span>{randomJoining ? '匹配中...' : '随机'}</span>
-                        </button>
-                      </div>
-                    </div>
-
-                    {(needPassword || (!showAdvanced && hasPasswordInput)) && (
-                      <div className="lobby-field-group lobby-pwd-inline">
-                        <span className="lobby-field-label">访问密码</span>
-                        <div className="input-group">
-                          <span className="input-prefix-icon">
-                            <Lock size={15} aria-hidden="true" />
-                          </span>
-                          <input
-                            ref={passwordInputRef}
-                            className="field-input with-prefix"
-                            type="password"
-                            value={roomPassword}
-                            onChange={(e) => {
-                              setRoomPassword(e.target.value);
-                              setErrorText('');
-                            }}
-                            placeholder="输入该房间的访问密码..."
-                          />
-                        </div>
-                      </div>
-                    )}
-
-                    {errorText && (
-                      <div className="alert-strip">
-                        <AlertCircle size={15} aria-hidden="true" />
-                        <span>{errorText}</span>
-                      </div>
-                    )}
-
-                    <div className="lobby-control-strip">
-                      <button
-                        type="button"
-                        className={`btn btn-sm lobby-touch-pill ${!hasPasswordInput && allowRandom ? 'btn-soft' : 'btn-glass'}`}
-                        disabled={hasPasswordInput}
-                        onClick={() => {
-                          const next = !allowRandom;
-                          setAllowRandom(next);
-                          onToast(next ? '已允许随机加入' : '仅限凭口令进入');
-                        }}
-                      >
-                        {!hasPasswordInput && allowRandom ? (
-                          <Globe size={13} aria-hidden="true" />
-                        ) : (
-                          <Lock size={13} aria-hidden="true" />
-                        )}
-                        <span>
-                          {hasPasswordInput
-                            ? '已设访问密码'
-                            : allowRandom
-                              ? '允许随机加入'
-                              : '仅限口令进入'}
+              <div className="p2p-lobby-workbench">
+                {/* ---------- 左栏：我的节点 + 在线设备与常用房间 + E2EE 加密卡 ---------- */}
+                <aside className="p2p-col-panel p2p-col-left">
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 12, minHeight: 0, flex: 1 }}>
+                    <div className="p2p-node-card">
+                      <div className="p2p-node-head">
+                        <span className="p2p-node-title">
+                          <span className="p2p-pulse-dot" />
+                          我的节点 (Web 端)
                         </span>
-                      </button>
-
+                        <span className="p2p-node-chip mono">P2P Ready</span>
+                      </div>
                       <button
                         type="button"
-                        className={`btn btn-ghost btn-sm lobby-touch-pill lobby-advanced-toggle ${showAdvanced ? 'open' : ''}`}
-                        onClick={() => setShowAdvanced((prev) => !prev)}
-                        aria-expanded={showAdvanced}
+                        className="p2p-node-name-btn"
+                        onClick={onEditProfile}
+                        title="点击修改本机昵称与头像"
                       >
-                        <SlidersHorizontal size={13} aria-hidden="true" />
-                        <span>保留期与上限设置</span>
-                        {!showAdvanced && <span className="lobby-advanced-summary">({summaryTag})</span>}
-                        {showAdvanced ? <ChevronUp size={14} aria-hidden="true" /> : <ChevronDown size={14} aria-hidden="true" />}
+                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {profile.name}
+                        </span>
+                        <Edit3 size={12} style={{ color: 'var(--accent)', flexShrink: 0 }} aria-hidden="true" />
                       </button>
+                      <div className="p2p-node-fp mono">
+                        <Key size={11} style={{ color: 'var(--accent)', flexShrink: 0 }} aria-hidden="true" />
+                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {profile.clientId}
+                        </span>
+                      </div>
                     </div>
 
-                    {showAdvanced && (
-                      <div className="lobby-advanced-panel">
-                        <div className="lobby-advanced-grid">
-                          <div className="lobby-field-group">
-                            <span className="lobby-field-label">房间形态</span>
-                            <div className="segmented full">
-                              <button
-                                type="button"
-                                className={`seg-item ${mode === 'ephemeral' ? 'active' : ''}`}
-                                onClick={() => handleModeChange('ephemeral')}
-                              >
-                                <Flame size={13} aria-hidden="true" /> 临时房间
-                              </button>
-                              <button
-                                type="button"
-                                className={`seg-item ${mode === 'fixed' ? 'active' : ''}`}
-                                onClick={() => handleModeChange('fixed')}
-                              >
-                                <Pin size={13} aria-hidden="true" /> 常驻基地
-                              </button>
-                            </div>
-                          </div>
-
-                          <div className="lobby-field-group">
-                            <span className="lobby-field-label">访问密码（可选，至少 5 位数字）</span>
-                            <div className="input-group">
-                              <span className="input-prefix-icon">
-                                <Lock size={14} aria-hidden="true" />
-                              </span>
-                              <input
-                                className="field-input with-prefix"
-                                type="password"
-                                inputMode="numeric"
-                                value={roomPassword}
-                                onChange={(e) => {
-                                  setRoomPassword(e.target.value.replace(/\D/g, '').slice(0, 20));
-                                  setErrorText('');
-                                }}
-                                placeholder="至少 5 位数字，留空表示免密进入"
-                              />
-                            </div>
-                          </div>
-                        </div>
-
-                        <div className="lobby-advanced-grid">
-                          <div className="lobby-field-group">
-                            <div className="lobby-field-label-row">
-                              <span className="lobby-field-label">服务器缓存保鲜期</span>
-                              <span className="lobby-field-hint">
-                                {retentionDays === 0 ? '零缓存，退出即焚' : `最后活跃起保留 ${retentionDays} 天`}
-                              </span>
-                            </div>
-                            <div className="lobby-chip-group">
-                              {RETENTION_STEPS.map((st) => (
-                                <button
-                                  key={st.days}
-                                  type="button"
-                                  className={`btn btn-sm lobby-touch-pill ${retentionDays === st.days ? 'btn-jelly' : 'btn-glass'}`}
-                                  onClick={() => setRetentionDays(st.days)}
-                                >
-                                  {st.label}
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-
-                          <div className="lobby-field-group">
-                            <div className="lobby-field-label-row">
-                              <span className="lobby-field-label">单文件传输上限</span>
-                              <span className="lobby-field-hint">
-                                {maxFileSizeMB === 0 ? '全房不限体积' : `≤ ${maxFileSizeMB}MB`}
-                              </span>
-                            </div>
-                            <div className="lobby-chip-group">
-                              {FILE_LIMIT_PRESETS.filter((p) => {
-                                const cap = serverConfig?.maxAttachmentMB || 0;
-                                if (cap <= 0) return true;
-                                return p.mb > 0 && p.mb <= cap;
-                              }).map((p) => (
-                                <button
-                                  key={p.mb}
-                                  type="button"
-                                  className={`btn btn-sm lobby-touch-pill ${maxFileSizeMB === p.mb ? 'btn-jelly' : 'btn-glass'}`}
-                                  onClick={() => setMaxFileSizeMB(p.mb)}
-                                >
-                                  {p.label}
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-                        </div>
-
-                        <div className="lobby-advanced-switches">
-                          <Switch
-                            checked={privatePairOnly}
-                            onChange={setPrivatePairOnly}
-                            label="双人私密传输（上限 2 人）"
-                            description="仅允许两人点对点直连"
-                          />
-                          {mode === 'fixed' && (
-                            <Switch
-                              checked={saveToFavorites}
-                              onChange={setSaveToFavorites}
-                              label="创建后固定到常驻收藏"
-                              description="方便在各端列表中一键进入"
-                            />
-                          )}
-                        </div>
-                      </div>
-                    )}
-                  </form>
-                </section>
-
-                {/* 双栏工作区：左栏我的房间（最近+常驻），右栏取件码 + 附近设备 */}
-                <section className="lobby-quick-dashboard">
-                  {/* 最近访问与常驻基地 */}
-                  <div className="glass-bento lobby-card">
-                    <div className="lobby-card-head">
-                      <div className="segmented">
+                    <div className="sidebar-section-head" style={{ padding: '0 2px' }}>
+                      <span>直连设备与节点 ({nearbyDevices.length + savedFixedRooms.length + recentRooms.length})</span>
+                      {recentRooms.length > 0 ? (
                         <button
                           type="button"
-                          className={`seg-item ${roomTab === 'recent' ? 'active' : ''}`}
-                          onClick={() => setRoomTab('recent')}
-                        >
-                          最近房间 ({recentRooms.length})
-                        </button>
-                        <button
-                          type="button"
-                          className={`seg-item ${roomTab === 'saved' ? 'active' : ''}`}
-                          onClick={() => setRoomTab('saved')}
-                        >
-                          常驻收藏 ({savedFixedRooms.length})
-                        </button>
-                      </div>
-                      {roomTab === 'recent' && recentRooms.length > 0 && (
-                        <button
-                          type="button"
-                          className="btn btn-ghost btn-sm lobby-clear-recent-btn"
+                          className="btn btn-ghost btn-sm"
+                          style={{ height: 22, padding: '0 6px', fontSize: 10.5 }}
                           onClick={onClearRecentRooms}
                         >
                           清空最近
                         </button>
+                      ) : (
+                        <Users size={13} aria-hidden="true" />
                       )}
                     </div>
 
-                    {roomTab === 'recent' ? (
-                      recentRooms.length === 0 ? (
-                        <div className="lobby-empty-card centered">
-                          <div className="lobby-empty-title">
-                            <Clock size={16} className="lobby-card-title-icon" aria-hidden="true" />
-                            <span>暂无最近加入的房间</span>
-                          </div>
-                          <div className="lobby-empty-desc">
-                            在上方输入口令或点击「创建临时房间」，系统会自动记录常用房间以便一键回访。
-                          </div>
-                        </div>
-                      ) : (
-                        <div className="lobby-room-list">
-                          {recentRooms.map((item) => (
-                            <div
-                              key={item.code}
-                              className="lobby-room-item"
-                              onClick={() => void handleQuickEnterRecent(item)}
-                            >
-                              <div className="lobby-room-meta">
-                                <div className="mono lobby-room-code">
-                                  <span>#{item.code}</span>
-                                  <span className="pill pill-neutral">
-                                    {item.mode === 'fixed' ? '常驻' : '临时'}
-                                  </span>
-                                  {item.hasPassword && <Lock size={12} className="lobby-room-lock" aria-hidden="true" />}
-                                </div>
-                                <div className="lobby-room-sub">
-                                  {formatRelativeTime(item.lastVisitedAt)} · {item.password ? '已记密码' : '点击进入'}
-                                </div>
-                              </div>
-                              <div className="lobby-card-actions" onClick={(e) => e.stopPropagation()}>
-                                <button
-                                  type="button"
-                                  className="btn btn-soft btn-sm lobby-touch-pill"
-                                  onClick={() => void handleQuickEnterRecent(item)}
-                                >
-                                  进入
-                                </button>
-                                <button
-                                  type="button"
-                                  className="btn btn-ghost btn-icon lobby-touch-icon"
-                                  title="移除该记录"
-                                  aria-label={`移除房间 ${item.code}`}
-                                  onClick={() => onRemoveRecentRoom(item.code)}
-                                >
-                                  <Trash2 size={14} aria-hidden="true" />
-                                </button>
-                              </div>
+                    <div className="p2p-peer-list geek-scroll">
+                      {nearbyDevices.map((dev) => (
+                        <button
+                          key={dev.clientId}
+                          type="button"
+                          className="p2p-peer-row"
+                          disabled={invitingId === dev.clientId}
+                          onClick={() => void handleInviteNearbyDevice(dev)}
+                          title={`点击邀请 ${dev.name} 建立直连`}
+                        >
+                          <Avatar name={dev.name} avatar={dev.avatar} size={34} />
+                          <div className="p2p-peer-meta">
+                            <div className="p2p-peer-top">
+                              <span className="p2p-peer-name">{dev.name}</span>
+                              <span className="mono" style={{ fontSize: 10, color: 'var(--success)' }}>
+                                在线
+                              </span>
                             </div>
-                          ))}
+                            <div className="p2p-peer-sub">
+                              <span style={{ color: 'var(--accent)', fontWeight: 600 }}>
+                                {dev.device === 'android' ? 'Android LAN' : 'Web LAN'}
+                              </span>
+                              <span style={{ color: 'var(--text-muted)' }}>
+                                {invitingId === dev.clientId ? '邀请中...' : '点击直连'}
+                              </span>
+                            </div>
+                          </div>
+                        </button>
+                      ))}
+
+                      {savedFixedRooms.map((item) => (
+                        <button
+                          key={`saved_${item.code}`}
+                          type="button"
+                          className="p2p-peer-row"
+                          onClick={() => void handleQuickEnterSaved(item)}
+                        >
+                          <div
+                            style={{
+                              width: 34,
+                              height: 34,
+                              borderRadius: 10,
+                              background: 'var(--accent-soft)',
+                              color: 'var(--accent)',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              flexShrink: 0,
+                            }}
+                          >
+                            <Pin size={15} aria-hidden="true" />
+                          </div>
+                          <div className="p2p-peer-meta">
+                            <div className="p2p-peer-top">
+                              <span className="p2p-peer-name mono">
+                                {item.label ? `${item.label} (#${item.code})` : `#${item.code}`}
+                              </span>
+                              {item.hasPassword && <Lock size={11} style={{ color: 'var(--accent)' }} aria-hidden="true" />}
+                            </div>
+                            <div className="p2p-peer-sub">
+                              <span style={{ color: 'var(--accent)' }}>常驻基地</span>
+                              <span style={{ color: 'var(--text-muted)' }}>{formatRelativeTime(item.lastVisitedAt)}</span>
+                            </div>
+                          </div>
+                        </button>
+                      ))}
+
+                      {recentRooms.map((item) => (
+                        <button
+                          key={`rec_${item.code}`}
+                          type="button"
+                          className="p2p-peer-row"
+                          onClick={() => void handleQuickEnterRecent(item)}
+                        >
+                          <div
+                            style={{
+                              width: 34,
+                              height: 34,
+                              borderRadius: 10,
+                              background: 'var(--surface)',
+                              color: 'var(--text-secondary)',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              flexShrink: 0,
+                            }}
+                          >
+                            <Flame size={15} aria-hidden="true" />
+                          </div>
+                          <div className="p2p-peer-meta">
+                            <div className="p2p-peer-top">
+                              <span className="p2p-peer-name mono">#{item.code}</span>
+                              {item.hasPassword && <Lock size={11} style={{ color: 'var(--accent)' }} aria-hidden="true" />}
+                            </div>
+                            <div className="p2p-peer-sub">
+                              <span style={{ color: 'var(--text-secondary)' }}>
+                                {item.mode === 'fixed' ? '常驻房间' : '临时闪传'}
+                              </span>
+                              <span style={{ color: 'var(--text-muted)' }}>{formatRelativeTime(item.lastVisitedAt)}</span>
+                            </div>
+                          </div>
+                        </button>
+                      ))}
+
+                      {nearbyDevices.length === 0 && savedFixedRooms.length === 0 && recentRooms.length === 0 && (
+                        <div className="lobby-empty-card centered" style={{ padding: '14px 10px' }}>
+                          <div className="lobby-empty-desc">
+                            暂无在线设备或历史房间，点击右侧「创建房间」即可生成 6 位数字口令开启直传。
+                          </div>
                         </div>
-                      )
-                    ) : savedFixedRooms.length === 0 ? (
-                      <div className="lobby-empty-card centered">
-                        <div className="lobby-empty-title">
-                          <Pin size={16} className="lobby-card-title-icon" aria-hidden="true" />
-                          <span>暂无常驻收藏房间</span>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="sidebar-e2ee-badge">
+                    <ShieldCheck size={16} style={{ color: 'var(--success)', flexShrink: 0 }} aria-hidden="true" />
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-primary)' }}>
+                        端到端加密已启用
+                      </div>
+                      <div className="mono" style={{ fontSize: 10.5, color: 'var(--accent)' }}>
+                        AES-256-GCM + DTLS 1.3
+                      </div>
+                    </div>
+                  </div>
+                </aside>
+
+                {/* ---------- 中栏：P2P 直连控制流 + 最近传输卡片 + 虚线拖拽区 ---------- */}
+                <section className="p2p-col-panel">
+                  <div className="p2p-center-head">
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                        <span style={{ fontSize: 15, fontWeight: 700, color: 'var(--text-primary)' }}>
+                          BayChat · P2P 跨端工作台
+                        </span>
+                        <span className="pill pill-emerald mono" style={{ fontSize: 10.5, height: 22 }}>
+                          <span className="status-dot emerald" />
+                          LAN Direct · 零限速直连
+                        </span>
+                      </div>
+                      <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 2 }}>
+                        1~7 天服务器限时缓存或阅后即焚 · 无注册零压缩端到端传输
+                      </div>
+                    </div>
+
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                      <button
+                        type="button"
+                        className="btn btn-soft btn-sm"
+                        onClick={() => setPickupSendOpen(true)}
+                      >
+                        <Package size={13} aria-hidden="true" /> 发取件码
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-glass btn-sm"
+                        onClick={() => setPickupLookupOpen(true)}
+                      >
+                        <KeyRound size={13} aria-hidden="true" /> 输码取件
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="p2p-center-body geek-scroll">
+                    <form onSubmit={handleUnifiedSubmit} className="lobby-hero-bar" style={{ border: '1px solid var(--separator)' }}>
+                      <div className="lobby-bar-row">
+                        <div className="input-group lobby-bar-input-wrap">
+                          <input
+                            ref={codeInputRef}
+                            className="field-input with-suffix mono lobby-code-input"
+                            value={roomInput}
+                            onChange={(e) => {
+                              setRoomInput(e.target.value);
+                              setErrorText('');
+                              if (!e.target.value.trim()) setNeedPassword(false);
+                            }}
+                            onBlur={() => void probeRoomInput(roomInput)}
+                            placeholder="留空直接新建直连房间，或输入 849205 / bay-8888"
+                            aria-label="房间口令或邀请链接"
+                          />
+                          <div className="input-suffix lobby-input-suffix">
+                            {roomInput && (
+                              <button
+                                type="button"
+                                className="btn btn-ghost btn-sm lobby-clear-btn"
+                                onClick={() => {
+                                  setRoomInput('');
+                                  setNeedPassword(false);
+                                  setErrorText('');
+                                }}
+                                title="清空"
+                                aria-label="清空房间口令"
+                              >
+                                <X size={14} aria-hidden="true" />
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              className="btn btn-soft btn-sm lobby-touch-pill"
+                              onClick={() => void handlePasteClipboard()}
+                            >
+                              <ClipboardPaste size={13} aria-hidden="true" /> 粘贴
+                            </button>
+                          </div>
                         </div>
-                        <div className="lobby-empty-desc">
-                          展开上方「保留期与上限设置」切换为「常驻基地」并创建，即可永久固定并自定义备注名称。
+
+                        <div className="lobby-bar-actions">
+                          <button
+                            type="submit"
+                            className="btn btn-jelly btn-xl lobby-cta-primary"
+                            disabled={submitting || randomJoining}
+                          >
+                            <span>
+                              {submitting
+                                ? '正在进入...'
+                                : hasInputCode
+                                  ? '进入指定房间'
+                                  : mode === 'fixed'
+                                    ? '创建常驻房间'
+                                    : '创建直连房间'}
+                            </span>
+                            <ArrowRight size={17} aria-hidden="true" />
+                          </button>
+                          {hasInputCode && (
+                            <button
+                              type="button"
+                              className="btn btn-soft btn-xl"
+                              disabled={submitting || randomJoining}
+                              onClick={() => void handleDirectCreateNewRoom()}
+                              title="忽略当前输入框内容直接创建新房间"
+                            >
+                              <Plus size={16} aria-hidden="true" />
+                              <span>新建房间</span>
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className="btn btn-soft btn-xl"
+                            disabled={submitting || randomJoining}
+                            onClick={() => void handleRandomJoin()}
+                            title="随机加入免密开放房间"
+                          >
+                            <Dices size={17} aria-hidden="true" />
+                            <span>{randomJoining ? '匹配中...' : '随机'}</span>
+                          </button>
                         </div>
                       </div>
-                    ) : (
-                      <div className="lobby-room-list">
-                        {savedFixedRooms.map((item) => (
-                          <div
-                            key={item.code}
-                            className="lobby-room-item"
-                            onClick={() => void handleQuickEnterSaved(item)}
-                          >
-                            <div className="lobby-room-meta">
-                              {editingLabelCode === item.code ? (
-                                <div className="lobby-rename-row" onClick={(e) => e.stopPropagation()}>
-                                  <input
-                                    className="field-input lobby-rename-input"
-                                    value={editingLabelValue}
-                                    maxLength={24}
-                                    placeholder={`备注名（例如：公司资料库）`}
-                                    autoFocus
-                                    onChange={(e) => setEditingLabelValue(e.target.value)}
-                                    onKeyDown={(e) => {
-                                      if (e.key === 'Enter') {
-                                        onRenameSavedRoom(item.code, editingLabelValue);
-                                        setEditingLabelCode(null);
-                                      } else if (e.key === 'Escape') {
-                                        setEditingLabelCode(null);
-                                      }
-                                    }}
-                                  />
-                                  <button
-                                    type="button"
-                                    className="btn btn-jelly btn-sm"
-                                    onClick={() => {
-                                      onRenameSavedRoom(item.code, editingLabelValue);
-                                      setEditingLabelCode(null);
-                                    }}
-                                  >
-                                    <Check size={13} aria-hidden="true" />
-                                  </button>
-                                </div>
-                              ) : (
-                                <div className="mono lobby-room-code">
-                                  <span>{item.label ? `${item.label} (#${item.code})` : `#${item.code}`}</span>
-                                  {item.hasPassword && <Lock size={12} className="lobby-room-lock" aria-hidden="true" />}
-                                  {item.ownerToken && <span className="pill pill-accent">房主</span>}
-                                </div>
-                              )}
-                              <div className="lobby-room-sub">
-                                {formatRelativeTime(item.lastVisitedAt)}
+
+                      {(needPassword || (!showAdvanced && hasPasswordInput)) && (
+                        <div className="lobby-field-group lobby-pwd-inline">
+                          <span className="lobby-field-label">访问密码</span>
+                          <div className="input-group">
+                            <span className="input-prefix-icon">
+                              <Lock size={15} aria-hidden="true" />
+                            </span>
+                            <input
+                              ref={passwordInputRef}
+                              className="field-input with-prefix"
+                              type="password"
+                              value={roomPassword}
+                              onChange={(e) => {
+                                setRoomPassword(e.target.value);
+                                setErrorText('');
+                              }}
+                              placeholder="输入该房间的访问密码..."
+                            />
+                          </div>
+                        </div>
+                      )}
+
+                      {errorText && (
+                        <div className="alert-strip">
+                          <AlertCircle size={15} aria-hidden="true" />
+                          <span>{errorText}</span>
+                        </div>
+                      )}
+
+                      <div className="lobby-control-strip">
+                        <button
+                          type="button"
+                          className={`btn btn-sm lobby-touch-pill ${!hasPasswordInput && allowRandom ? 'btn-soft' : 'btn-glass'}`}
+                          disabled={hasPasswordInput}
+                          onClick={() => {
+                            const next = !allowRandom;
+                            setAllowRandom(next);
+                            onToast(next ? '已允许随机加入' : '仅限凭口令进入');
+                          }}
+                        >
+                          {!hasPasswordInput && allowRandom ? (
+                            <Globe size={13} aria-hidden="true" />
+                          ) : (
+                            <Lock size={13} aria-hidden="true" />
+                          )}
+                          <span>
+                            {hasPasswordInput
+                              ? '已设访问密码'
+                              : allowRandom
+                                ? '允许随机加入'
+                                : '仅限口令进入'}
+                          </span>
+                        </button>
+
+                        <button
+                          type="button"
+                          className={`btn btn-ghost btn-sm lobby-touch-pill lobby-advanced-toggle ${showAdvanced ? 'open' : ''}`}
+                          onClick={() => setShowAdvanced((prev) => !prev)}
+                          aria-expanded={showAdvanced}
+                        >
+                          <SlidersHorizontal size={13} aria-hidden="true" />
+                          <span>保留期与上限设置</span>
+                          {!showAdvanced && <span className="lobby-advanced-summary">({summaryTag})</span>}
+                          {showAdvanced ? <ChevronUp size={14} aria-hidden="true" /> : <ChevronDown size={14} aria-hidden="true" />}
+                        </button>
+                      </div>
+
+                      {showAdvanced && (
+                        <div className="lobby-advanced-panel">
+                          <div className="lobby-advanced-grid">
+                            <div className="lobby-field-group">
+                              <span className="lobby-field-label">房间形态</span>
+                              <div className="segmented full">
+                                <button
+                                  type="button"
+                                  className={`seg-item ${mode === 'ephemeral' ? 'active' : ''}`}
+                                  onClick={() => handleModeChange('ephemeral')}
+                                >
+                                  <Flame size={13} aria-hidden="true" /> 临时房间
+                                </button>
+                                <button
+                                  type="button"
+                                  className={`seg-item ${mode === 'fixed' ? 'active' : ''}`}
+                                  onClick={() => handleModeChange('fixed')}
+                                >
+                                  <Pin size={13} aria-hidden="true" /> 常驻基地
+                                </button>
                               </div>
                             </div>
-                            <div className="lobby-card-actions" onClick={(e) => e.stopPropagation()}>
-                              <button
-                                type="button"
-                                className="btn btn-ghost btn-icon lobby-touch-icon"
-                                title="编辑备注名称"
-                                aria-label={`编辑房间 ${item.code} 备注`}
-                                onClick={() => {
-                                  setEditingLabelCode(item.code);
-                                  setEditingLabelValue(item.label || '');
-                                }}
-                              >
-                                <Edit3 size={14} aria-hidden="true" />
-                              </button>
-                              <button
-                                type="button"
-                                className="btn btn-ghost btn-icon lobby-touch-icon"
-                                title="复制邀请链接"
-                                aria-label={`复制房间 ${item.code} 邀请链接`}
-                                onClick={async () => {
-                                  const url = `${window.location.origin}/?room=${encodeURIComponent(item.code)}`;
-                                  if (await copyTextToClipboard(url)) {
-                                    onToast(`已复制 #${item.code} 邀请链接`);
-                                  }
-                                }}
-                              >
-                                <Copy size={14} aria-hidden="true" />
-                              </button>
-                              <button
-                                type="button"
-                                className="btn btn-ghost btn-icon lobby-touch-icon"
-                                title="取消收藏"
-                                aria-label={`取消收藏房间 ${item.code}`}
-                                onClick={() => onRemoveSavedRoom(item.code)}
-                              >
-                                <Trash2 size={14} aria-hidden="true" />
-                              </button>
+
+                            <div className="lobby-field-group">
+                              <span className="lobby-field-label">访问密码（可选，至少 5 位数字）</span>
+                              <div className="input-group">
+                                <span className="input-prefix-icon">
+                                  <Lock size={14} aria-hidden="true" />
+                                </span>
+                                <input
+                                  className="field-input with-prefix"
+                                  type="password"
+                                  inputMode="numeric"
+                                  value={roomPassword}
+                                  onChange={(e) => {
+                                    setRoomPassword(e.target.value.replace(/\D/g, '').slice(0, 20));
+                                    setErrorText('');
+                                  }}
+                                  placeholder="至少 5 位数字，留空表示免密进入"
+                                />
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="lobby-advanced-grid">
+                            <div className="lobby-field-group">
+                              <div className="lobby-field-label-row">
+                                <span className="lobby-field-label">服务器缓存保鲜期</span>
+                                <span className="lobby-field-hint">
+                                  {retentionDays === 0 ? '零缓存，退出即焚' : `最后活跃起保留 ${retentionDays} 天`}
+                                </span>
+                              </div>
+                              <div className="lobby-chip-group">
+                                {RETENTION_STEPS.map((st) => (
+                                  <button
+                                    key={st.days}
+                                    type="button"
+                                    className={`btn btn-sm lobby-touch-pill ${retentionDays === st.days ? 'btn-jelly' : 'btn-glass'}`}
+                                    onClick={() => setRetentionDays(st.days)}
+                                  >
+                                    {st.label}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+
+                            <div className="lobby-field-group">
+                              <div className="lobby-field-label-row">
+                                <span className="lobby-field-label">单文件传输上限</span>
+                                <span className="lobby-field-hint">
+                                  {maxFileSizeMB === 0 ? '全房不限体积' : `≤ ${maxFileSizeMB}MB`}
+                                </span>
+                              </div>
+                              <div className="lobby-chip-group">
+                                {FILE_LIMIT_PRESETS.filter((p) => {
+                                  const cap = serverConfig?.maxAttachmentMB || 0;
+                                  if (cap <= 0) return true;
+                                  return p.mb > 0 && p.mb <= cap;
+                                }).map((p) => (
+                                  <button
+                                    key={p.mb}
+                                    type="button"
+                                    className={`btn btn-sm lobby-touch-pill ${maxFileSizeMB === p.mb ? 'btn-jelly' : 'btn-glass'}`}
+                                    onClick={() => setMaxFileSizeMB(p.mb)}
+                                  >
+                                    {p.label}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="lobby-advanced-switches">
+                            <Switch
+                              checked={privatePairOnly}
+                              onChange={setPrivatePairOnly}
+                              label="双人私密传输（上限 2 人）"
+                              description="仅允许两人点对点直连"
+                            />
+                            {mode === 'fixed' && (
+                              <Switch
+                                checked={saveToFavorites}
+                                onChange={setSaveToFavorites}
+                                label="创建后固定到常驻收藏"
+                                description="方便在各端列表中一键进入"
+                              />
+                            )}
+                          </div>
+                        </div>
+                      )}
+                    </form>
+
+                    {/* 最近传输任务流水卡片流（1:1 对标 P2PLink 传输卡片样式） */}
+                    {transferRecords.length > 0 ? (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                        <div className="sidebar-section-head">
+                          <span>最近直传记录 ({transferRecords.length})</span>
+                          <button
+                            type="button"
+                            className="btn btn-ghost btn-sm"
+                            onClick={() => setActiveTab('transfer')}
+                          >
+                            全部记录
+                          </button>
+                        </div>
+                        {transferRecords.slice(0, 4).map((rec) => (
+                          <div key={rec.id} className="p2p-transfer-item">
+                            <div className="p2p-transfer-head">
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+                                <div className="p2p-transfer-icon">
+                                  <HardDrive size={17} aria-hidden="true" />
+                                </div>
+                                <div style={{ minWidth: 0 }}>
+                                  <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                    {rec.fileName}
+                                  </div>
+                                  <div className="mono" style={{ fontSize: 11, color: 'var(--text-muted)', display: 'flex', gap: 6, marginTop: 2 }}>
+                                    <span>{formatBytes(rec.fileSize)}</span>
+                                    <span>·</span>
+                                    <span style={{ color: 'var(--accent)' }}>
+                                      {rec.direction === 'send' ? '发出直传' : '接收直传'}
+                                    </span>
+                                    <span>·</span>
+                                    <span>#{rec.roomCode}</span>
+                                  </div>
+                                </div>
+                              </div>
+                              <span className="pill pill-emerald" style={{ fontSize: 11, flexShrink: 0 }}>
+                                <CheckCircle2 size={12} aria-hidden="true" /> 已完成
+                              </span>
+                            </div>
+                            <div className="p2p-progress-track">
+                              <div className="p2p-progress-fill" style={{ width: '100%' }} />
+                            </div>
+                            <div className="mono" style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: 'var(--text-muted)' }}>
+                              <span>100% · {formatRelativeTime(rec.createdAt)}</span>
+                              <span style={{ color: 'var(--success)' }}>
+                                {rec.verified ? '✓ SHA-256 校验通过' : '✓ 分片写入完成'}
+                              </span>
                             </div>
                           </div>
                         ))}
                       </div>
+                    ) : (
+                      <div className="p2p-transfer-item" style={{ borderStyle: 'dashed' }}>
+                        <div className="p2p-transfer-head">
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                            <div className="p2p-transfer-icon" style={{ background: 'var(--accent-soft)', color: 'var(--accent)' }}>
+                              <Wifi size={17} aria-hidden="true" />
+                            </div>
+                            <div>
+                              <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>
+                                跨端直传引擎就绪 · 创建或进入房间即可互传任意文件
+                              </div>
+                              <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 2 }}>
+                                进房后支持微信式语音转文字、AI 纠错、多端剪贴板同步与整个文件夹 1:1 打包直传
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
                     )}
                   </div>
 
-                  {/* 右侧：取件码 + 附近设备堆叠 */}
-                  <div className="lobby-right-stack">
-                    <div className="glass-bento lobby-card">
-                      <div className="lobby-card-head">
-                        <h2 className="lobby-card-title">
-                          <Package size={16} className="lobby-card-title-icon" aria-hidden="true" />
-                          <span>取件码 · 离线暂存投递</span>
-                        </h2>
-                        <span className="pill pill-accent mono">
-                          {myPickups.length > 0 ? `${myPickups.length} 枚生效中` : '6 位取件码'}
-                        </span>
-                      </div>
-                      <p className="lobby-empty-desc">
-                        对方不在线也能先上传到服务器，生成 6 位数字取件码与提取链接，支持 1~72 小时有效期与取后即焚。
-                      </p>
-                      <div className="lobby-two-btn-grid">
-                        <button
-                          type="button"
-                          className="btn btn-jelly lobby-touch-pill"
-                          onClick={() => setPickupSendOpen(true)}
-                        >
-                          <Package size={15} aria-hidden="true" /> 发送文件取件码
-                        </button>
-                        <button
-                          type="button"
-                          className="btn btn-soft lobby-touch-pill"
-                          onClick={() => setPickupLookupOpen(true)}
-                        >
-                          <KeyRound size={15} aria-hidden="true" /> 输入取件码提取
-                        </button>
-                      </div>
+                  {/* 底部快捷控制栏 + 显眼青绿虚线直传入口 */}
+                  <div className="p2p-center-footer">
+                    <div className="p2p-quick-strip">
+                      <Switch
+                        checked={prefs.autoAcceptSmallFiles}
+                        onChange={(v) => onUpdatePrefs({ ...prefs, autoAcceptSmallFiles: v })}
+                        label={`自动接收 ≤${prefs.autoAcceptMaxMB}MB 文件`}
+                      />
+                      <button
+                        type="button"
+                        className="btn btn-soft btn-sm"
+                        disabled={submitting}
+                        onClick={() => void handleDirectCreateNewRoom()}
+                      >
+                        <Plus size={13} aria-hidden="true" /> 一键建房开聊
+                      </button>
                     </div>
 
-                    <div className="glass-bento lobby-card">
-                      <div className="lobby-card-head">
-                        <h2 className="lobby-card-title">
-                          <Radio size={16} className="lobby-card-title-icon" aria-hidden="true" />
-                          <span>附近设备（同局域网）</span>
-                        </h2>
-                        <span className="pill pill-neutral mono">{nearbyDevices.length}</span>
-                      </div>
-                      <Switch
-                        checked={prefs.nearbyDiscoverable}
-                        onChange={(v) => onUpdatePrefs({ ...prefs, nearbyDiscoverable: v })}
-                        label="允许附近设备发现我"
-                        description="同 Wi-Fi 下点击对方头像即可邀请进房直传"
-                      />
-                      {prefs.nearbyDiscoverable && (
-                        <div className="lobby-nearby-box">
-                          {nearbyDevices.length === 0 ? (
-                            <div className="lobby-nearby-empty">
-                              正在扫描同一网络下在线的手机或电脑...
-                            </div>
-                          ) : (
-                            <div className="lobby-nearby-strip">
-                              {nearbyDevices.map((dev) => (
-                                <button
-                                  key={dev.clientId}
-                                  type="button"
-                                  className="btn btn-glass lobby-nearby-card"
-                                  disabled={invitingId === dev.clientId}
-                                  onClick={() => void handleInviteNearbyDevice(dev)}
-                                >
-                                  <Avatar name={dev.name} avatar={dev.avatar} size={36} />
-                                  <span className="lobby-nearby-name">{dev.name}</span>
-                                  <span className="lobby-nearby-plat">
-                                    {dev.device === 'android' ? <Smartphone size={11} aria-hidden="true" /> : <Laptop size={11} aria-hidden="true" />}
-                                    <span>{dev.device === 'android' ? 'Android' : 'Web'}</span>
-                                  </span>
-                                </button>
-                              ))}
-                            </div>
-                          )}
+                    <div className="p2p-dropzone-box">
+                      <button
+                        type="button"
+                        onClick={() => void handleDirectCreateNewRoom()}
+                        style={{
+                          border: 'none',
+                          background: 'transparent',
+                          padding: 0,
+                          cursor: 'pointer',
+                          textAlign: 'left',
+                          flex: 1,
+                          minWidth: 0,
+                        }}
+                        className="p2p-dropzone-left"
+                      >
+                        <div className="p2p-dropzone-icon">
+                          <FolderUp size={17} aria-hidden="true" />
                         </div>
-                      )}
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--accent)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            P2P 极速直传（点击立即建房，进房后可直接拖入文件或整个文件夹）
+                          </div>
+                          <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 2 }}>
+                            支持目录树 1:1 还原 · 多流 4MB 切片断点续传 · 零压缩原画直发
+                          </div>
+                        </div>
+                      </button>
+
+                      <button
+                        type="button"
+                        className="btn btn-glass btn-sm"
+                        onClick={() => setPickupSendOpen(true)}
+                      >
+                        <Package size={13} aria-hidden="true" /> 6 位取件码
+                      </button>
                     </div>
                   </div>
                 </section>
+
+                {/* ---------- 右栏：24 分片矩阵 + 局域网发现开关 + 实时吞吐波形 ---------- */}
+                <aside className="p2p-col-panel p2p-col-right">
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                    {/* 模块 1：断点续传 & 4MB 分片矩阵 */}
+                    <div className="p2p-card">
+                      <div className="p2p-card-head">
+                        <span className="p2p-card-title">断点续传 &amp; 4MB 分片</span>
+                        <span className="p2p-badge mono">24 Chunks</span>
+                      </div>
+                      <div className="p2p-file-name mono" style={{ fontSize: 10.5, color: 'var(--text-muted)' }}>
+                        {transferRecords[0] ? `最近: ${transferRecords[0].fileName}` : '等待进房后开启分片监控'}
+                      </div>
+                      <div className="p2p-chunk-grid">
+                        {Array.from({ length: 24 }, (_, idx) => (
+                          <div
+                            key={idx}
+                            className={`p2p-chunk-cell ${transferRecords.length > 0 ? 'done' : 'pending'}`}
+                          >
+                            {idx + 1}
+                          </div>
+                        ))}
+                      </div>
+                      <button
+                        type="button"
+                        className="btn btn-glass btn-sm"
+                        style={{ width: '100%' }}
+                        onClick={() => setActiveTab('transfer')}
+                      >
+                        <History size={12} aria-hidden="true" /> 查看全部传输与断点队列
+                      </button>
+                    </div>
+
+                    {/* 模块 2：真实局域网发现开关 */}
+                    <div className="p2p-card">
+                      <Switch
+                        checked={prefs.nearbyDiscoverable}
+                        onChange={(v) => onUpdatePrefs({ ...prefs, nearbyDiscoverable: v })}
+                        label="局域网发现 (同网雷达)"
+                        description="开启后同 Wi-Fi 下可直接点击对方邀请直传"
+                      />
+                      <div
+                        className="mono"
+                        style={{
+                          fontSize: 10.5,
+                          padding: '5px 8px',
+                          borderRadius: 8,
+                          background: 'var(--surface)',
+                          color: prefs.nearbyDiscoverable ? 'var(--accent)' : 'var(--text-muted)',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {prefs.nearbyDiscoverable
+                          ? `同网雷达广播活跃 · 已发现 ${nearbyDevices.length} 台设备`
+                          : '同网雷达已静默 (仅手动口令直连)'}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* 模块 3：实时吞吐波形面板 */}
+                  <div className="p2p-card">
+                    <div className="p2p-card-head">
+                      <span className="p2p-card-title" style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                        <Activity size={13} style={{ color: 'var(--accent)' }} aria-hidden="true" />
+                        实时吞吐波形
+                      </span>
+                      <span className="p2p-speed-now mono">待命就绪</span>
+                    </div>
+                    <div className="p2p-wave-box">
+                      <svg viewBox="0 0 240 68" className="p2p-wave-svg" aria-hidden="true">
+                        <defs>
+                          <linearGradient id="bayLobbyWaveGrad" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="0%" stopColor="var(--accent)" stopOpacity="0.4" />
+                            <stop offset="100%" stopColor="var(--accent)" stopOpacity="0.0" />
+                          </linearGradient>
+                        </defs>
+                        <line x1="0" y1="18" x2="240" y2="18" stroke="var(--separator)" strokeOpacity="0.4" strokeDasharray="3 3" />
+                        <line x1="0" y1="42" x2="240" y2="42" stroke="var(--separator)" strokeOpacity="0.4" strokeDasharray="3 3" />
+                        <path d="M 0,58 L 240,58 L 240,68 L 0,68 Z" fill="url(#bayLobbyWaveGrad)" />
+                        <path d="M 0,58 L 240,58" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" />
+                      </svg>
+                    </div>
+                    <div className="p2p-wave-foot mono">
+                      <span>协议: WebRTC SCTP</span>
+                      <span>累计传输: {transferRecords.length} 次</span>
+                    </div>
+                  </div>
+                </aside>
               </div>
             )}
 

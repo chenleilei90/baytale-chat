@@ -245,7 +245,7 @@
 /* 桌面端文本气泡行长收敛保护（自适应大屏铺满比例） */
 @media (min-width: 881px) {
   .bubble-text {
-    max-width: min(68%, 760px);
+    max-width: 68%;
   }
 }
 
@@ -841,7 +841,7 @@ html[data-appearance='dark'] .file-kind-code {
    桌面端三栏 P2P 实时监控面板与霓虹青绿虚线拖拽直传条
    ========================================================================== */
 .p2p-monitor-col {
-  width: 272px;
+  width: clamp(240px, 22%, 460px);
   flex-shrink: 0;
   background: var(--surface);
   border-radius: var(--r-lg);
@@ -850,13 +850,6 @@ html[data-appearance='dark'] .file-kind-code {
   flex-direction: column;
   gap: 12px;
   overflow-y: auto;
-}
-
-@media (min-width: 1800px) {
-  .chat-side-bento,
-  .p2p-monitor-col {
-    width: 300px;
-  }
 }
 
 @media (max-width: 1179px) {
@@ -1112,7 +1105,7 @@ html[data-appearance='dark'] .file-kind-code {
 }
 
 .chat-side-bento .floating-popover {
-  width: 252px;
+  width: min(300px, calc(100% - 8px));
 }
 
 .chat-side-bento .palette-bar {

@@ -44,6 +44,7 @@ import {
   Activity,
   ShieldCheck,
   FolderUp,
+  Key,
 } from 'lucide-react';
 import QRCode from 'qrcode';
 import type {
@@ -3711,6 +3712,23 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                   <Flame size={12} aria-hidden="true" /> 销毁当前房间
                 </button>
               )}
+            </div>
+          </div>
+
+          {/* 节点信息卡（与大厅首页保持一致的 P2P 极客卡片视觉） */}
+          <div className="p2p-node-card">
+            <div className="p2p-node-head">
+              <span className="p2p-node-title">
+                <span className="p2p-pulse-dot" />
+                我的节点 ({profile.name})
+              </span>
+              <span className="p2p-node-chip mono">#{roomCode}</span>
+            </div>
+            <div className="p2p-node-fp mono">
+              <Key size={11} style={{ color: 'var(--accent)', flexShrink: 0 }} aria-hidden="true" />
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {profile.clientId}
+              </span>
             </div>
           </div>
 

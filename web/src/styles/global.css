@@ -969,7 +969,7 @@ button:not(:disabled):active,
 }
 
 .chat-side-bento {
-  width: 280px;
+  width: clamp(240px, 22%, 460px);
   flex-shrink: 0;
   background: var(--surface);
   border-radius: var(--r-lg);
