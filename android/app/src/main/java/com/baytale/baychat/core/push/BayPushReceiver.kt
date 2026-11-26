@@ -4,16 +4,16 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import cn.jpush.android.api.NotificationMessage
-import cn.jpush.android.service.JPushMessageReceiver
+import cn.jpush.android.service.JPushMessageService
 import com.baytale.baychat.MainActivity
 import org.json.JSONObject
 
 /**
- * 极光系统级推送消息回调接收器：
+ * 极光系统级推送消息回调服务：
  * 1. 收到设备 RegistrationID 后立即同步至 PushManager，触发房间推送登记；
  * 2. 用户在后台/锁屏点击系统通知后解析 roomCode 并通过深链唤醒 MainActivity 直达对应房间。
  */
-class BayPushReceiver : JPushMessageReceiver() {
+class BayPushReceiver : JPushMessageService() {
     override fun onRegister(context: Context, registrationId: String) {
         super.onRegister(context, registrationId)
         PushManager.onRegistrationIdReceived(registrationId)

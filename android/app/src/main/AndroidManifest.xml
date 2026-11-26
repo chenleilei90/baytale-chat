@@ -31,6 +31,13 @@
     <!-- 仅用于用户主动点击「应用内检查更新」后调起系统包安装器覆盖升级 -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
+    <!-- 剔除 JPush SDK 自动合并的定位/设备号/全应用读取等非必需敏感权限，保持最小权限原则 -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" tools:node="remove" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" tools:node="remove" />
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" tools:node="remove" />
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" tools:node="remove" />
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" tools:node="remove" />
+
     <application
         android:name=".BayChatApp"
         android:allowBackup="false"
@@ -132,15 +139,15 @@
             </intent-filter>
         </service>
 
-        <receiver
+        <service
             android:name=".core.push.BayPushReceiver"
             android:enabled="true"
             android:exported="false">
             <intent-filter>
-                <action android:name="cn.jpush.android.intent.RECEIVE_MESSAGE" />
+                <action android:name="cn.jpush.android.intent.SERVICE_MESSAGE" />
                 <category android:name="${applicationId}" />
             </intent-filter>
-        </receiver>
+        </service>
 
         <!-- 安全打开本地下载文件的 FileProvider -->
         <provider
