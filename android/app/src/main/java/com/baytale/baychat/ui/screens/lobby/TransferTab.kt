@@ -66,6 +66,7 @@ import com.baytale.baychat.core.util.FormatUtils
 import com.baytale.baychat.core.util.classifyFile
 import com.baytale.baychat.ui.BayChatUiState
 import com.baytale.baychat.ui.BayChatViewModel
+import com.baytale.baychat.ui.TransferProgressSnapshot
 import com.baytale.baychat.ui.design.BayButton
 import com.baytale.baychat.ui.design.BayButtonSize
 import com.baytale.baychat.ui.design.BayButtonStyle
@@ -279,6 +280,7 @@ fun TransferTab(
                                 ) { info ->
                                     ActiveTransferCard(
                                         info = info,
+                                        progressSnapshot = state.transferProgress[info.transferId],
                                         onAccept = {
                                             vm.acceptFile(info.targetPeerId.orEmpty(), info.transferId)
                                         },
@@ -558,13 +560,19 @@ private fun MiddleEllipsisFileName(
 @Composable
 private fun ActiveTransferCard(
     info: FileTransferInfo,
+    progressSnapshot: TransferProgressSnapshot? = null,
     onAccept: () -> Unit,
     onReject: () -> Unit,
     onCancel: () -> Unit,
 ) {
     val colors = BayTheme.colors
-    val fraction = if (info.fileSize > 0L) {
-        (info.transferredBytes.toFloat() / info.fileSize.toFloat()).coerceIn(0f, 1f)
+    // 优先使用高频 TransferProgressSnapshot 渲染实时百分比、速率与剩余时间
+    val totalBytes = progressSnapshot?.totalBytes?.takeIf { it > 0L } ?: info.fileSize
+    val transferredBytes = progressSnapshot?.transferredBytes ?: info.transferredBytes
+    val speedBps = progressSnapshot?.speedBps?.toDouble() ?: info.speedBps
+    val etaSeconds = progressSnapshot?.etaSeconds?.toDouble() ?: info.etaSeconds
+    val fraction = if (totalBytes > 0L) {
+        (transferredBytes.toFloat() / totalBytes.toFloat()).coerceIn(0f, 1f)
     } else {
         0f
     }
@@ -575,8 +583,8 @@ private fun ActiveTransferCard(
         TransferStatus.OFFERING -> "等待对方响应"
         TransferStatus.WAITING_ACCEPT -> "等待确认接收"
         TransferStatus.TRANSFERRING -> {
-            val speed = if (info.speedBps > 0.0) " · ${FormatUtils.formatBytes(info.speedBps.toLong())}/s" else ""
-            val eta = FormatUtils.formatEta(info.etaSeconds).takeIf { it.isNotBlank() }?.let { " · 剩余 $it" }.orEmpty()
+            val speed = if (speedBps > 0.0) " · ${FormatUtils.formatBytes(speedBps.toLong())}/s" else ""
+            val eta = FormatUtils.formatEta(etaSeconds).takeIf { it.isNotBlank() }?.let { " · 剩余 $it" }.orEmpty()
             "$percent%$speed$eta"
         }
         else -> ""

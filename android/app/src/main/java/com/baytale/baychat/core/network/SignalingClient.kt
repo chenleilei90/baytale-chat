@@ -63,7 +63,10 @@ class SignalingClient(
     private var webSocket: WebSocket? = null
     private var heartbeatJob: Job? = null
     private var reconnectJob: Job? = null
+    private var probeJob: Job? = null
     private var reconnectAttempts = 0
+    @Volatile
+    private var lastServerActivityAt = 0L
 
     private val fatalErrors = setOf(
         "ROOM_NOT_FOUND",
@@ -81,14 +84,29 @@ class SignalingClient(
         openSocket()
     }
 
-    // B17：系统网络恢复时清零退避计数并立即触发重连
+    // B17：系统网络恢复时清零退避计数；若旧连接处于半开状态，立即发送 ping 并在 3 秒无回包时重建连接
     fun notifyNetworkAvailable() {
         if (closedManually.get()) return
         reconnectAttempts = 0
-        if (webSocket == null) {
+        val currentWs = webSocket
+        if (currentWs == null) {
             reconnectJob?.cancel()
             reconnectJob = null
             openSocket()
+        } else {
+            val probeSentAt = System.currentTimeMillis()
+            val sent = sendRawImmediate(currentWs, SignalEnvelope(type = "ping"))
+            if (!sent) {
+                openSocket()
+                return
+            }
+            probeJob?.cancel()
+            probeJob = scope.launch {
+                delay(3_000L)
+                if (!closedManually.get() && this@SignalingClient.webSocket === currentWs && lastServerActivityAt < probeSentAt) {
+                    openSocket()
+                }
+            }
         }
     }
 
@@ -122,6 +140,7 @@ class SignalingClient(
 
                 override fun onMessage(webSocket: WebSocket, text: String) {
                     if (this@SignalingClient.webSocket !== webSocket) return
+                    lastServerActivityAt = System.currentTimeMillis()
                     val env = runCatching { json.decodeFromString(SignalEnvelope.serializer(), text) }.getOrNull()
                         ?: return
                     when (env.type) {
@@ -299,6 +318,8 @@ class SignalingClient(
         heartbeatJob = null
         reconnectJob?.cancel()
         reconnectJob = null
+        probeJob?.cancel()
+        probeJob = null
     }
 
     private fun cleanupSocketOnly() {

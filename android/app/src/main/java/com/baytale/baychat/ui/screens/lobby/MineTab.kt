@@ -1,5 +1,12 @@
 package com.baytale.baychat.ui.screens.lobby
 
+import android.Manifest
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -24,6 +31,7 @@ import androidx.compose.material.icons.rounded.Dns
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.Info
+import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.Radar
 import androidx.compose.material.icons.rounded.Storage
 import androidx.compose.material.icons.rounded.SystemUpdate
@@ -33,6 +41,7 @@ import androidx.compose.material.icons.rounded.Wifi
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -41,9 +50,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.app.NotificationManagerCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.baytale.baychat.BuildConfig
 import com.baytale.baychat.core.model.AppThemeMode
 import com.baytale.baychat.core.model.AppearanceMode
@@ -366,7 +381,9 @@ fun MineTab(
                             )
                         }
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .graphicsLayer { alpha = if (state.prefs.autoAcceptSmallFiles) 1f else 0.45f },
                             horizontalArrangement = Arrangement.spacedBy(BaySpacing.sm),
                         ) {
                             AUTO_ACCEPT_THRESHOLDS_MB.forEach { limitMb ->
@@ -374,7 +391,9 @@ fun MineTab(
                                     label = "${limitMb}MB",
                                     selected = state.prefs.autoAcceptMaxMB == limitMb,
                                     onClick = {
-                                        vm.updatePrefs(state.prefs.copy(autoAcceptMaxMB = limitMb))
+                                        if (state.prefs.autoAcceptSmallFiles) {
+                                            vm.updatePrefs(state.prefs.copy(autoAcceptMaxMB = limitMb))
+                                        }
                                     },
                                 )
                             }
@@ -499,6 +518,65 @@ fun MineTab(
                                 vm.setHapticEnabled(checked)
                             },
                         ),
+                        showDivider = true,
+                    )
+
+                    val context = LocalContext.current
+                    val lifecycleOwner = LocalLifecycleOwner.current
+                    var notificationsEnabled by remember {
+                        mutableStateOf(NotificationManagerCompat.from(context).areNotificationsEnabled())
+                    }
+                    DisposableEffect(lifecycleOwner) {
+                        val observer = LifecycleEventObserver { _, event ->
+                            if (event == Lifecycle.Event.ON_RESUME) {
+                                notificationsEnabled = NotificationManagerCompat.from(context).areNotificationsEnabled()
+                            }
+                        }
+                        lifecycleOwner.lifecycle.addObserver(observer)
+                        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+                    }
+                    fun openAppNotificationSettings() {
+                        val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                            putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        val fallback = Intent(
+                            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            Uri.fromParts("package", context.packageName, null),
+                        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        runCatching { context.startActivity(intent) }.onFailure {
+                            runCatching { context.startActivity(fallback) }
+                        }
+                    }
+                    val notifyLauncher = rememberLauncherForActivityResult(
+                        contract = ActivityResultContracts.RequestPermission(),
+                    ) { granted ->
+                        notificationsEnabled = NotificationManagerCompat.from(context).areNotificationsEnabled()
+                        if (granted || notificationsEnabled) {
+                            vm.refreshForegroundBanner()
+                            vm.showToast("消息与后台通知已开启")
+                        } else {
+                            openAppNotificationSettings()
+                        }
+                    }
+                    BayListRow(
+                        icon = Icons.Rounded.NotificationsActive,
+                        iconTint = if (notificationsEnabled) colors.success else colors.danger,
+                        title = "消息与后台通知",
+                        subtitle = if (notificationsEnabled) {
+                            "用于切后台与锁屏时接收新消息及待确认文件提醒"
+                        } else {
+                            "当前系统未开启通知权限，后台消息与来件将无法弹出提醒"
+                        },
+                        value = if (notificationsEnabled) "已开启" else "去开启",
+                        trailing = RowTrailing.Chevron,
+                        onClick = {
+                            if (!notificationsEnabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                notifyLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                            } else {
+                                openAppNotificationSettings()
+                            }
+                        },
                     )
                 }
             }

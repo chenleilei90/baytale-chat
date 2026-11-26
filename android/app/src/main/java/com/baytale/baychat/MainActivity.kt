@@ -94,12 +94,14 @@ class MainActivity : ComponentActivity() {
                 runCatching { startActivity(settingsIntent) }
             }
 
-            // UX-8：通知权限被永久拒绝时给出用途说明并跳转系统设置
+            // UX-8：通知权限授权后立即补发前台保活通知；被永久拒绝时给出用途说明并跳转系统设置
             val notificationPermLauncher = rememberLauncherForActivityResult(
                 contract = ActivityResultContracts.RequestPermission()
             ) { granted ->
                 viewModel.markNotificationAsked()
-                if (!granted) {
+                if (granted) {
+                    viewModel.refreshForegroundBanner()
+                } else {
                     val permanentlyDenied = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
                         !ActivityCompat.shouldShowRequestPermissionRationale(
                             this@MainActivity,
@@ -108,7 +110,7 @@ class MainActivity : ComponentActivity() {
                     if (permanentlyDenied) {
                         permissionGuide = "需要通知权限" to "通知权限用于显示后台文件传输保活进度与新消息提醒，请前往系统设置开启。"
                     } else {
-                        viewModel.showToast("已跳过通知权限，如需后台来件提醒可在系统设置中开启")
+                        viewModel.showToast("已跳过通知权限，后续可在「我的 -> 消息与后台通知」中开启")
                     }
                 }
             }
@@ -179,6 +181,16 @@ class MainActivity : ComponentActivity() {
                     } else {
                         viewModel.markNotificationAsked()
                     }
+                }
+            }
+
+            // App 级真实前后台同步：避免启动扫码/文件选择器/相机时误触发退后台通知与轮询中断
+            val appForeground by AppForegroundTracker.isForeground.collectAsState()
+            LaunchedEffect(appForeground) {
+                if (appForeground) {
+                    viewModel.onAppForegrounded()
+                } else {
+                    viewModel.onAppBackgrounded()
                 }
             }
 
@@ -334,18 +346,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onResume() {
-        super.onResume()
-        viewModel.onAppForegrounded()
-    }
-
-    override fun onStop() {
-        if (!isChangingConfigurations) {
-            viewModel.onAppBackgrounded()
-        }
-        super.onStop()
-    }
-
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         parseIncomingIntent(intent)
@@ -355,10 +355,11 @@ class MainActivity : ComponentActivity() {
     private fun parseIncomingIntent(intent: Intent?) {
         if (intent == null) return
         when (intent.action) {
-            // UX-18：通知点击直达挂起房间或打开 OTA 详情弹窗
+            // UX-18：通知点击直达挂起房间或冷启动自动恢复房间
             IncomingNotificationHelper.ACTION_RESTORE_ACTIVE_ROOM,
             TransferForegroundService.ACTION_RESTORE_ACTIVE_ROOM -> {
-                viewModel.restoreRoom()
+                val roomCode = intent.getStringExtra(IncomingNotificationHelper.EXTRA_ROOM_CODE).orEmpty()
+                viewModel.restoreRoomFromNotification(roomCode)
             }
 
             AppUpdateService.ACTION_OPEN_OTA_DIALOG -> {

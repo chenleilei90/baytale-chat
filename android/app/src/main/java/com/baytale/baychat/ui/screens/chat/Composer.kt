@@ -140,8 +140,6 @@ fun Composer(
     val keyboardController = LocalSoftwareKeyboardController.current
 
     var pendingCameraUri by rememberSaveable { mutableStateOf<Uri?>(null) }
-    var cameraPermAsked by rememberSaveable { mutableStateOf(false) }
-    var audioPermAsked by rememberSaveable { mutableStateOf(false) }
     var permSettingsGuide by rememberSaveable { mutableStateOf<String?>(null) }
 
     // 解析末尾 @提及 关键词与候选在线成员
@@ -205,10 +203,10 @@ fun Composer(
             val activity = context.findActivity()
             val canAskAgain = activity != null &&
                 ActivityCompat.shouldShowRequestPermissionRationale(activity, Manifest.permission.CAMERA)
-            if (cameraPermAsked && !canAskAgain) {
+            if (state.prefs.cameraPermAsked && !canAskAgain) {
                 permSettingsGuide = "camera"
             } else {
-                cameraPermAsked = true
+                vm.markCameraPermAsked()
                 vm.showToast("请先授予相机权限后再拍照")
             }
         }
@@ -234,10 +232,10 @@ fun Composer(
             val activity = context.findActivity()
             val canAskAgain = activity != null &&
                 ActivityCompat.shouldShowRequestPermissionRationale(activity, Manifest.permission.RECORD_AUDIO)
-            if (audioPermAsked && !canAskAgain) {
+            if (state.prefs.audioPermAsked && !canAskAgain) {
                 permSettingsGuide = "audio"
             } else {
-                audioPermAsked = true
+                vm.markAudioPermAsked()
                 vm.showToast("请先授予麦克风权限后再录制语音")
             }
         }

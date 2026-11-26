@@ -36,6 +36,7 @@ class TransferForegroundService : Service() {
                 return START_NOT_STICKY
             }
             ACTION_UPDATE -> {
+                isServiceRunning.set(true)
                 acquireLocks()
                 val title = intent.getStringExtra(EXTRA_TITLE) ?: "湾聊 P2P 通道保持中"
                 val text = intent.getStringExtra(EXTRA_TEXT) ?: "正在维持后台直连通道"
@@ -82,7 +83,7 @@ class TransferForegroundService : Service() {
             )
             val nm = getSystemService(NotificationManager::class.java)
             val note = NotificationCompat.Builder(this, IncomingNotificationHelper.CHANNEL_ID)
-                .setSmallIcon(R.drawable.ic_launcher_foreground)
+                .setSmallIcon(R.drawable.ic_stat_baychat)
                 .setContentTitle("湾聊后台保活已暂停")
                 .setContentText("系统限制单日后台直连时长，点击回到湾聊继续传输")
                 .setAutoCancel(true)
@@ -95,11 +96,13 @@ class TransferForegroundService : Service() {
     }
 
     override fun onDestroy() {
+        isServiceRunning.set(false)
         releaseLocks()
         super.onDestroy()
     }
 
     private fun stopForegroundSafely() {
+        isServiceRunning.set(false)
         releaseLocks()
         runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
         stopSelf()
@@ -149,31 +152,7 @@ class TransferForegroundService : Service() {
     }
 
     private fun buildNotification(title: String, text: String, progress: Int): Notification {
-        ensureChannel(this)
-        val openIntent = Intent(this, MainActivity::class.java).apply {
-            action = ACTION_RESTORE_ACTIVE_ROOM
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-        }
-        val pi = PendingIntent.getActivity(
-            this,
-            0,
-            openIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
-
-        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setContentTitle(title)
-            .setContentText(text)
-            .setOngoing(true)
-            .setOnlyAlertOnce(true)
-            .setContentIntent(pi)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-
-        if (progress in 0..100) {
-            builder.setProgress(100, progress, false)
-        }
-        return builder.build()
+        return createNotification(this, title, text, progress)
     }
 
     companion object {
@@ -186,6 +165,7 @@ class TransferForegroundService : Service() {
         private const val EXTRA_TITLE = "extra_title"
         private const val EXTRA_TEXT = "extra_text"
         private const val EXTRA_PROGRESS = "extra_progress"
+        private val isServiceRunning = java.util.concurrent.atomic.AtomicBoolean(false)
 
         fun ensureChannel(context: Context) {
             val nm = context.getSystemService(NotificationManager::class.java) ?: return
@@ -202,25 +182,61 @@ class TransferForegroundService : Service() {
             }
         }
 
+        private fun createNotification(context: Context, title: String, text: String, progress: Int): Notification {
+            val appCtx = context.applicationContext
+            ensureChannel(appCtx)
+            val openIntent = Intent(appCtx, MainActivity::class.java).apply {
+                action = ACTION_RESTORE_ACTIVE_ROOM
+                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            }
+            val pi = PendingIntent.getActivity(
+                appCtx,
+                0,
+                openIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+
+            val builder = NotificationCompat.Builder(appCtx, CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_stat_baychat)
+                .setContentTitle(title)
+                .setContentText(text)
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .setContentIntent(pi)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+
+            if (progress in 0..100) {
+                builder.setProgress(100, progress, false)
+            }
+            return builder.build()
+        }
+
         fun updateStatus(context: Context, title: String, text: String, progress: Int = -1) {
+            val appCtx = context.applicationContext
+            // 服务已在运行时直接刷新通知栏，避免大文件传输产生高频 startForegroundService IPC 风暴
+            if (isServiceRunning.get()) {
+                runCatching {
+                    val nm = appCtx.getSystemService(NotificationManager::class.java)
+                    nm?.notify(NOTIFICATION_ID, createNotification(appCtx, title, text, progress))
+                    return
+                }
+            }
             runCatching {
-                val intent = Intent(context, TransferForegroundService::class.java).apply {
+                val intent = Intent(appCtx, TransferForegroundService::class.java).apply {
                     action = ACTION_UPDATE
                     putExtra(EXTRA_TITLE, title)
                     putExtra(EXTRA_TEXT, text)
                     putExtra(EXTRA_PROGRESS, progress)
                 }
-                context.startForegroundService(intent)
+                appCtx.startForegroundService(intent)
             }
         }
 
         fun stop(context: Context) {
+            isServiceRunning.set(false)
             runCatching {
-                context.startService(
-                    Intent(context, TransferForegroundService::class.java).apply {
-                        action = ACTION_STOP
-                    }
-                )
+                val appCtx = context.applicationContext
+                appCtx.stopService(Intent(appCtx, TransferForegroundService::class.java))
             }
         }
     }

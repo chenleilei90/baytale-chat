@@ -300,6 +300,7 @@ data class BayChatUiState(
     val planesLoading: Boolean = false,
     val planesError: String? = null,
     val planesLastRefreshedAt: Long = 0L,
+    val creatingPlane: Boolean = false,
 ) {
     // B12：供 Activity 与导航判断当前是否保有活跃或后台挂起的房间会话
     val hasActiveRoom: Boolean
@@ -360,6 +361,11 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
 
     private var awaitingInstallPermission: Boolean = false
     private var dismissedUpdateVersionInSession: Int = 0
+    // 记录 peerId -> effectiveClientId 映射，避免成员离线后解除屏蔽仍残留拦截
+    private val blockedPeerIdToClientId = ConcurrentHashMap<String, String>()
+    private var lastForegroundBannerAt: Long = 0L
+    private var lastForegroundBannerPercent: Int = -1
+    private var lastForegroundBannerTitle: String = ""
     private var lastToastText: String = ""
     private var lastToastAt: Long = 0L
     private var lastTypingSentAt: Long = 0L
@@ -531,7 +537,10 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                 unreadCount = if (it.roomMinimized) it.unreadCount else 0,
             )
         }
-        IncomingNotificationHelper.cancelAllIncomingNotifications(appContext)
+        val fgState = _uiState.value
+        if (!fgState.roomMinimized && fgState.activeRoom != null) {
+            IncomingNotificationHelper.cancelMessageNotification(appContext)
+        }
         if (!_uiState.value.privacyAccepted) return
         startNearbyPolling()
         val ota = AppUpdateCenter.state.value
@@ -639,6 +648,16 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     fun markNotificationAsked() {
         store.setNotificationAsked(true)
         _uiState.update { it.copy(prefs = it.prefs.copy(notificationAsked = true)) }
+    }
+
+    fun markCameraPermAsked() {
+        store.setCameraPermAsked(true)
+        _uiState.update { it.copy(prefs = it.prefs.copy(cameraPermAsked = true)) }
+    }
+
+    fun markAudioPermAsked() {
+        store.setAudioPermAsked(true)
+        _uiState.update { it.copy(prefs = it.prefs.copy(audioPermAsked = true)) }
     }
 
     fun handleIncomingDeepLink(rawUrl: String) {
@@ -1031,12 +1050,14 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         allowEntry: Boolean,
         onSuccess: () -> Unit,
     ) {
+        if (_uiState.value.creatingPlane) return
         val state = _uiState.value
         val room = state.activeRoom ?: return
         val hasPwd = room.password.isNotBlank() || room.roomInfo?.hasPassword == true
+        _uiState.update { it.copy(creatingPlane = true) }
         viewModelScope.launch {
-            runCatching {
-                api.createPlane(
+            try {
+                val created = api.createPlane(
                     CreatePlaneRequest(
                         clientId = state.profile.clientId,
                         roomCode = room.roomCode,
@@ -1049,12 +1070,13 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                         password = if (allowEntry && hasPwd && room.isOwner) room.password else null,
                     )
                 )
-            }.onSuccess { created ->
                 _uiState.update { it.copy(planes = listOf(created) + it.planes.filterNot { p -> p.id == created.id }) }
                 showToast("纸飞机已放飞到大厅广场，24 小时内有效")
                 onSuccess()
-            }.onFailure { err ->
+            } catch (err: Exception) {
                 showToast(err.message ?: "放飞纸飞机失败")
+            } finally {
+                _uiState.update { it.copy(creatingPlane = false) }
             }
         }
     }
@@ -1063,6 +1085,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         plane: PaperPlane,
         onJoined: () -> Unit,
         onPasswordExpired: () -> Unit,
+        onFinished: () -> Unit = {},
     ) {
         viewModelScope.launch {
             try {
@@ -1105,11 +1128,13 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                 }
             } catch (e: Exception) {
                 showToast(e.message ?: "通过纸飞机进入房间失败")
+            } finally {
+                onFinished()
             }
         }
     }
 
-    fun reportPlane(planeId: String, onDone: (Boolean) -> Unit) {
+    fun reportPlane(planeId: String, onDone: (success: Boolean, deleted: Boolean) -> Unit) {
         val clientId = _uiState.value.profile.clientId
         viewModelScope.launch {
             runCatching { api.reportPlane(planeId, clientId) }
@@ -1120,10 +1145,11 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                     } else {
                         showToast("已收到举报，系统将在累计达到阈值后自动清理")
                     }
-                    onDone(res.deleted)
+                    onDone(true, res.deleted)
                 }
                 .onFailure { err ->
                     showToast(err.message ?: "举报提交失败")
+                    onDone(false, false)
                 }
         }
     }
@@ -1719,6 +1745,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     fun blockPeer(peerId: String, clientId: String?, peerName: String) {
         if (peerId.isBlank() || peerId == selfPeerId) return
         val effectiveClientId = clientId?.takeIf { it.isNotBlank() } ?: "name:${peerName.trim()}"
+        blockedPeerIdToClientId[peerId] = effectiveClientId
         val updatedBlocked = store.addBlockedPeer(
             BlockedPeer(
                 clientId = effectiveClientId,
@@ -1750,8 +1777,12 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
             val currentPeers = st.activeRoom?.peers.orEmpty()
             val cleanedPeerIds = st.blockedPeerIds.filterNot { pid ->
                 val p = currentPeers[pid]
-                p?.clientId.equals(clientId, ignoreCase = true) ||
+                val mapped = blockedPeerIdToClientId[pid]
+                val matched = mapped.equals(clientId, ignoreCase = true) ||
+                    p?.clientId.equals(clientId, ignoreCase = true) ||
                     (target != null && p?.name.equals(target.name, ignoreCase = true))
+                if (matched) blockedPeerIdToClientId.remove(pid)
+                matched
             }.toSet()
             st.copy(blockedClients = next, blockedPeerIds = cleanedPeerIds)
         }
@@ -2019,6 +2050,10 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
             return
         }
         val current = _uiState.value.activeRoom
+        if (current != null && current.roomCode.equals(code, ignoreCase = true)) {
+            restoreRoom()
+            return
+        }
         if (current != null && !current.roomCode.equals(code, ignoreCase = true)) {
             _uiState.update {
                 it.copy(
@@ -2393,10 +2428,10 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                         val roomCode = _uiState.value.activeRoom?.roomCode.orEmpty()
                         val autoAccept = shouldAutoAccept(info)
                         if (!autoAccept) {
-                            // 例外规则：需要手动确认的文件传输请求在免打扰房间仍保持提醒与系统通知
+                            // 例外规则：需要手动确认的文件传输请求在免打扰房间及挂起态均保持提醒与系统通知
                             playSoundIfEnabled { playMessageIn() }
                             recordUnreadArrival(itemId = incomingItem.id, mentionedMe = false)
-                            if (!_uiState.value.isAppForeground) {
+                            if (!_uiState.value.isAppForeground || _uiState.value.roomMinimized) {
                                 IncomingNotificationHelper.showIncomingOfferNotification(
                                     context = appContext,
                                     roomCode = roomCode,
@@ -2406,6 +2441,9 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                                     fileName = info.fileName,
                                     fileSize = info.fileSize,
                                 )
+                            }
+                            if (_uiState.value.isAppForeground && _uiState.value.roomMinimized) {
+                                showToast("${sender?.name ?: "伙伴"} 发来文件「${info.fileName}」，请点击恢复房间确认接收")
                             }
                         } else {
                             val label = when {
@@ -2507,10 +2545,17 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                         val pct = ((info.transferredBytes * 100) / info.fileSize).toInt().coerceIn(0, 100)
                         val speedText = "${FormatUtils.formatBytes(info.speedBps.toLong())}/s"
                         val dirLabel = if (info.direction == TransferDirection.SEND) "正在发送" else "正在接收"
-                        if (_uiState.value.activeRoom != null) {
+                        val title = "$dirLabel ${info.fileName}"
+                        val now = System.currentTimeMillis()
+                        if (_uiState.value.activeRoom != null &&
+                            (now - lastForegroundBannerAt >= 1000L || kotlin.math.abs(pct - lastForegroundBannerPercent) >= 2 || lastForegroundBannerTitle != title)
+                        ) {
+                            lastForegroundBannerAt = now
+                            lastForegroundBannerPercent = pct
+                            lastForegroundBannerTitle = title
                             TransferForegroundService.updateStatus(
                                 appContext,
-                                title = "$dirLabel ${info.fileName}",
+                                title = title,
                                 text = "$pct% · $speedText",
                                 progress = pct,
                             )
@@ -2574,10 +2619,21 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                                 if (!isRoomMuted(roomCode)) {
                                     playSoundIfEnabled { playTransferDone() }
                                 }
-                                showToast(
-                                    if (info.verified) "已保存至 ${info.savedDisplayPath ?: "下载目录"}（SHA-256 校验通过）"
-                                    else "已保存至 ${info.savedDisplayPath ?: "下载目录"}"
-                                )
+                                val savedText = if (info.verified) {
+                                    "已保存至 ${info.savedDisplayPath ?: "下载目录"}（SHA-256 校验通过）"
+                                } else {
+                                    "已保存至 ${info.savedDisplayPath ?: "下载目录"}"
+                                }
+                                showToast(savedText)
+                                if (!_uiState.value.isAppForeground && roomCode.isNotBlank()) {
+                                    IncomingNotificationHelper.showFileTransferResultNotification(
+                                        context = appContext,
+                                        roomCode = roomCode,
+                                        fileName = info.fileName,
+                                        success = true,
+                                        detailText = savedText,
+                                    )
+                                }
                             }
                         }
                         refreshForegroundBanner()
@@ -2942,7 +2998,8 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
             playSoundIfEnabled { playMessageIn() }
         }
         recordUnreadArrival(itemId = item.id, mentionedMe = item.mentionedMe)
-        if (!_uiState.value.isAppForeground && !muted && roomCode.isNotBlank()) {
+        val allowNotify = !muted || item.mentionedMe
+        if (!_uiState.value.isAppForeground && allowNotify && roomCode.isNotBlank()) {
             val unread = _uiState.value.unreadCount.coerceAtLeast(1)
             IncomingNotificationHelper.showBackgroundMessageNotification(
                 context = appContext,
@@ -2952,11 +3009,16 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                 previewText = previewText,
                 mentionedMe = item.mentionedMe,
             )
+        } else if (_uiState.value.isAppForeground && _uiState.value.roomMinimized && item.mentionedMe && roomCode.isNotBlank()) {
+            showToast("${item.senderName} 在 #${roomCode} @了你：${previewText.take(24)}")
         }
     }
 
-    private fun refreshForegroundBanner() {
+    fun refreshForegroundBanner() {
         val room = _uiState.value.activeRoom ?: return
+        lastForegroundBannerPercent = -1
+        lastForegroundBannerTitle = ""
+        lastForegroundBannerAt = System.currentTimeMillis()
         val readyCount = room.linkStatuses.values.count { it.dataReady }
         val statusText = when {
             room.peers.isEmpty() -> "等待伙伴扫码加入 · 口令 ${room.roomCode}"
@@ -3023,10 +3085,13 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
             ) == true
             if (sentImmediate) initialSendStatus = MessageSendStatus.SENT
         } else {
-            if (p2pSent == 0 && room.peers.isEmpty()) {
-                showToast("当前阅后即焚且暂无他人在线，消息仅在本地展示")
+            if (p2pSent == 0) {
+                showToast(
+                    if (room.peers.isEmpty()) "当前阅后即焚且暂无他人在线，消息仅在本地展示"
+                    else "P2P 通道未就绪，点击可重试发送"
+                )
                 initialSendStatus = MessageSendStatus.FAILED
-            } else if (p2pSent > 0) {
+            } else {
                 initialSendStatus = MessageSendStatus.SENT
             }
         }
@@ -3047,6 +3112,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         )
         updateRoom { it.copy(replyingTo = null) }
         updateDraft(room.roomCode, "")
+        clearFirstUnreadMarker()
         signaling?.recordActivity("message", 0)
     }
 
@@ -4572,6 +4638,15 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         val ok = mesh?.acceptIncomingTransfer(peerId, transferId, resumeIfAvailable) == true
         if (!ok) {
             showToast("发送方已离线或传输已失效，请让对方重新发送")
+            if (!_uiState.value.isAppForeground) {
+                IncomingNotificationHelper.showFileTransferResultNotification(
+                    context = appContext,
+                    roomCode = _uiState.value.activeRoom?.roomCode.orEmpty(),
+                    fileName = "文件接收",
+                    success = false,
+                    detailText = "发送方已离线或传输通道已断开，请进入房间让对方重发",
+                )
+            }
         }
     }
 
@@ -5203,8 +5278,21 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         )
         if (inserted) {
             _uiState.update { it.copy(nudgedPeerId = targetPeerId, nudgeNonce = it.nudgeNonce + 1) }
-            if (isSelfTarget && !isRoomMuted(room.roomCode)) {
-                playSoundIfEnabled { playMessageIn() }
+            if (isSelfTarget) {
+                recordUnreadArrival(itemId = id, mentionedMe = false)
+                if (!isRoomMuted(room.roomCode)) {
+                    playSoundIfEnabled { playMessageIn() }
+                    if (!_uiState.value.isAppForeground) {
+                        IncomingNotificationHelper.showBackgroundMessageNotification(
+                            context = appContext,
+                            roomCode = room.roomCode,
+                            unreadCount = _uiState.value.unreadCount.coerceAtLeast(1),
+                            senderName = senderLabel,
+                            previewText = text,
+                            mentionedMe = false,
+                        )
+                    }
+                }
             }
         }
     }
@@ -5408,12 +5496,33 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     fun restoreRoom() {
         if (_uiState.value.activeRoom != null) {
             _uiState.update { it.copy(roomMinimized = false, unreadCount = 0) }
+            IncomingNotificationHelper.cancelMessageNotification(appContext)
+        }
+    }
+
+    fun restoreRoomFromNotification(roomCode: String) {
+        val current = _uiState.value.activeRoom
+        if (current != null && (roomCode.isBlank() || current.roomCode.equals(roomCode, ignoreCase = true))) {
+            restoreRoom()
+            return
+        }
+        val last = _uiState.value.lastRecoverableRoom
+        if (last != null && (roomCode.isBlank() || last.code.equals(roomCode, ignoreCase = true))) {
+            recoverLastRoom()
+            return
+        }
+        if (roomCode.isNotBlank()) {
+            joinRoom(roomCode, "")
         }
     }
 
     fun switchToRecentRoom(item: RecentRoom) {
         cancelVoiceRecording()
         val current = _uiState.value.activeRoom
+        if (current != null && current.roomCode.equals(item.code, ignoreCase = true)) {
+            restoreRoom()
+            return
+        }
         if (current != null && !current.roomCode.equals(item.code, ignoreCase = true)) {
             _uiState.update {
                 it.copy(
@@ -5618,11 +5727,17 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         val inserted = appendMessageIfAbsent(item)
         if (!inserted) return null
         if (!fromCache && !isSelf) {
+            val previewText = when (item.kind) {
+                ChatKind.IMAGE -> "[图片]"
+                ChatKind.AUDIO -> "[语音消息]"
+                ChatKind.FILE -> "[文件] ${item.transfer?.fileName ?: "附件"}"
+                else -> item.text?.takeIf { it.isNotBlank() } ?: "[新消息]"
+            }
             handleIncomingMessageArrived(
                 item = item,
                 fromCache = false,
                 roomCode = room.roomCode,
-                previewText = item.text ?: "[媒体消息]",
+                previewText = previewText,
             )
         }
         return item

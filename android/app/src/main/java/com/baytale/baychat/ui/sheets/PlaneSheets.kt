@@ -93,7 +93,7 @@ fun PlaneViewerSheet(
     plane: PaperPlane,
     joining: Boolean,
     onJoin: () -> Unit,
-    onReport: () -> Unit,
+    onReport: (onResult: (Boolean) -> Unit) -> Unit,
     onDismiss: () -> Unit,
 ) {
     val colors = BayTheme.colors
@@ -198,7 +198,9 @@ fun PlaneViewerSheet(
                     enabled = !reported && !joining,
                     onClick = {
                         reported = true
-                        onReport()
+                        onReport { ok ->
+                            if (!ok) reported = false
+                        }
                     },
                     style = BayIconStyle.Filled,
                     size = 34.dp,
@@ -377,6 +379,7 @@ fun PlaneComposerSheet(
     roomCode: String,
     hasPassword: Boolean,
     isOwner: Boolean,
+    submitting: Boolean,
     candidateFiles: List<PlaneFileMeta>,
     onConfirm: (message: String, files: List<PlaneFileMeta>, allowEntry: Boolean) -> Unit,
     onDismiss: () -> Unit,
@@ -615,14 +618,16 @@ fun PlaneComposerSheet(
                 BayButton(
                     text = "取消",
                     onClick = onDismiss,
+                    enabled = !submitting,
                     style = BayButtonStyle.Secondary,
                     size = BayButtonSize.Medium,
                     modifier = Modifier.weight(1f),
                 )
                 BayButton(
-                    text = "放飞到大厅",
+                    text = if (submitting) "放飞中..." else "放飞到大厅",
                     onClick = { onConfirm(message.trim(), chosenFiles, allowEntry) },
-                    enabled = canSubmit,
+                    enabled = canSubmit && !submitting,
+                    loading = submitting,
                     style = BayButtonStyle.Primary,
                     size = BayButtonSize.Medium,
                     modifier = Modifier.weight(2f),

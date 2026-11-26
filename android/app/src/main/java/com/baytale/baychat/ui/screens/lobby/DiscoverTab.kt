@@ -501,11 +501,15 @@ fun DiscoverTab(
                         viewingPlane = null
                         nav.switchTab(0)
                     },
+                    onFinished = { joiningPlane = false },
                 )
             },
-            onReport = {
-                vm.reportPlane(targetPlane.id) {
-                    viewingPlane = null
+            onReport = { onResult ->
+                vm.reportPlane(targetPlane.id) { success, deleted ->
+                    onResult(success)
+                    if (success && deleted) {
+                        viewingPlane = null
+                    }
                 }
             },
             onDismiss = { if (!joiningPlane) viewingPlane = null },

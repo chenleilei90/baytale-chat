@@ -326,6 +326,10 @@ fun ChatRoomScreen(
     LaunchedEffect(isAtBottom) {
         if (isAtBottom) {
             unreadBelowCount = 0
+            if (state.firstUnreadMessageId != null) {
+                delay(1500L)
+                vm.clearFirstUnreadMarker()
+            }
         }
     }
 
@@ -1480,6 +1484,7 @@ fun ChatRoomScreen(
             roomCode = room.roomCode,
             hasPassword = room.password.isNotBlank() || room.roomInfo?.hasPassword == true,
             isOwner = room.isOwner,
+            submitting = state.creatingPlane,
             candidateFiles = candidateFiles,
             onConfirm = { msg, files, allowEntry ->
                 vm.createPlaneFromActiveRoom(
@@ -1489,7 +1494,7 @@ fun ChatRoomScreen(
                     onSuccess = { showPlaneComposer = false },
                 )
             },
-            onDismiss = { showPlaneComposer = false },
+            onDismiss = { if (!state.creatingPlane) showPlaneComposer = false },
             onToast = { vm.showToast(it) },
         )
     }
