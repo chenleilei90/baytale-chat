@@ -913,3 +913,37 @@ func TestRecallMessageTimeWindow(t *testing.T) {
 		t.Fatalf("用例 B 房内其他成员不应收到任何消息，实际收到: %+v", unexpected)
 	}
 }
+
+func TestVerifyOwner(t *testing.T) {
+	cfg := newTestConfig(t)
+	hub, err := NewHub(cfg)
+	if err != nil {
+		t.Fatalf("创建 Hub 失败: %v", err)
+	}
+	defer hub.Close()
+
+	created, err := hub.CreateRoom(CreateRoomRequest{
+		Mode:     ModeEphemeral,
+		Password: "owner-secret",
+	})
+	if err != nil {
+		t.Fatalf("创建房间失败: %v", err)
+	}
+	if created.OwnerToken == "" {
+		t.Fatal("预期返回 ownerToken")
+	}
+
+	if _, err := hub.VerifyOwner(created.Code, "wrong-token", "owner-secret"); !errors.Is(err, ErrNotOwner) {
+		t.Fatalf("非房主应返回 ErrNotOwner，实际: %v", err)
+	}
+	summary, err := hub.VerifyOwner(created.Code, created.OwnerToken, "")
+	if err != nil {
+		t.Fatalf("房主凭证应校验通过，实际失败: %v", err)
+	}
+	if summary.Code != created.Code || !summary.HasPassword {
+		t.Fatalf("VerifyOwner 返回摘要异常: %+v", summary)
+	}
+	if _, err := hub.VerifyOwner("999999", created.OwnerToken, ""); !errors.Is(err, ErrRoomNotFound) {
+		t.Fatalf("不存在房间应返回 ErrRoomNotFound，实际: %v", err)
+	}
+}

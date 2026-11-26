@@ -18,6 +18,7 @@ import (
 	"baychat/server/internal/config"
 	"baychat/server/internal/nearby"
 	"baychat/server/internal/pickup"
+	"baychat/server/internal/plane"
 	"baychat/server/internal/ratelimit"
 	"baychat/server/internal/room"
 	"baychat/server/internal/static"
@@ -52,15 +53,22 @@ func main() {
 	nearbySvc := nearby.NewService(hub)
 	defer nearbySvc.Close()
 
+	planeSvc := plane.NewService(hub)
+	defer planeSvc.Close()
+
 	limiter := ratelimit.New(map[string]ratelimit.Rule{
-		"POST /api/rooms":             {Capacity: 30, Window: 10 * time.Minute},
-		"GET /api/rooms/{code}":       {Capacity: 120, Window: time.Minute},
+		"POST /api/rooms":               {Capacity: 30, Window: 10 * time.Minute},
+		"GET /api/rooms/{code}":         {Capacity: 120, Window: time.Minute},
 		"POST /api/rooms/{code}/verify": {Capacity: 30, Window: time.Minute},
-		"POST /api/pickups":           {Capacity: 10, Window: 10 * time.Minute},
-		"GET /api/pickups/{code}":     {Capacity: 40, Window: time.Minute},
-		"POST /api/nearby/heartbeat":  {Capacity: 40, Window: time.Minute},
-		"POST /api/nearby/invite":     {Capacity: 20, Window: time.Minute},
-		"POST /api/report":            {Capacity: 10, Window: time.Hour},
+		"POST /api/pickups":             {Capacity: 10, Window: 10 * time.Minute},
+		"GET /api/pickups/{code}":       {Capacity: 40, Window: time.Minute},
+		"POST /api/nearby/heartbeat":    {Capacity: 40, Window: time.Minute},
+		"POST /api/nearby/invite":       {Capacity: 20, Window: time.Minute},
+		"GET /api/planes":               {Capacity: 60, Window: time.Minute},
+		"POST /api/planes":              {Capacity: 10, Window: 10 * time.Minute},
+		"POST /api/planes/{id}/join":    {Capacity: 30, Window: time.Minute},
+		"POST /api/planes/{id}/report":  {Capacity: 10, Window: time.Hour},
+		"POST /api/report":              {Capacity: 10, Window: time.Hour},
 	})
 
 	// 定期清理限流器的空闲令牌桶
@@ -554,6 +562,87 @@ func main() {
 		writeJSON(w, http.StatusOK, map[string]any{"status": status})
 	})
 
+	// ================= 纸飞机（公开房间文件/消息分享卡片）接口 =================
+
+	mux.HandleFunc("GET /api/planes", func(w http.ResponseWriter, r *http.Request) {
+		if !allowRate(limiter, "GET /api/planes", w, r) {
+			return
+		}
+		limit := plane.DefaultListLimit
+		if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+			if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+				limit = parsed
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"planes": planeSvc.List(limit),
+		})
+	})
+
+	mux.HandleFunc("GET /api/planes/{id}", func(w http.ResponseWriter, r *http.Request) {
+		item, err := planeSvc.Get(r.PathValue("id"))
+		if err != nil {
+			writePlaneError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, item)
+	})
+
+	mux.HandleFunc("POST /api/planes", func(w http.ResponseWriter, r *http.Request) {
+		if !allowRate(limiter, "POST /api/planes", w, r) {
+			return
+		}
+		var req plane.CreateRequest
+		if err := json.NewDecoder(io.LimitReader(r.Body, 32*1024)).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_JSON", "请求体 JSON 格式错误")
+			return
+		}
+		if req.OwnerToken == "" {
+			req.OwnerToken = extractOwnerToken(r)
+		}
+		if req.Password == "" {
+			req.Password = extractPassword(r)
+		}
+		created, err := planeSvc.Create(req)
+		if err != nil {
+			writePlaneError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, created)
+	})
+
+	mux.HandleFunc("POST /api/planes/{id}/join", func(w http.ResponseWriter, r *http.Request) {
+		if !allowRate(limiter, "POST /api/planes/{id}/join", w, r) {
+			return
+		}
+		res, err := planeSvc.Join(r.PathValue("id"))
+		if err != nil {
+			writePlaneError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, res)
+	})
+
+	mux.HandleFunc("POST /api/planes/{id}/report", func(w http.ResponseWriter, r *http.Request) {
+		if !allowRate(limiter, "POST /api/planes/{id}/report", w, r) {
+			return
+		}
+		var req plane.ReportRequest
+		if err := json.NewDecoder(io.LimitReader(r.Body, 16*1024)).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_JSON", "请求体 JSON 格式错误")
+			return
+		}
+		res, err := planeSvc.Report(r.PathValue("id"), req.ClientID)
+		if err != nil {
+			writePlaneError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":      true,
+			"deleted": res.Deleted,
+		})
+	})
+
 	// WebSocket 信令与实时房间同步
 	mux.HandleFunc("/ws", hub.ServeWS)
 
@@ -733,5 +822,34 @@ func writeNearbyError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "INVITE_ALREADY_HANDLED", err.Error())
 	default:
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
+	}
+}
+
+func writePlaneError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, plane.ErrPlaneNotFound), errors.Is(err, room.ErrRoomNotFound):
+		writeError(w, http.StatusNotFound, "PLANE_NOT_FOUND", err.Error())
+	case errors.Is(err, plane.ErrPlaneExpired), errors.Is(err, room.ErrRoomExpired):
+		writeError(w, http.StatusGone, "PLANE_EXPIRED", err.Error())
+	case errors.Is(err, plane.ErrPlaneCooldown):
+		writeError(w, http.StatusTooManyRequests, "PLANE_COOLDOWN", err.Error())
+	case errors.Is(err, plane.ErrPlaneLimitSender):
+		writeError(w, http.StatusConflict, "PLANE_LIMIT_SENDER", err.Error())
+	case errors.Is(err, plane.ErrPlaneLimitGlobal):
+		writeError(w, http.StatusTooManyRequests, "PLANE_LIMIT_GLOBAL", err.Error())
+	case errors.Is(err, plane.ErrPlaneEntryClosed):
+		writeError(w, http.StatusForbidden, "PLANE_ENTRY_CLOSED", err.Error())
+	case errors.Is(err, plane.ErrPlaneEntryExpired):
+		writeError(w, http.StatusConflict, "PLANE_ENTRY_EXPIRED", err.Error())
+	case errors.Is(err, plane.ErrPlaneOwnerRequired):
+		writeError(w, http.StatusForbidden, "PLANE_OWNER_REQUIRED", err.Error())
+	case errors.Is(err, plane.ErrPlanePasswordRequired):
+		writeError(w, http.StatusForbidden, "PLANE_PASSWORD_REQUIRED", err.Error())
+	case errors.Is(err, plane.ErrPlaneSelfReport):
+		writeError(w, http.StatusBadRequest, "PLANE_SELF_REPORT", err.Error())
+	case errors.Is(err, plane.ErrPlaneAlreadyReported):
+		writeError(w, http.StatusConflict, "PLANE_ALREADY_REPORTED", err.Error())
+	default:
+		writeError(w, http.StatusBadRequest, "INVALID_PLANE", err.Error())
 	}
 }

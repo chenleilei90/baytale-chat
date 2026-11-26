@@ -741,6 +741,25 @@ func (h *Hub) VerifyAccess(rawCode, password string) (*RoomSummary, error) {
 	return h.buildRoomSummaryLocked(rm), nil
 }
 
+// VerifyOwner 校验房间存在性及房主身份凭证（用于纸飞机免密入口等房主特权操作）
+func (h *Hub) VerifyOwner(rawCode, ownerToken, password string) (*RoomSummary, error) {
+	code := NormalizeCode(rawCode)
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	rm, ok := h.rooms[code]
+	if !ok {
+		if _, burned := h.burnedCodes[code]; burned {
+			return nil, ErrRoomExpired
+		}
+		return nil, ErrRoomNotFound
+	}
+	if err := authorizeOwnerOrLegacyLocked(rm, ownerToken, password); err != nil {
+		return nil, err
+	}
+	return h.buildRoomSummaryLocked(rm), nil
+}
+
 // DeleteRoom 销毁房间（一次性房间直接作废，固定房间需校验房主或旧版密码后从持久化删除；同时立即清空服务器聊天缓存）
 func (h *Hub) DeleteRoom(rawCode, ownerToken, password, actorName string) error {
 	code := NormalizeCode(rawCode)
