@@ -175,8 +175,10 @@ internal fun formatRetentionBadge(days: Int): String = when {
  * 判断两个时间戳是否属于同一自然日。
  */
 internal fun isSameCalendarDay(ts1: Long, ts2: Long): Boolean {
-    val c1 = Calendar.getInstance().apply { timeInMillis = ts1 }
-    val c2 = Calendar.getInstance().apply { timeInMillis = ts2 }
+    val safeTs1 = com.baytale.baychat.core.util.FormatUtils.normalizeEpochMs(ts1)
+    val safeTs2 = com.baytale.baychat.core.util.FormatUtils.normalizeEpochMs(ts2)
+    val c1 = Calendar.getInstance().apply { timeInMillis = safeTs1 }
+    val c2 = Calendar.getInstance().apply { timeInMillis = safeTs2 }
     return c1.get(Calendar.YEAR) == c2.get(Calendar.YEAR) &&
         c1.get(Calendar.DAY_OF_YEAR) == c2.get(Calendar.DAY_OF_YEAR)
 }
@@ -191,10 +193,11 @@ internal fun formatWeChatMessageTime(
     timestampMs: Long,
     nowMs: Long = System.currentTimeMillis(),
 ): String {
-    val date = Date(timestampMs)
+    val safeTs = com.baytale.baychat.core.util.FormatUtils.normalizeEpochMs(timestampMs, nowMs)
+    val date = Date(safeTs)
     val hm = SimpleDateFormat("HH:mm", Locale.getDefault()).format(date)
 
-    val msgCal = Calendar.getInstance().apply { timeInMillis = timestampMs }
+    val msgCal = Calendar.getInstance().apply { timeInMillis = safeTs }
     val nowCal = Calendar.getInstance().apply { timeInMillis = nowMs }
 
     val msgDayStart = (msgCal.clone() as Calendar).apply {

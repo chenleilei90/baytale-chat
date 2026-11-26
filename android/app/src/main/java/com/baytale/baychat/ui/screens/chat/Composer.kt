@@ -34,8 +34,8 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
@@ -423,9 +423,7 @@ fun Composer(
                 style = if (voiceMode) BayIconStyle.Accent else BayIconStyle.Filled,
                 size = 40.dp,
                 enabled = !state.isRecordingVoice,
-                modifier = Modifier
-                    .defaultMinSize(minWidth = 44.dp, minHeight = 44.dp)
-                    .padding(bottom = 2.dp),
+                modifier = Modifier.size(44.dp),
             )
 
             if (voiceMode) {
@@ -436,7 +434,7 @@ fun Composer(
                     )
                     activeRecordingUi && voiceZone == VoiceGestureZone.CONVERT_TEXT -> colors.accentSoft
                     activeRecordingUi -> colors.fillStrong
-                    else -> colors.fill
+                    else -> colors.wechatPeerBubble
                 }
                 val holdLabel = when {
                     activeRecordingUi && voiceZone == VoiceGestureZone.CANCEL -> "松开 取消"
@@ -453,7 +451,7 @@ fun Composer(
                 Box(
                     modifier = Modifier
                         .weight(1f)
-                        .height(48.dp)
+                        .height(44.dp)
                         .clip(BayShapes.smShape)
                         .background(holdBg)
                         .pointerInput(upThresholdPx) {
@@ -524,6 +522,9 @@ fun Composer(
                                             voiceZone = nextZone
                                             latestOnZoneChanged(nextZone)
                                             BayHaptic.tap(haptic, latestHapticEnabled)
+                                            if (nextZone == VoiceGestureZone.CONVERT_TEXT) {
+                                                vm.onVoiceEnterConvertZone()
+                                            }
                                         }
                                         change.consume()
                                     }
@@ -559,6 +560,10 @@ fun Composer(
                     placeholder = "输入消息...",
                     singleLine = false,
                     maxLines = 4,
+                    containerColor = colors.wechatPeerBubble,
+                    focusedContainerColor = colors.wechatPeerBubble,
+                    minHeightDp = 44.dp,
+                    verticalPadding = 10.dp,
                     modifier = Modifier
                         .weight(1f)
                         .focusRequester(inputFocusRequester)
@@ -591,9 +596,7 @@ fun Composer(
                     style = if (showEmojiPanel) BayIconStyle.Accent else BayIconStyle.Filled,
                     size = 40.dp,
                     enabled = !state.isRecordingVoice,
-                    modifier = Modifier
-                        .defaultMinSize(minWidth = 44.dp, minHeight = 44.dp)
-                        .padding(bottom = 2.dp),
+                    modifier = Modifier.size(44.dp),
                 )
             }
 
@@ -601,8 +604,7 @@ fun Composer(
             if (!voiceMode && inputText.isNotBlank()) {
                 Box(
                     modifier = Modifier
-                        .defaultMinSize(minWidth = 44.dp, minHeight = 44.dp)
-                        .padding(bottom = 2.dp)
+                        .size(44.dp)
                         .bayClickable {
                             val textToSend = inputText
                             onInputTextChange("")
@@ -644,9 +646,7 @@ fun Composer(
                     style = if (showAttachmentPanel) BayIconStyle.Accent else BayIconStyle.Filled,
                     size = 40.dp,
                     enabled = !state.isRecordingVoice,
-                    modifier = Modifier
-                        .defaultMinSize(minWidth = 44.dp, minHeight = 44.dp)
-                        .padding(bottom = 2.dp),
+                    modifier = Modifier.size(44.dp),
                 )
             }
         }
@@ -758,7 +758,7 @@ fun Composer(
             }
         }
 
-        // 微信风格表情选择面板（最近使用 + 8 列网格 + 右下角退格/发送操作栏，纯码点渲染零字面量 Emoji）
+        // 微信 8.0+ 风格表情选择面板（统一 8 列可滚动网格：最近使用 + 所有表情 + 右下角浮动删除/绿色发送栏）
         val catalogEmojis = remember { EMOJI_CODEPOINTS.map(::emojiString) }
         AnimatedVisibility(
             visible = showEmojiPanel && !voiceMode && !state.isRecordingVoice,
@@ -768,60 +768,34 @@ fun Composer(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(260.dp)
-                    .background(colors.bg),
+                    .height(280.dp)
+                    .background(colors.wechatComposerBg),
             ) {
-                Column(modifier = Modifier.fillMaxSize()) {
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(8),
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(
+                        start = BaySpacing.md,
+                        end = BaySpacing.md,
+                        top = BaySpacing.sm,
+                        bottom = 68.dp,
+                    ),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
                     if (state.recentEmojis.isNotEmpty()) {
-                        Text(
-                            text = "最近使用",
-                            style = BayType.caption,
-                            color = colors.textSecondary,
-                            modifier = Modifier.padding(
-                                start = BaySpacing.lg,
-                                top = BaySpacing.sm,
-                                bottom = BaySpacing.xs,
-                            ),
-                        )
-                        LazyRow(
-                            contentPadding = PaddingValues(horizontal = BaySpacing.md),
-                            horizontalArrangement = Arrangement.spacedBy(BaySpacing.xs),
-                        ) {
-                            items(state.recentEmojis, key = { "rec_$it" }) { emoji ->
-                                Box(
-                                    modifier = Modifier
-                                        .defaultMinSize(minWidth = 44.dp, minHeight = 44.dp)
-                                        .clip(BayShapes.xsShape)
-                                        .bayClickable {
-                                            val updated = inputText + emoji
-                                            onInputTextChange(updated)
-                                            vm.updateDraft(roomCode, updated)
-                                            vm.onDraftTypingChanged(updated.isNotBlank())
-                                            vm.recordEmojiUsed(emoji)
-                                        },
-                                    contentAlignment = Alignment.Center,
-                                ) {
-                                    Text(text = emoji, style = BayType.title2)
-                                }
-                            }
+                        item(span = { GridItemSpan(8) }) {
+                            Text(
+                                text = "最近使用",
+                                style = BayType.caption,
+                                color = colors.textSecondary,
+                                modifier = Modifier.padding(
+                                    horizontal = BaySpacing.xs,
+                                    vertical = BaySpacing.xs,
+                                ),
+                            )
                         }
-                    }
-
-                    LazyVerticalGrid(
-                        columns = GridCells.Fixed(8),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .weight(1f),
-                        contentPadding = PaddingValues(
-                            start = BaySpacing.md,
-                            end = BaySpacing.md,
-                            top = BaySpacing.sm,
-                            bottom = 60.dp,
-                        ),
-                        horizontalArrangement = Arrangement.spacedBy(2.dp),
-                        verticalArrangement = Arrangement.spacedBy(2.dp),
-                    ) {
-                        items(catalogEmojis, key = { it }) { emoji ->
+                        items(state.recentEmojis.take(8), key = { "rec_$it" }) { emoji ->
                             Box(
                                 modifier = Modifier
                                     .defaultMinSize(minWidth = 44.dp, minHeight = 44.dp)
@@ -839,25 +813,52 @@ fun Composer(
                             }
                         }
                     }
+
+                    item(span = { GridItemSpan(8) }) {
+                        Text(
+                            text = "所有表情",
+                            style = BayType.caption,
+                            color = colors.textSecondary,
+                            modifier = Modifier.padding(
+                                horizontal = BaySpacing.xs,
+                                vertical = BaySpacing.xs,
+                            ),
+                        )
+                    }
+                    items(catalogEmojis, key = { it }) { emoji ->
+                        Box(
+                            modifier = Modifier
+                                .defaultMinSize(minWidth = 44.dp, minHeight = 44.dp)
+                                .clip(BayShapes.xsShape)
+                                .bayClickable {
+                                    val updated = inputText + emoji
+                                    onInputTextChange(updated)
+                                    vm.updateDraft(roomCode, updated)
+                                    vm.onDraftTypingChanged(updated.isNotBlank())
+                                    vm.recordEmojiUsed(emoji)
+                                },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(text = emoji, style = BayType.title2)
+                        }
+                    }
                 }
 
-                // 右下角浮动删除与发送栏
+                // 右下角微信风格浮动删除与发送栏
                 val hasText = inputText.isNotBlank()
                 Row(
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
-                        .padding(end = BaySpacing.md, bottom = BaySpacing.md)
-                        .clip(BayShapes.mdShape)
-                        .background(colors.surface)
-                        .padding(horizontal = BaySpacing.xs, vertical = BaySpacing.xs),
+                        .padding(end = BaySpacing.md, bottom = BaySpacing.md),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(BaySpacing.xs),
                 ) {
                     Box(
                         modifier = Modifier
-                            .defaultMinSize(minWidth = 44.dp, minHeight = 40.dp)
+                            .defaultMinSize(minWidth = 46.dp, minHeight = 40.dp)
+                            .shadow(elevation = 2.dp, shape = BayShapes.smShape, clip = false)
                             .clip(BayShapes.smShape)
-                            .background(colors.fill)
+                            .background(colors.wechatPeerBubble)
                             .bayClickable(enabled = inputText.isNotEmpty()) {
                                 val next = deleteLastGraphemeCluster(inputText)
                                 onInputTextChange(next)
@@ -876,9 +877,10 @@ fun Composer(
                     }
                     Box(
                         modifier = Modifier
-                            .defaultMinSize(minWidth = 56.dp, minHeight = 40.dp)
+                            .defaultMinSize(minWidth = 58.dp, minHeight = 40.dp)
+                            .shadow(elevation = 2.dp, shape = BayShapes.smShape, clip = false)
                             .clip(BayShapes.smShape)
-                            .background(if (hasText) colors.accent else colors.fill)
+                            .background(if (hasText) colors.success else colors.wechatPeerBubble)
                             .bayClickable(enabled = hasText) {
                                 val textToSend = inputText
                                 onInputTextChange("")

@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -52,6 +53,7 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.buildAnnotatedString
@@ -120,6 +122,7 @@ fun MessageBubble(
     voiceTranscriptText: String? = null,
     isVoiceTranscribing: Boolean = false,
     onCollapseVoiceTranscript: () -> Unit = {},
+    onCopyVoiceTranscript: (String) -> Unit = {},
     onCopiedClip: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -169,7 +172,7 @@ fun MessageBubble(
     // 新版微信同款 6dp 微圆角气泡
     val bubbleShape = RoundedCornerShape(6.dp)
 
-    val topGap = if (isFirstInGroup) BaySpacing.sm else 2.dp
+    val topGap = 10.dp
     val selectable = !item.isSelfRecall
     val rowHighlightColor by animateColorAsState(
         targetValue = when {
@@ -242,59 +245,45 @@ fun MessageBubble(
                 horizontalArrangement = if (item.isSelf) Arrangement.End else Arrangement.Start,
                 verticalAlignment = Alignment.Top,
             ) {
-                // 他人消息左侧头像列（连贯消息保留对齐空白；支持单击操作、双击拍一拍、长按@提及）
+                // 他人消息左侧头像列（每条均与微信一致展示 40dp 方形微圆角头像；支持单击操作、双击拍一拍、长按@提及）
                 if (!item.isSelf) {
-                    if (isFirstInGroup) {
-                        MessageSenderAvatar(
-                            avatarId = item.senderAvatar,
-                            isShaking = isAvatarShaking,
-                            shakeNonce = nudgeShakeNonce,
-                            enabled = !selectionMode,
-                            onClick = { onPeerClick(item.senderId, item.senderName) },
-                            onDoubleClick = { onAvatarDoubleTap(item.senderId, item.senderName) },
-                            onLongClick = {
-                                BayHaptic.tap(haptic, hapticEnabled)
-                                onAvatarLongPress(item.senderId, item.senderName)
-                            },
-                        )
-                    } else {
-                        Spacer(modifier = Modifier.width(44.dp))
-                    }
-                    Spacer(modifier = Modifier.width(BaySpacing.xs))
+                    MessageSenderAvatar(
+                        avatarId = item.senderAvatar,
+                        isShaking = isAvatarShaking,
+                        shakeNonce = nudgeShakeNonce,
+                        enabled = !selectionMode,
+                        onClick = { onPeerClick(item.senderId, item.senderName) },
+                        onDoubleClick = { onAvatarDoubleTap(item.senderId, item.senderName) },
+                        onLongClick = {
+                            BayHaptic.tap(haptic, hapticEnabled)
+                            onAvatarLongPress(item.senderId, item.senderName)
+                        },
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
                 }
 
         Column(
             horizontalAlignment = if (item.isSelf) Alignment.End else Alignment.Start,
             modifier = Modifier.weight(1f, fill = false),
         ) {
-            // 同组首条消息仅在需要展示发送者昵称（他人）或极简云端标识时渲染，时间由居中时间分割线统一展示避免重复
-            if (isFirstInGroup && (!item.isSelf || item.fromCache)) {
+            // 仅他人群组消息展示昵称，对齐气泡左边缘；自己消息绝不额外渲染顶部标签以确保头像与气泡上沿严格齐平
+            if (!item.isSelf && isFirstInGroup) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     modifier = Modifier.padding(
-                        start = if (item.isSelf) 0.dp else 4.dp,
-                        end = if (item.isSelf) 4.dp else 0.dp,
+                        start = 6.dp,
                         bottom = 3.dp,
                     ),
                 ) {
-                    if (!item.isSelf) {
-                        Text(
-                            text = item.senderName,
-                            style = BayType.caption,
-                            color = colors.textSecondary,
-                            modifier = Modifier
-                                .bayClickable { onPeerClick(item.senderId, item.senderName) }
-                                .clip(BayShapes.xsShape),
-                        )
-                    }
-                    if (item.fromCache) {
-                        Text(
-                            text = "云端",
-                            style = BayType.caption.copy(fontWeight = FontWeight.Normal),
-                            color = colors.textTertiary,
-                        )
-                    }
+                    Text(
+                        text = item.senderName,
+                        style = BayType.caption,
+                        color = colors.textSecondary,
+                        modifier = Modifier
+                            .bayClickable { onPeerClick(item.senderId, item.senderName) }
+                            .clip(BayShapes.xsShape),
+                    )
                 }
             }
 
@@ -349,10 +338,10 @@ fun MessageBubble(
                             }
 
                             Row(verticalAlignment = Alignment.Top) {
-                                if (!item.isSelf && isFirstInGroup) {
+                                if (!item.isSelf) {
                                     Canvas(
                                         modifier = Modifier
-                                            .padding(top = 13.dp)
+                                            .padding(top = 15.dp)
                                             .size(width = 6.dp, height = 10.dp),
                                     ) {
                                         val path = Path().apply {
@@ -363,35 +352,36 @@ fun MessageBubble(
                                         }
                                         drawPath(path = path, color = bubbleFillColor)
                                     }
-                                } else if (!item.isSelf) {
-                                    Spacer(modifier = Modifier.width(6.dp))
                                 }
 
                                 Column(
                                     modifier = Modifier
+                                        .heightIn(min = 40.dp)
                                         .clip(bubbleShape)
                                         .then(bubbleBgModifier)
-                                        .padding(horizontal = BaySpacing.md, vertical = 10.dp),
-                                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                                        .padding(horizontal = 12.dp, vertical = 9.dp),
+                                    verticalArrangement = Arrangement.Center,
                                 ) {
                                 if (!item.isSelf && item.mentionedMe) {
                                     Text(
                                         text = "@我",
                                         style = BayType.caption.copy(fontWeight = FontWeight.SemiBold),
                                         color = colors.accent,
+                                        modifier = Modifier.padding(bottom = 4.dp),
                                     )
                                 }
 
                                 item.replyTo?.let { quote ->
                                     val quoteBg = if (item.isSelf) {
-                                        colors.onAccent.copy(alpha = 0.16f)
+                                        colors.wechatSelfText.copy(alpha = 0.08f)
                                     } else {
                                         colors.fill
                                     }
-                                    val quoteBar = if (item.isSelf) colors.onAccent else colors.accent
+                                    val quoteBar = if (item.isSelf) colors.wechatSelfText.copy(alpha = 0.45f) else colors.accent
                                     val isRecalledQuote = quote.preview == "该引用内容已撤回"
                                     Row(
                                         modifier = Modifier
+                                            .padding(bottom = 6.dp)
                                             .bayClickable { onJumpToReply(quote.id) }
                                             .height(IntrinsicSize.Min)
                                             .clip(BayShapes.xsShape)
@@ -410,15 +400,15 @@ fun MessageBubble(
                                             Text(
                                                 text = quote.senderName,
                                                 style = BayType.caption,
-                                                color = if (item.isSelf) colors.onAccent else colors.accent,
+                                                color = if (item.isSelf) colors.wechatSelfText else colors.accent,
                                                 maxLines = 1,
                                             )
                                             Text(
                                                 text = quote.preview,
                                                 style = BayType.caption.copy(fontWeight = FontWeight.Normal),
                                                 color = when {
-                                                    item.isSelf -> colors.onAccent.copy(
-                                                        alpha = if (isRecalledQuote) 0.65f else 0.88f,
+                                                    item.isSelf -> colors.wechatSelfText.copy(
+                                                        alpha = if (isRecalledQuote) 0.55f else 0.72f,
                                                     )
                                                     isRecalledQuote -> colors.textSecondary.copy(alpha = 0.72f)
                                                     else -> colors.textSecondary
@@ -430,21 +420,23 @@ fun MessageBubble(
                                     }
                                 }
 
-                                val linkColor = if (item.isSelf) colors.onAccent else colors.accent
+                                val linkColor = colors.accent
                                 val linkedText = remember(textBody, linkColor) {
                                     buildClickableUrlText(textBody, linkColor)
                                 }
                                 Text(
                                     text = linkedText,
-                                    style = BayType.callout,
+                                    style = BayType.body.copy(
+                                        platformStyle = PlatformTextStyle(includeFontPadding = false),
+                                    ),
                                     color = textColor,
                                 )
                                 }
 
-                                if (item.isSelf && isFirstInGroup) {
+                                if (item.isSelf) {
                                     Canvas(
                                         modifier = Modifier
-                                            .padding(top = 13.dp)
+                                            .padding(top = 15.dp)
                                             .size(width = 6.dp, height = 10.dp),
                                     ) {
                                         val path = Path().apply {
@@ -455,8 +447,6 @@ fun MessageBubble(
                                         }
                                         drawPath(path = path, color = bubbleFillColor)
                                     }
-                                } else if (item.isSelf) {
-                                    Spacer(modifier = Modifier.width(6.dp))
                                 }
                             }
                         }
@@ -507,6 +497,7 @@ fun MessageBubble(
                                 transcriptText = voiceTranscriptText,
                                 isTranscribing = isVoiceTranscribing,
                                 onCollapseTranscript = onCollapseVoiceTranscript,
+                                onCopyTranscript = onCopyVoiceTranscript,
                                 onTogglePlayback = onToggleVoice,
                                 onLongPress = onLongPress,
                             )
@@ -578,22 +569,18 @@ fun MessageBubble(
             }
         }
 
-                // 自己消息右侧头像列（首条展示头像支持双击拍自己，连贯消息保留对齐空白）
+                // 自己消息右侧头像列（每条均展示 40dp 头像，上沿与气泡齐平，支持双击拍自己）
                 if (item.isSelf) {
-                    Spacer(modifier = Modifier.width(BaySpacing.xs))
-                    if (isFirstInGroup) {
-                        MessageSenderAvatar(
-                            avatarId = item.senderAvatar,
-                            isShaking = isAvatarShaking,
-                            shakeNonce = nudgeShakeNonce,
-                            enabled = !selectionMode,
-                            onClick = {},
-                            onDoubleClick = { onAvatarDoubleTap(item.senderId, item.senderName) },
-                            onLongClick = null,
-                        )
-                    } else {
-                        Spacer(modifier = Modifier.width(44.dp))
-                    }
+                    Spacer(modifier = Modifier.width(6.dp))
+                    MessageSenderAvatar(
+                        avatarId = item.senderAvatar,
+                        isShaking = isAvatarShaking,
+                        shakeNonce = nudgeShakeNonce,
+                        enabled = !selectionMode,
+                        onClick = {},
+                        onDoubleClick = { onAvatarDoubleTap(item.senderId, item.senderName) },
+                        onLongClick = null,
+                    )
                 }
             }
         }
@@ -673,7 +660,7 @@ private fun MessageSenderAvatar(
     val interaction = remember { MutableInteractionSource() }
     Box(
         modifier = Modifier
-            .defaultMinSize(minWidth = 44.dp, minHeight = 44.dp)
+            .size(40.dp)
             .combinedClickable(
                 interactionSource = interaction,
                 indication = null,
@@ -682,7 +669,7 @@ private fun MessageSenderAvatar(
                 onDoubleClick = onDoubleClick,
                 onLongClick = onLongClick,
             ),
-        contentAlignment = Alignment.TopCenter,
+        contentAlignment = Alignment.Center,
     ) {
         BayAvatar(
             emojiId = avatarId,

@@ -6,7 +6,9 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
+import android.media.AudioFormat
 import android.media.AudioManager
+import android.media.AudioRecord
 import android.media.MediaPlayer
 import android.media.MediaRecorder
 import android.net.ConnectivityManager
@@ -68,10 +70,12 @@ import com.baytale.baychat.core.network.NearbyApi
 import com.baytale.baychat.core.network.PickupApi
 import com.baytale.baychat.core.network.SignalingCallbacks
 import com.baytale.baychat.core.network.SignalingClient
+import com.baytale.baychat.core.network.StreamingAsrClient
 import com.baytale.baychat.core.storage.AppPrefsStore
 import com.baytale.baychat.core.storage.AppUserPrefs
 import com.baytale.baychat.core.storage.MediaDownloadHelper
 import com.baytale.baychat.core.util.BaySoundPlayer
+import com.baytale.baychat.core.util.ChatCrypto
 import com.baytale.baychat.core.util.FormatUtils
 import com.baytale.baychat.core.util.TransferResumeUtils
 import com.baytale.baychat.core.util.classifyPlaneKind
@@ -97,16 +101,20 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.RandomAccessFile
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
+import kotlin.math.sqrt
 
 // 桌面长按静态快捷方式路由动作
 enum class AppShortcutAction {
@@ -312,6 +320,8 @@ data class BayChatUiState(
     val planesError: String? = null,
     val planesLastRefreshedAt: Long = 0L,
     val creatingPlane: Boolean = false,
+    // 顶部进出房间漂浮提示文案（定时自动消隐，不污染聊天记录）
+    val roomPresenceNotice: String? = null,
 ) {
     // B12：供 Activity 与导航判断当前是否保有活跃或后台挂起的房间会话
     val hasActiveRoom: Boolean
@@ -386,14 +396,25 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     private var draftIdleTypingJob: Job? = null
     private var nearbyPollingJob: Job? = null
     private var outgoingInvitePollingJob: Job? = null
+    private var presenceNoticeJob: Job? = null
     private var lastNudgeAt: Long = 0L
     private val seenNudgeIds = LinkedHashSet<String>()
 
-    // 语音录制与播放控制器
-    private var mediaRecorder: MediaRecorder? = null
+    // 语音双轨录制（AudioRecord PCM + WAV 原声）与实时流式转文字控制器
+    private var audioRecord: AudioRecord? = null
     private var voiceOutputFile: File? = null
     private var voiceRecordStartAt: Long = 0L
     private var voiceRecordTickerJob: Job? = null
+    private var voiceCaptureJob: Job? = null
+    @Volatile
+    private var voiceRecordingLoopActive: Boolean = false
+    @Volatile
+    private var streamingAsrClient: StreamingAsrClient? = null
+    private var voicePcmHistoryStream: ByteArrayOutputStream? = null
+    @Volatile
+    private var voicePcmDataBytes: Long = 0L
+    private val voiceAmplitudeScaled = AtomicInteger(0)
+    private val pcmLock = Any()
     private var lastVoiceTypingSentAt: Long = 0L
     private var mediaPlayer: MediaPlayer? = null
     private var voicePlaybackTickerJob: Job? = null
@@ -2447,7 +2468,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                         senderName = sender?.name ?: "伙伴",
                         senderAvatar = sender?.avatar,
                         isSelf = false,
-                        timestamp = timestamp,
+                        timestamp = FormatUtils.normalizeEpochMs(timestamp),
                         text = text,
                         replyTo = replyTo,
                         mentionedMe = mentioned,
@@ -2474,7 +2495,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                         senderName = sender?.name ?: "伙伴",
                         senderAvatar = sender?.avatar,
                         isSelf = false,
-                        timestamp = updatedAt,
+                        timestamp = FormatUtils.normalizeEpochMs(updatedAt),
                         text = text,
                     )
                     val inserted = appendMessageIfAbsent(item)
@@ -2613,7 +2634,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                         senderName = sender?.name ?: "伙伴",
                         senderAvatar = sender?.avatar,
                         isSelf = false,
-                        timestamp = timestamp,
+                        timestamp = FormatUtils.normalizeEpochMs(timestamp),
                         caption = caption,
                         transfer = info.copy(targetPeerName = sender?.name),
                     )
@@ -2953,7 +2974,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                     // B8：WebSocket 抖动重连时不强制 reset 已建立且 dataReady 的 P2P 连接
                     newMesh.ensurePeer(profile.peerId, forceReset = false)
                     if (!alreadyPresent) {
-                        appendSystemMessage("${profile.name} 加入了房间")
+                        showRoomPresenceNotice("${profile.name} 加入了房间")
                     }
                     refreshForegroundBanner()
                 }
@@ -2983,7 +3004,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                         )
                     }
                     newMesh.removePeer(peerId)
-                    if (leftName != null) appendSystemMessage("$leftName 离开了房间")
+                    if (leftName != null) showRoomPresenceNotice("$leftName 离开了房间")
                     refreshForegroundBanner()
                 }
 
@@ -3269,6 +3290,8 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
 
         var initialSendStatus = if (p2pSent > 0) MessageSendStatus.SENT else MessageSendStatus.SENDING
         if (room.historyMeta.retentionDays > 0) {
+            val encryptedText = ChatCrypto.encrypt(room.roomCode, room.password, clean)
+            val encryptedQuotePreview = quote?.preview?.let { ChatCrypto.encrypt(room.roomCode, room.password, it) }
             val sentImmediate = signaling?.cacheMessage(
                 CachedMessage(
                     id = id,
@@ -3276,10 +3299,10 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                     senderId = selfPeerId,
                     senderName = profile.name,
                     senderAvatar = profile.avatar,
-                    text = clean,
+                    text = encryptedText,
                     replyToId = quote?.id,
                     replyToSender = quote?.senderName,
-                    replyToPreview = quote?.preview,
+                    replyToPreview = encryptedQuotePreview,
                     timestamp = ts,
                 )
             ) == true
@@ -3361,6 +3384,8 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
             val p2pSent = mesh?.broadcastText(item.id, item.text, System.currentTimeMillis(), item.replyTo) ?: 0
             var nextStatus = if (p2pSent > 0) MessageSendStatus.SENT else MessageSendStatus.SENDING
             if (room.historyMeta.retentionDays > 0) {
+                val encryptedText = ChatCrypto.encrypt(room.roomCode, room.password, item.text)
+                val encryptedQuotePreview = item.replyTo?.preview?.let { ChatCrypto.encrypt(room.roomCode, room.password, it) }
                 val ok = signaling?.cacheMessage(
                     CachedMessage(
                         id = item.id,
@@ -3368,10 +3393,10 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                         senderId = selfPeerId,
                         senderName = _uiState.value.profile.name,
                         senderAvatar = _uiState.value.profile.avatar,
-                        text = item.text,
+                        text = encryptedText,
                         replyToId = item.replyTo?.id,
                         replyToSender = item.replyTo?.senderName,
-                        replyToPreview = item.replyTo?.preview,
+                        replyToPreview = encryptedQuotePreview,
                         timestamp = item.timestamp,
                     )
                 ) == true
@@ -4094,7 +4119,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         runCatching { am.abandonAudioFocusRequest(req) }
     }
 
-    // G10：语音对讲录制（AAC/m4a，最长 60s）、正在语音心跳广播与内联播放控制
+    // G10：AudioRecord 双轨语音对讲（同步落盘 16kHz WAV 原声 + 随时滑入流式转文字 + 语音输入态广播）
     fun startVoiceRecording(): Boolean {
         if (_uiState.value.activeRoom == null) {
             showToast("请先进入房间")
@@ -4110,36 +4135,47 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         if (_uiState.value.isRecordingVoice) return false
 
         return runCatching {
+            val sampleRate = 16_000
+            val minBuf = AudioRecord.getMinBufferSize(
+                sampleRate,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+            )
+            require(minBuf > 0) { "设备暂不支持 16kHz 麦克风采集" }
+            val bufSize = maxOf(minBuf * 2, 6400)
+            val recorder = AudioRecord(
+                MediaRecorder.AudioSource.MIC,
+                sampleRate,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                bufSize,
+            )
+            check(recorder.state == AudioRecord.STATE_INITIALIZED) { "麦克风初始化失败" }
+
             val dir = File(appContext.cacheDir, "voice_rec").apply { mkdirs() }
-            val outFile = File(dir, "voice_${System.currentTimeMillis()}.m4a")
-            val recorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                MediaRecorder(appContext)
-            } else {
-                @Suppress("DEPRECATION")
-                MediaRecorder()
-            }
-            recorder.apply {
-                setAudioSource(MediaRecorder.AudioSource.MIC)
-                setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-                setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-                setAudioEncodingBitRate(64_000)
-                setAudioSamplingRate(44_100)
-                setMaxDuration(MAX_VOICE_DURATION_MS.toInt())
-                setOutputFile(outFile.absolutePath)
-                setOnInfoListener { _, what, _ ->
-                    if (what == MediaRecorder.MEDIA_RECORDER_INFO_MAX_DURATION_REACHED) {
-                        stopVoiceRecording(send = true)
-                    }
-                }
-                prepare()
-                requestRecordAudioFocus()
-                start()
-            }
-            mediaRecorder = recorder
+            val outFile = File(dir, "voice_${System.currentTimeMillis()}.wav")
+            val fos = FileOutputStream(outFile)
+            // 先预留 44 字节 RIFF/WAV 文件头，录音结束再回写准确字节长度
+            fos.write(ByteArray(44))
+
+            requestRecordAudioFocus()
+            recorder.startRecording()
+
+            audioRecord = recorder
             voiceOutputFile = outFile
+            voicePcmDataBytes = 0L
+            voiceAmplitudeScaled.set(0)
+            synchronized(pcmLock) {
+                voicePcmHistoryStream = ByteArrayOutputStream()
+            }
+            streamingAsrClient?.cancel()
+            streamingAsrClient = null
+
             voiceRecordStartAt = System.currentTimeMillis()
             lastVoiceTypingSentAt = voiceRecordStartAt
+            voiceRecordingLoopActive = true
             mesh?.broadcastTyping(true, "voice")
+
             _uiState.update {
                 it.copy(
                     isRecordingVoice = true,
@@ -4149,6 +4185,47 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                     isTranscribingDraft = false,
                 )
             }
+
+            voiceCaptureJob = viewModelScope.launch(Dispatchers.IO) {
+                val readBuf = ByteArray(3200) // 100ms 16kHz 16-bit mono PCM
+                try {
+                    while (isActive && voiceRecordingLoopActive) {
+                        val read = runCatching { recorder.read(readBuf, 0, readBuf.size) }.getOrDefault(-1)
+                        if (read <= 0) {
+                            if (!voiceRecordingLoopActive || read < 0) break
+                            continue
+                        }
+                        fos.write(readBuf, 0, read)
+                        voicePcmDataBytes += read.toLong()
+                        synchronized(pcmLock) {
+                            val hist = voicePcmHistoryStream
+                            if (hist != null && hist.size() < 2 * 1024 * 1024) {
+                                hist.write(readBuf, 0, read)
+                            }
+                        }
+                        streamingAsrClient?.sendPcmChunk(readBuf, read)
+                        // 计算单帧 PCM RMS 振幅驱动声波跳动
+                        var sumSq = 0.0
+                        val sampleCount = read / 2
+                        var i = 0
+                        while (i + 1 < read) {
+                            val lo = readBuf[i].toInt() and 0xFF
+                            val hi = readBuf[i + 1].toInt()
+                            val sample = (hi shl 8) or lo
+                            sumSq += sample.toDouble() * sample.toDouble()
+                            i += 2
+                        }
+                        val rms = if (sampleCount > 0) sqrt(sumSq / sampleCount) / 32768.0 else 0.0
+                        val norm = (rms.toFloat() * 4.2f).coerceIn(0f, 1f)
+                        voiceAmplitudeScaled.set((norm * 1000f).toInt())
+                    }
+                } finally {
+                    runCatching { fos.flush() }
+                    runCatching { fos.close() }
+                    writeWavHeader(outFile, voicePcmDataBytes)
+                }
+            }
+
             startVoiceTickerLoop()
             true
         }.getOrElse { err ->
@@ -4165,10 +4242,9 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
             while (isActive && _uiState.value.isRecordingVoice) {
                 val now = System.currentTimeMillis()
                 val elapsed = now - voiceRecordStartAt
-                val rawAmp = runCatching { mediaRecorder?.maxAmplitude ?: 0 }.getOrDefault(0)
-                val amp = (rawAmp / 32767f).coerceIn(0f, 1f)
+                val targetAmp = (voiceAmplitudeScaled.get() / 1000f).coerceIn(0f, 1f)
                 val prevAmp = _uiState.value.voiceAmplitude
-                val smooth = (prevAmp * 0.6f + amp * 0.4f).coerceIn(0f, 1f)
+                val smooth = (prevAmp * 0.55f + targetAmp * 0.45f).coerceIn(0f, 1f)
                 _uiState.update {
                     it.copy(
                         voiceRecordDurationMs = elapsed,
@@ -4184,12 +4260,31 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                     stopVoiceRecording(send = true)
                     break
                 }
-                delay(100L)
+                delay(80L)
             }
         }
     }
 
-    // 在右侧「文 转文字」区松手：结束录音保留原语音文件，立即弹出新版微信转文字浮层并提交服务端中文 ASR 识别
+    // 手指滑入右侧「文 转文字」区立即建立流式 WebSocket，先补灌历史 PCM 并实时边说边出字
+    fun onVoiceEnterConvertZone() {
+        if (!_uiState.value.isRecordingVoice || streamingAsrClient != null) return
+        val historySnapshot = synchronized(pcmLock) {
+            voicePcmHistoryStream?.toByteArray() ?: ByteArray(0)
+        }
+        val client = StreamingAsrClient(
+            wsUrl = api.buildAsrWebSocketUrl(),
+            okHttpClient = api.okHttpClient,
+            onTextUpdate = { recognized, _ ->
+                if (recognized.isNotBlank()) {
+                    _uiState.update { it.copy(voiceTranscribeText = recognized) }
+                }
+            },
+        )
+        streamingAsrClient = client
+        client.connect(historySnapshot)
+    }
+
+    // 在右侧「文 转文字」区松手：结束录音并无缝衔接流式终稿（极少数为空时自动调 HTTP ASR 兜底），0ms 切入微信绿气泡编辑态
     fun finishVoiceGestureToTranscribe() {
         if (!_uiState.value.isRecordingVoice) return
         voiceRecordTickerJob?.cancel()
@@ -4198,28 +4293,57 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
 
         val elapsedMs = (System.currentTimeMillis() - voiceRecordStartAt).coerceAtLeast(0L)
         val file = voiceOutputFile
-        runCatching { mediaRecorder?.stop() }
-        releaseVoiceRecorder()
-        _uiState.update { it.copy(isRecordingVoice = false, voiceRecordDurationMs = 0L, voiceAmplitude = 0f) }
+        val captureJob = voiceCaptureJob
+        val activeAsr = streamingAsrClient
+        streamingAsrClient = null
 
-        if (file == null || !file.exists() || file.length() == 0L || elapsedMs < MIN_VOICE_DURATION_MS) {
-            runCatching { file?.delete() }
+        voiceRecordingLoopActive = false
+        releaseVoiceRecorder()
+
+        if (file == null || elapsedMs < MIN_VOICE_DURATION_MS) {
+            _uiState.update { it.copy(isRecordingVoice = false, voiceRecordDurationMs = 0L, voiceAmplitude = 0f, voiceTranscribeText = "") }
+            activeAsr?.cancel()
+            viewModelScope.launch(Dispatchers.IO) {
+                runCatching { captureJob?.join() }
+                runCatching { file?.delete() }
+            }
             if (elapsedMs < MIN_VOICE_DURATION_MS) {
                 showToast("说话时间太短")
             }
             return
         }
+
         val durationSec = ((elapsedMs + 500L) / 1000L).coerceIn(1L, 60L)
         _uiState.update {
             it.copy(
+                isRecordingVoice = false,
+                voiceRecordDurationMs = 0L,
+                voiceAmplitude = 0f,
                 voiceDraftAudioPath = file.absolutePath,
                 voiceDraftDurationMs = durationSec * 1000L,
-                voiceTranscribeText = "",
                 isTranscribingDraft = true,
                 showVoiceTranscribePanel = true,
             )
         }
-        transcribeDraftFileAsync(file)
+
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                runCatching { captureJob?.join() }
+            }
+            var finalText = activeAsr?.finishAndAwaitFinal(timeoutMs = 1_800L)?.trim().orEmpty()
+            if (finalText.isBlank() && file.exists() && file.length() > 44L) {
+                finalText = runCatching { api.transcribeAudio(file) }.getOrDefault("").trim()
+            }
+            if (_uiState.value.voiceDraftAudioPath == file.absolutePath) {
+                _uiState.update { st ->
+                    val merged = finalText.ifBlank { st.voiceTranscribeText }
+                    st.copy(
+                        voiceTranscribeText = merged,
+                        isTranscribingDraft = false,
+                    )
+                }
+            }
+        }
     }
 
     private fun transcribeDraftFileAsync(file: File) {
@@ -4386,19 +4510,36 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
 
         val elapsedMs = (System.currentTimeMillis() - voiceRecordStartAt).coerceAtLeast(0L)
         val file = voiceOutputFile
-        runCatching { mediaRecorder?.stop() }
-        releaseVoiceRecorder()
-        _uiState.update { it.copy(isRecordingVoice = false, voiceRecordDurationMs = 0L, voiceAmplitude = 0f) }
+        val captureJob = voiceCaptureJob
+        val activeAsr = streamingAsrClient
+        streamingAsrClient = null
 
-        if (!send || file == null || !file.exists() || file.length() == 0L || elapsedMs < MIN_VOICE_DURATION_MS) {
-            runCatching { file?.delete() }
-            if (send && elapsedMs < MIN_VOICE_DURATION_MS) {
-                showToast("说话时间太短")
-            }
-            return
+        voiceRecordingLoopActive = false
+        releaseVoiceRecorder()
+        _uiState.update {
+            it.copy(
+                isRecordingVoice = false,
+                voiceRecordDurationMs = 0L,
+                voiceAmplitude = 0f,
+                voiceTranscribeText = "",
+            )
         }
-        val durationSec = ((elapsedMs + 500L) / 1000L).coerceIn(1L, 60L)
-        sendVoiceFileInternal(file, durationSec)
+        activeAsr?.cancel()
+
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                runCatching { captureJob?.join() }
+            }
+            if (!send || file == null || !file.exists() || file.length() <= 44L || elapsedMs < MIN_VOICE_DURATION_MS) {
+                withContext(Dispatchers.IO) { runCatching { file?.delete() } }
+                if (send && elapsedMs < MIN_VOICE_DURATION_MS) {
+                    showToast("说话时间太短")
+                }
+                return@launch
+            }
+            val durationSec = ((elapsedMs + 500L) / 1000L).coerceIn(1L, 60L)
+            sendVoiceFileInternal(file, durationSec)
+        }
     }
 
     private fun sendVoiceFileInternal(file: File, durationSec: Long) {
@@ -4406,13 +4547,14 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
             runCatching { file.delete() }
             return
         }
+        val voiceMime = if (file.extension.equals("wav", ignoreCase = true)) "audio/wav" else "audio/mp4"
         val ts = System.currentTimeMillis()
         val idPrefix = "voice_${ts}_${(1000..9999).random()}"
         val source = OutgoingFileSource(
             uri = Uri.fromFile(file),
             fileName = file.name,
             fileSize = file.length(),
-            mimeType = "audio/mp4",
+            mimeType = voiceMime,
             isImage = false,
             isAudio = true,
             caption = "${durationSec}s",
@@ -4446,7 +4588,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                             code = room.roomCode,
                             password = room.password,
                             bytes = bytes,
-                            mimeType = "audio/mp4",
+                            mimeType = voiceMime,
                         )
                         signaling?.cacheMessage(
                             CachedMessage(
@@ -4475,12 +4617,52 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private fun releaseVoiceRecorder() {
-        runCatching { mediaRecorder?.reset() }
-        runCatching { mediaRecorder?.release() }
-        mediaRecorder = null
+        voiceRecordingLoopActive = false
+        val rec = audioRecord
+        audioRecord = null
+        voiceCaptureJob = null
         voiceOutputFile = null
+        runCatching { rec?.stop() }
+        runCatching { rec?.release() }
+        synchronized(pcmLock) {
+            voicePcmHistoryStream?.reset()
+            voicePcmHistoryStream = null
+        }
         abandonRecordAudioFocus()
         _uiState.update { it.copy(voiceAmplitude = 0f) }
+    }
+
+    // 写入标准 44 字节 RIFF/WAV PCM 头（16kHz / 单声道 / 16-bit）
+    private fun writeWavHeader(wavFile: File, pcmDataSize: Long) {
+        if (!wavFile.exists() || pcmDataSize <= 0L) return
+        val totalDataLen = pcmDataSize + 36L
+        val sampleRate = 16000L
+        val channels = 1
+        val byteRate = sampleRate * channels * 2L
+        val header = ByteArray(44)
+        header[0] = 'R'.code.toByte(); header[1] = 'I'.code.toByte(); header[2] = 'F'.code.toByte(); header[3] = 'F'.code.toByte()
+        header[4] = (totalDataLen and 0xff).toByte(); header[5] = ((totalDataLen shr 8) and 0xff).toByte()
+        header[6] = ((totalDataLen shr 16) and 0xff).toByte(); header[7] = ((totalDataLen shr 24) and 0xff).toByte()
+        header[8] = 'W'.code.toByte(); header[9] = 'A'.code.toByte(); header[10] = 'V'.code.toByte(); header[11] = 'E'.code.toByte()
+        header[12] = 'f'.code.toByte(); header[13] = 'm'.code.toByte(); header[14] = 't'.code.toByte(); header[15] = ' '.code.toByte()
+        header[16] = 16; header[17] = 0; header[18] = 0; header[19] = 0
+        header[20] = 1; header[21] = 0
+        header[22] = channels.toByte(); header[23] = 0
+        header[24] = (sampleRate and 0xff).toByte(); header[25] = ((sampleRate shr 8) and 0xff).toByte()
+        header[26] = ((sampleRate shr 16) and 0xff).toByte(); header[27] = ((sampleRate shr 24) and 0xff).toByte()
+        header[28] = (byteRate and 0xff).toByte(); header[29] = ((byteRate shr 8) and 0xff).toByte()
+        header[30] = ((byteRate shr 16) and 0xff).toByte(); header[31] = ((byteRate shr 24) and 0xff).toByte()
+        header[32] = (channels * 2).toByte(); header[33] = 0
+        header[34] = 16; header[35] = 0
+        header[36] = 'd'.code.toByte(); header[37] = 'a'.code.toByte(); header[38] = 't'.code.toByte(); header[39] = 'a'.code.toByte()
+        header[40] = (pcmDataSize and 0xff).toByte(); header[41] = ((pcmDataSize shr 8) and 0xff).toByte()
+        header[42] = ((pcmDataSize shr 16) and 0xff).toByte(); header[43] = ((pcmDataSize shr 24) and 0xff).toByte()
+        runCatching {
+            RandomAccessFile(wavFile, "rw").use { raf ->
+                raf.seek(0)
+                raf.write(header)
+            }
+        }
     }
 
     // 判断语音条目是否具备可直接播放的本地文件或已缓存媒体来源，避免连播时触发空放
@@ -5687,7 +5869,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                 senderId = "system",
                 senderName = "系统",
                 isSelf = false,
-                timestamp = timestamp,
+                timestamp = FormatUtils.normalizeEpochMs(timestamp),
                 text = text,
             )
         )
@@ -5975,6 +6157,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                 unreadMentionMessageIds = emptyList(),
                 outgoingNearbyInvite = null,
                 transferProgress = emptyMap(),
+                roomPresenceNotice = null,
             )
         }
     }
@@ -6027,6 +6210,8 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     ): ChatItem? {
         val isSelf = cm.senderId == selfPeerId
         if (!isSelf && isPeerBlockedInternal(cm.senderId, null, cm.senderName)) return null
+        val roomPwd = _uiState.value.activeRoom?.password.orEmpty()
+        val safeTs = FormatUtils.normalizeEpochMs(cm.timestamp)
         return when (cm.kind) {
             "image" -> if (!cm.mediaId.isNullOrBlank()) {
                 ChatItem(
@@ -6036,7 +6221,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                     senderName = cm.senderName.ifBlank { "伙伴" },
                     senderAvatar = cm.senderAvatar,
                     isSelf = isSelf,
-                    timestamp = cm.timestamp,
+                    timestamp = safeTs,
                     caption = cm.caption,
                     imageUrl = api.buildCachedMediaUrl(roomCode, cm.mediaId),
                     mediaId = cm.mediaId,
@@ -6052,14 +6237,14 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                     senderName = cm.senderName.ifBlank { "伙伴" },
                     senderAvatar = cm.senderAvatar,
                     isSelf = isSelf,
-                    timestamp = cm.timestamp,
+                    timestamp = safeTs,
                     caption = cm.caption,
                     mediaId = cm.mediaId,
                     fromCache = fromCache,
                     transfer = FileTransferInfo(
                         transferId = cm.id,
                         streamId = 0,
-                        fileName = cm.fileName ?: "voice_${cm.timestamp}.m4a",
+                        fileName = cm.fileName ?: "voice_${safeTs}.m4a",
                         fileSize = cm.fileSize ?: 0L,
                         mimeType = cm.mediaMime ?: "audio/mp4",
                         isImage = false,
@@ -6082,7 +6267,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                     senderName = cm.senderName.ifBlank { "伙伴" },
                     senderAvatar = cm.senderAvatar,
                     isSelf = isSelf,
-                    timestamp = cm.timestamp,
+                    timestamp = safeTs,
                     mediaId = cm.mediaId,
                     fromCache = fromCache,
                     transfer = FileTransferInfo(
@@ -6102,10 +6287,11 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
             }
 
             else -> {
-                val quote = if (!cm.replyToId.isNullOrBlank() && !cm.replyToPreview.isNullOrBlank()) {
-                    ReplyQuote(cm.replyToId, cm.replyToSender ?: "伙伴", cm.replyToPreview)
+                val decodedPreview = cm.replyToPreview?.let { ChatCrypto.decrypt(roomCode, roomPwd, it) }
+                val quote = if (!cm.replyToId.isNullOrBlank() && !decodedPreview.isNullOrBlank()) {
+                    ReplyQuote(cm.replyToId, cm.replyToSender ?: "伙伴", decodedPreview)
                 } else null
-                val decodedText = FormatUtils.decodeLegacySecret(cm.text)
+                val decodedText = ChatCrypto.decrypt(roomCode, roomPwd, cm.text)
                 val mentioned = !isSelf && isTextMentioningMe(decodedText)
                 ChatItem(
                     id = cm.id,
@@ -6114,7 +6300,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                     senderName = cm.senderName.ifBlank { "伙伴" },
                     senderAvatar = cm.senderAvatar,
                     isSelf = isSelf,
-                    timestamp = cm.timestamp,
+                    timestamp = safeTs,
                     text = decodedText,
                     replyTo = quote,
                     fromCache = fromCache,
@@ -6301,6 +6487,15 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         return inserted
     }
 
+    private fun showRoomPresenceNotice(text: String) {
+        presenceNoticeJob?.cancel()
+        _uiState.update { it.copy(roomPresenceNotice = text) }
+        presenceNoticeJob = viewModelScope.launch {
+            delay(2800L)
+            _uiState.update { it.copy(roomPresenceNotice = null) }
+        }
+    }
+
     private fun appendSystemMessage(text: String) {
         appendMessageIfAbsent(
             ChatItem(
@@ -6323,6 +6518,8 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private fun tearDownSession(stopService: Boolean) {
+        presenceNoticeJob?.cancel()
+        presenceNoticeJob = null
         draftIdleTypingJob?.cancel()
         draftIdleTypingJob = null
         typingTimeoutJobs.values.forEach { it.cancel() }

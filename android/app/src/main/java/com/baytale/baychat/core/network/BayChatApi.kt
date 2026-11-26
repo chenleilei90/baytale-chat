@@ -408,6 +408,16 @@ class BayChatApi(
         return "$wsBase/ws"
     }
 
+    fun buildAsrWebSocketUrl(): String {
+        val url = baseUrl()
+        val wsBase = when {
+            url.startsWith("https://", ignoreCase = true) -> "wss://" + url.removePrefix("https://")
+            url.startsWith("http://", ignoreCase = true) -> "ws://" + url.removePrefix("http://")
+            else -> "wss://$url"
+        }
+        return "$wsBase/ws/asr"
+    }
+
     private fun executeRaw(request: Request): String {
         okHttpClient.newCall(request).execute().use { resp ->
             val text = resp.body?.string().orEmpty()

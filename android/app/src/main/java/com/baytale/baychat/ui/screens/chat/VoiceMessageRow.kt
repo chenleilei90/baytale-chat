@@ -78,6 +78,7 @@ fun VoiceMessageRow(
     transcriptText: String? = null,
     isTranscribing: Boolean = false,
     onCollapseTranscript: () -> Unit = {},
+    onCopyTranscript: (String) -> Unit = {},
     onTogglePlayback: () -> Unit,
     onLongPress: (Rect) -> Unit,
     modifier: Modifier = Modifier,
@@ -295,15 +296,31 @@ fun VoiceMessageRow(
                         color = if (isTranscribing) colors.textSecondary else colors.textPrimary,
                     )
                     if (!isTranscribing) {
-                        Text(
-                            text = "收起",
-                            style = BayType.caption.copy(fontWeight = FontWeight.Medium),
-                            color = colors.textTertiary,
-                            modifier = Modifier
-                                .align(Alignment.End)
-                                .bayClickable { onCollapseTranscript() }
-                                .padding(horizontal = 2.dp),
-                        )
+                        Row(
+                            modifier = Modifier.align(Alignment.End),
+                            horizontalArrangement = Arrangement.spacedBy(BaySpacing.md),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            val cleanCopy = transcriptText?.trim().orEmpty()
+                            if (cleanCopy.isNotEmpty()) {
+                                Text(
+                                    text = "复制",
+                                    style = BayType.caption.copy(fontWeight = FontWeight.Medium),
+                                    color = colors.accent,
+                                    modifier = Modifier
+                                        .bayClickable { onCopyTranscript(cleanCopy) }
+                                        .padding(horizontal = 2.dp),
+                                )
+                            }
+                            Text(
+                                text = "收起",
+                                style = BayType.caption.copy(fontWeight = FontWeight.Medium),
+                                color = colors.textTertiary,
+                                modifier = Modifier
+                                    .bayClickable { onCollapseTranscript() }
+                                    .padding(horizontal = 2.dp),
+                            )
+                        }
                     }
                 }
             }

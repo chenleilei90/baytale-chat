@@ -26,12 +26,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.baytale.baychat.ui.theme.BayShapes
 import com.baytale.baychat.ui.theme.BaySpacing
@@ -58,22 +61,28 @@ fun BayTextField(
     error: String? = null,
     large: Boolean = false,
     enabled: Boolean = true,
+    containerColor: Color? = null,
+    focusedContainerColor: Color? = null,
+    minHeightDp: Dp = if (large) 52.dp else 48.dp,
+    verticalPadding: Dp = if (singleLine) 8.dp else 10.dp,
 ) {
     val colors = BayTheme.colors
     val interactionSource = remember { MutableInteractionSource() }
     val focused by interactionSource.collectIsFocusedAsState()
 
+    val baseBg = containerColor ?: colors.fill
+    val focusBg = focusedContainerColor ?: colors.fillStrong
     val containerBg by animateColorAsState(
-        targetValue = if (focused) colors.fillStrong else colors.fill,
+        targetValue = if (focused) focusBg else baseBg,
         animationSpec = tween(durationMillis = 150),
         label = "bayTextFieldBg",
     )
 
     val resolvedMaxLines = if (singleLine) 1 else maxLines.coerceAtLeast(1)
     val resolvedMinLines = if (singleLine) 1 else minLines.coerceIn(1, resolvedMaxLines)
-    val minHeight = if (large) 52.dp else 48.dp
     val textStyle = (if (large) BayType.headline else BayType.body).copy(
         color = colors.textPrimary,
+        platformStyle = PlatformTextStyle(includeFontPadding = false),
     )
 
     Column(modifier = modifier.fillMaxWidth()) {
@@ -98,15 +107,15 @@ fun BayTextField(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .heightIn(min = minHeight)
+                        .heightIn(min = minHeightDp)
                         .graphicsLayer { alpha = if (enabled) 1f else 0.55f }
                         .clip(BayShapes.smShape)
                         .background(containerBg)
                         .padding(
                             horizontal = BaySpacing.md,
-                            vertical = if (singleLine) 8.dp else BaySpacing.md,
+                            vertical = verticalPadding,
                         ),
-                    verticalAlignment = if (singleLine) Alignment.CenterVertically else Alignment.Top,
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
                     if (leadingIcon != null) {
                         Icon(
@@ -122,7 +131,7 @@ fun BayTextField(
 
                     Box(
                         modifier = Modifier.weight(1f),
-                        contentAlignment = if (singleLine) Alignment.CenterStart else Alignment.TopStart,
+                        contentAlignment = Alignment.CenterStart,
                     ) {
                         if (value.isEmpty() && placeholder.isNotEmpty()) {
                             Text(

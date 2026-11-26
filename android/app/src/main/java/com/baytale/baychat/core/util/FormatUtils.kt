@@ -70,8 +70,21 @@ object FormatUtils {
         return if (m > 0) "${m}m${s}s" else "${s}s"
     }
 
+    /**
+     * 归一化时间戳为 13 位毫秒：拦截 <= 0 或异常小值防止出现 1970 年时间，并兼容 10 位秒级时间戳。
+     */
+    fun normalizeEpochMs(ts: Long, fallbackMs: Long = System.currentTimeMillis()): Long {
+        return when {
+            ts <= 0L -> fallbackMs
+            ts in 1_000_000_000L..9_999_999_999L -> ts * 1000L
+            ts < 1_000_000_000L -> fallbackMs
+            else -> ts
+        }
+    }
+
     fun formatClock(timestampMs: Long): String {
-        return SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(timestampMs))
+        val safeTs = normalizeEpochMs(timestampMs)
+        return SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(safeTs))
     }
 
     fun formatExpiry(expiresAtMs: Long): String {

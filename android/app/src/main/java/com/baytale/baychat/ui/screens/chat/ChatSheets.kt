@@ -329,7 +329,7 @@ fun ImageViewer(
                     item = pageItem,
                     isCurrentPage = isCurrentPage,
                     imageHeaders = imageHeaders,
-                    onTap = { showOverlay = !showOverlay },
+                    onTap = onDismiss,
                     onActiveScaleChanged = { activeScale ->
                         if (isCurrentPage) {
                             currentPageScale = activeScale

@@ -33,6 +33,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -48,6 +49,7 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Forward
@@ -97,6 +99,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
@@ -996,12 +999,40 @@ fun ChatRoomScreen(
                                         voiceTranscriptText = state.voiceTranscripts[item.id],
                                         isVoiceTranscribing = item.id in state.transcribingMessageIds,
                                         onCollapseVoiceTranscript = { vm.collapseVoiceTranscript(item.id) },
+                                        onCopyVoiceTranscript = { copied ->
+                                            copyTextToClipboard(context, copied)
+                                            BayHaptic.confirm(view, state.prefs.hapticEnabled)
+                                            vm.showToast("已复制到剪贴板")
+                                        },
                                         onCopiedClip = { vm.showToast("已复制到剪贴板") },
                                     )
                                 }
                             }
                         }
                     }
+                }
+
+                // 顶部左上角进出房间漂浮提示（不插入聊天时间线）
+                androidx.compose.animation.AnimatedVisibility(
+                    visible = !state.roomPresenceNotice.isNullOrBlank(),
+                    enter = fadeIn(),
+                    exit = fadeOut(),
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(top = BaySpacing.md, start = BaySpacing.lg),
+                ) {
+                    Text(
+                        text = state.roomPresenceNotice.orEmpty(),
+                        style = BayType.caption,
+                        color = colors.textSecondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .shadow(elevation = 2.dp, shape = BayShapes.fullShape, clip = false)
+                            .clip(BayShapes.fullShape)
+                            .background(colors.surface.copy(alpha = 0.9f))
+                            .padding(horizontal = BaySpacing.md, vertical = 6.dp),
+                    )
                 }
 
                 // 顶部「有人@我」悬浮胶囊
@@ -1264,18 +1295,20 @@ fun ChatRoomScreen(
             }
         }
 
-        // 8. 新版微信 8.0+ 全屏按住说话与大弧形发送浮层（纯视觉遮罩穿透指针事件）
+        // 8. 新版微信 8.0+ 全屏按住说话与实时流式出字大弧形浮层（纯视觉遮罩穿透指针事件）
         VoiceRecordingOverlay(
             visible = state.isRecordingVoice,
             zone = voiceGestureZone,
             durationMs = state.voiceRecordDurationMs,
             amplitude = state.voiceAmplitude,
+            liveTranscribeText = state.voiceTranscribeText,
         )
 
-        // 8b. 新版微信同款全屏转文字确认浮层（绿气泡编辑 + 取消 / 发原语音 / 发送文字）
+        // 8b. 新版微信同款全屏转文字确认浮层（透明内联编辑绿气泡 + 取消 / 发原语音 / 发送文字）
         if (state.showVoiceTranscribePanel) {
             VoiceTranscribeOverlay(
                 text = state.voiceTranscribeText,
+                draftDurationMs = state.voiceDraftDurationMs,
                 hasDraftAudio = !state.voiceDraftAudioPath.isNullOrBlank(),
                 isTranscribing = state.isTranscribingDraft,
                 onTextChange = { vm.updateVoiceTranscribeText(it) },
@@ -1731,6 +1764,7 @@ private fun VoiceRecordingOverlay(
     zone: VoiceGestureZone,
     durationMs: Long,
     amplitude: Float,
+    liveTranscribeText: String,
 ) {
     val colors = BayTheme.colors
     val isCountingDown = durationMs >= 50_000L
@@ -1752,24 +1786,28 @@ private fun VoiceRecordingOverlay(
                 .background(Color.Black.copy(alpha = 0.62f))
                 .navigationBarsPadding(),
         ) {
-            // 1. 中央微信风格气泡（绿色常规声波 / 红色撤回 / 绿色高亮转文字预告）
+            // 1. 中央微信风格气泡（绿色常规声波 / 红色撤回 / 右滑「文」实时拉宽滚动出字）
             Column(
                 modifier = Modifier
                     .align(Alignment.Center)
                     .padding(bottom = 112.dp)
-                    .padding(horizontal = BaySpacing.xl),
+                    .padding(horizontal = BaySpacing.lg),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 val bubbleBg = if (isCancel) colors.danger else colors.wechatSelfBubble
                 val bubbleContentColor = if (isCancel) Color.White else colors.wechatSelfText
+                val bubbleModifier = if (isConvert) {
+                    Modifier.fillMaxWidth()
+                } else {
+                    Modifier.width(196.dp)
+                }
 
                 Column(
-                    modifier = Modifier
-                        .width(if (isConvert) 248.dp else 196.dp)
+                    modifier = bubbleModifier
                         .clip(BayShapes.lgShape)
                         .background(bubbleBg)
                         .padding(horizontal = BaySpacing.xl, vertical = BaySpacing.lg),
-                    horizontalAlignment = Alignment.CenterHorizontally,
+                    horizontalAlignment = if (isConvert) Alignment.Start else Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(BaySpacing.sm),
                 ) {
                     when {
@@ -1788,22 +1826,59 @@ private fun VoiceRecordingOverlay(
                         }
 
                         isConvert -> {
-                            Icon(
-                                imageVector = Icons.Rounded.Mic,
-                                contentDescription = "松开转为文字",
-                                tint = bubbleContentColor,
-                                modifier = Modifier.size(26.dp),
-                            )
-                            Text(
-                                text = "松开 转为文字",
-                                style = BayType.headline.copy(fontWeight = FontWeight.SemiBold),
-                                color = bubbleContentColor,
-                            )
-                            Text(
-                                text = "已录制 ${formatDurationMs(durationMs)} · 松手立即识别",
-                                style = BayType.caption,
-                                color = bubbleContentColor.copy(alpha = 0.78f),
-                            )
+                            val scrollState = rememberScrollState()
+                            LaunchedEffect(liveTranscribeText) {
+                                scrollState.scrollTo(scrollState.maxValue)
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 76.dp, max = 160.dp)
+                                    .verticalScroll(scrollState),
+                            ) {
+                                Text(
+                                    text = liveTranscribeText.ifBlank { "正在聆听，请继续说话..." },
+                                    style = BayType.body,
+                                    color = if (liveTranscribeText.isNotBlank()) {
+                                        bubbleContentColor
+                                    } else {
+                                        bubbleContentColor.copy(alpha = 0.56f)
+                                    },
+                                )
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    text = if (isCountingDown) "还可以说 $remSec 秒" else formatDurationMs(durationMs),
+                                    style = BayType.caption.copy(fontFamily = FontFamily.Monospace),
+                                    color = bubbleContentColor.copy(alpha = 0.72f),
+                                )
+                                // 右下角跳动的微缩动态声波柱
+                                Row(
+                                    modifier = Modifier.height(16.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                                ) {
+                                    val normAmp = amplitude.coerceIn(0f, 1f)
+                                    listOf(0.55f, 0.9f, 1.0f, 0.7f, 0.45f).forEachIndexed { idx, factor ->
+                                        val h by animateDpAsState(
+                                            targetValue = 4.dp + 12.dp * maxOf(0.18f, normAmp) * factor,
+                                            animationSpec = tween(durationMillis = 85),
+                                            label = "wxLiveBar_$idx",
+                                        )
+                                        Box(
+                                            modifier = Modifier
+                                                .width(2.5.dp)
+                                                .height(h)
+                                                .clip(BayShapes.fullShape)
+                                                .background(bubbleContentColor.copy(alpha = 0.85f)),
+                                        )
+                                    }
+                                }
+                            }
                         }
 
                         else -> {
@@ -1987,11 +2062,12 @@ private fun VoiceRecordingOverlay(
 
 /**
  * 新版微信同款语音转文字全屏确认浮层：
- * 居中微信绿识别结果气泡（支持直接编辑修正文字），底部「取消 / 发原语音 / 发送文字」三钮直达。
+ * 居中微信绿气泡内嵌透明底内联编辑框（无异色套框），底部「取消 / 发原语音（带秒数）/ 发送文字」三钮直达。
  */
 @Composable
 private fun VoiceTranscribeOverlay(
     text: String,
+    draftDurationMs: Long,
     hasDraftAudio: Boolean,
     isTranscribing: Boolean,
     onTextChange: (String) -> Unit,
@@ -2002,6 +2078,7 @@ private fun VoiceTranscribeOverlay(
 ) {
     val colors = BayTheme.colors
     val blankClick = remember { MutableInteractionSource() }
+    val draftSec = ((draftDurationMs + 500L) / 1000L).coerceIn(1L, 60L)
 
     Box(
         modifier = Modifier
@@ -2010,33 +2087,54 @@ private fun VoiceTranscribeOverlay(
             .clickable(interactionSource = blankClick, indication = null, onClick = {})
             .navigationBarsPadding(),
     ) {
-        // 中央大号微信绿转文字气泡（可点击文字区直接编辑）
+        // 中央大号微信绿转文字气泡（透明底内联编辑，点击文字区即可随时修改错别字）
         Column(
             modifier = Modifier
                 .align(Alignment.Center)
                 .fillMaxWidth()
-                .padding(horizontal = BaySpacing.xxl)
+                .padding(horizontal = BaySpacing.lg)
                 .padding(bottom = 96.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(BaySpacing.md),
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(BayShapes.lgShape)
                     .background(colors.wechatSelfBubble)
-                    .padding(BaySpacing.lg),
+                    .padding(horizontal = BaySpacing.xl, vertical = BaySpacing.lg),
                 verticalArrangement = Arrangement.spacedBy(BaySpacing.sm),
             ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 84.dp, max = 200.dp)
+                        .verticalScroll(rememberScrollState()),
+                ) {
+                    if (text.isEmpty()) {
+                        Text(
+                            text = if (isTranscribing) "正在完善最后断句标点..." else "未识别到内容，可直接点此输入文字",
+                            style = BayType.body,
+                            color = colors.wechatSelfText.copy(alpha = 0.52f),
+                        )
+                    }
+                    BasicTextField(
+                        value = text,
+                        onValueChange = onTextChange,
+                        textStyle = BayType.body.copy(color = colors.wechatSelfText),
+                        cursorBrush = SolidColor(colors.wechatSelfText),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
-                        text = if (isTranscribing) "正在转换为文字..." else "语音识别结果（可点击编辑）",
-                        style = BayType.caption.copy(fontWeight = FontWeight.SemiBold),
-                        color = colors.wechatSelfText.copy(alpha = 0.72f),
+                        text = if (isTranscribing) "收尾识别中..." else "点上方文字可直接修改",
+                        style = BayType.caption,
+                        color = colors.wechatSelfText.copy(alpha = 0.68f),
                     )
                     if (!isTranscribing && hasDraftAudio) {
                         Row(
@@ -2062,19 +2160,10 @@ private fun VoiceTranscribeOverlay(
                         }
                     }
                 }
-
-                BayTextField(
-                    value = text,
-                    onValueChange = onTextChange,
-                    placeholder = if (isTranscribing) "正在上传并识别语音内容，请稍候..." else "未识别到内容时可直接输入修改后发送",
-                    singleLine = false,
-                    maxLines = 6,
-                    modifier = Modifier.fillMaxWidth(),
-                )
             }
         }
 
-        // 底部微信式三段动作区：取消 / 发原语音 / 发送文字
+        // 底部微信式三段动作区：取消 / 发原语音 X″ / 发送文字
         Row(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
@@ -2130,7 +2219,7 @@ private fun VoiceTranscribeOverlay(
                         )
                     }
                     Text(
-                        text = "发原语音",
+                        text = "发原语音 ${draftSec}″",
                         style = BayType.caption,
                         color = Color.White.copy(alpha = 0.82f),
                     )
