@@ -113,7 +113,7 @@ class MainActivity : ComponentActivity() {
                             Manifest.permission.POST_NOTIFICATIONS,
                         )
                     if (permanentlyDenied) {
-                        permissionGuide = "需要通知权限" to "通知权限用于显示后台文件传输保活进度与新消息提醒，请前往系统设置开启。"
+                        permissionGuide = "需要通知权限" to "通知权限用于显示文件传输进度与新消息提醒，请前往系统设置开启。"
                     } else {
                         viewModel.showToast("已跳过通知权限，后续可在「我的 -> 消息与后台通知」中开启")
                     }

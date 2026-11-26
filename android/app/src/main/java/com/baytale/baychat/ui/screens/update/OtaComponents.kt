@@ -471,7 +471,7 @@ fun UpdateAvailableDialog(
                         }
                     } else {
                         Text(
-                            text = "支持断点续传、主备源切换、后台保活下载与 SHA-256 完整性校验。",
+                            text = "支持断点续传、主备源切换、后台静默下载与 SHA-256 完整性校验。",
                             style = BayType.caption,
                             color = colors.textSecondary,
                         )

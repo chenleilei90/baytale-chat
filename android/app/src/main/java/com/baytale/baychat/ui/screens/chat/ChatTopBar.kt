@@ -69,14 +69,14 @@ fun ChatTopBar(
             .fillMaxWidth()
             .background(colors.chatBg),
     ) {
-        // 顶部 P2PLink 守护服务运行与局域网保活状态条（实时联动当前信令状态，重连前夕柔和展示）
+        // 顶部状态条：实时展示局域网连接与消息收取状态
         val statusBarDotColor = if (room.wsConnected) colors.success else colors.accent
         val statusBarText = if (room.wsConnected) {
-            "BayChat 守护服务运行中 · 局域网直连就绪"
+            "局域网直连就绪"
         } else {
-            "BayChat 守护服务运行中 · 正在同步消息"
+            "正在同步消息..."
         }
-        val statusBarBadge = if (room.wsConnected) "已保活" else "收取中"
+        val statusBarBadge = if (room.wsConnected) "已连接" else "收取中"
         val statusBarBadgeColor = if (room.wsConnected) colors.success else colors.accent
         Row(
             modifier = Modifier

@@ -84,7 +84,7 @@ class TransferForegroundService : Service() {
             val nm = getSystemService(NotificationManager::class.java)
             val note = NotificationCompat.Builder(this, IncomingNotificationHelper.CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_stat_baychat)
-                .setContentTitle("湾聊后台保活已暂停")
+                .setContentTitle("湾聊消息与传输服务已暂停")
                 .setContentText("系统限制单日后台直连时长，点击回到湾聊继续传输")
                 .setAutoCancel(true)
                 .setContentIntent(pi)
@@ -170,15 +170,15 @@ class TransferForegroundService : Service() {
 
         fun ensureChannel(context: Context) {
             val nm = context.getSystemService(NotificationManager::class.java) ?: return
-            // 清理旧版 LOW 渠道并切换至 MIN 静默通道：满足保活前提下隐藏状态栏图标并折叠沉底
+            // 清理旧版 LOW 渠道并切换至 MIN 静默通道：隐藏状态栏图标并折叠沉底
             runCatching { nm.deleteNotificationChannel(LEGACY_CHANNEL_ID) }
             if (nm.getNotificationChannel(CHANNEL_ID) == null) {
                 val channel = NotificationChannel(
                     CHANNEL_ID,
-                    "P2P 文件传输与房间保活",
+                    "P2P 文件传输与消息提醒",
                     NotificationManager.IMPORTANCE_MIN,
                 ).apply {
-                    description = "在切后台或锁屏时静默维持房间连接并显示传输进度"
+                    description = "在后台显示文件传输进度与消息连接状态"
                     setShowBadge(false)
                     setSound(null, null)
                     enableVibration(false)

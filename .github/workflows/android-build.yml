@@ -66,10 +66,14 @@ jobs:
 
       - name: Run Kotlin unit tests
         working-directory: android
+        env:
+          JPUSH_APPKEY: ${{ secrets.JPUSH_APPKEY }}
         run: gradle testDebugUnitTest --stacktrace
 
       - name: Build Debug APK, Release APK & Google Play AAB
         working-directory: android
+        env:
+          JPUSH_APPKEY: ${{ secrets.JPUSH_APPKEY }}
         run: gradle assembleDebug assembleRelease bundleRelease --stacktrace
 
       - name: Ensure V1+V2+V3 full signing and verify with apksigner

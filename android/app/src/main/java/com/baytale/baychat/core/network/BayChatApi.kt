@@ -412,6 +412,43 @@ class BayChatApi(
 
     fun buildInviteUrl(code: String): String = "${baseUrl()}/?room=${encodePath(code)}"
 
+    suspend fun registerPushDevice(
+        roomCode: String,
+        clientId: String,
+        peerId: String,
+        registrationId: String,
+        brand: String,
+    ) = withContext(Dispatchers.IO) {
+        val bodyJson = buildJsonObject {
+            put("roomCode", roomCode)
+            put("clientId", clientId)
+            put("peerId", peerId)
+            put("registrationId", registrationId)
+            put("platform", "android")
+            put("brand", brand)
+        }.toString()
+        val req = Request.Builder()
+            .url("${baseUrl()}/api/push/register")
+            .post(bodyJson.toRequestBody(jsonMediaType))
+            .build()
+        executeRaw(req)
+    }
+
+    suspend fun unregisterPushDevice(
+        roomCode: String,
+        clientId: String,
+    ) = withContext(Dispatchers.IO) {
+        val bodyJson = buildJsonObject {
+            put("roomCode", roomCode)
+            put("clientId", clientId)
+        }.toString()
+        val req = Request.Builder()
+            .url("${baseUrl()}/api/push/unregister")
+            .post(bodyJson.toRequestBody(jsonMediaType))
+            .build()
+        executeRaw(req)
+    }
+
     fun buildWebSocketUrl(): String {
         val url = baseUrl()
         val wsBase = when {
