@@ -396,6 +396,8 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     // 系统网络状态回调（断网恢复秒触发 WS/ICE 重连）
     private var connectivityManager: ConnectivityManager? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    @Volatile
+    private var networkLostInForeground: Boolean = false
 
     init {
         cleanupExpiredReceivedMedia()
@@ -497,15 +499,17 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
             val cb = object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
                     val wasOffline = _uiState.value.isNetworkOffline
+                    val notifyRecovery = wasOffline && networkLostInForeground
+                    networkLostInForeground = false
                     _uiState.update {
                         it.copy(
                             isNetworkOffline = false,
                             nearbyNetworkType = detectNearbyNetworkType(),
                         )
                     }
-                    signaling?.notifyNetworkAvailable()
+                    signaling?.notifyNetworkAvailable(forceReconnectIfStale = true)
                     mesh?.refreshIceIfNeeded()
-                    if (wasOffline) {
+                    if (notifyRecovery) {
                         viewModelScope.launch(Dispatchers.Main.immediate) {
                             showToast("网络已恢复，已重新连接")
                         }
@@ -514,6 +518,9 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
 
                 override fun onLost(network: Network) {
                     val offlineNow = !isCurrentlyOnline(cm)
+                    if (offlineNow) {
+                        networkLostInForeground = !isAppInBackgroundNow()
+                    }
                     _uiState.update {
                         it.copy(
                             isNetworkOffline = offlineNow,
@@ -620,9 +627,10 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
             if (!fgState.roomMinimized) {
                 IncomingNotificationHelper.cancelMessageNotification(appContext)
             }
-            // 切回前台时立即探活或秒重连 WebSocket，同时确保前台保活通知在线
-            signaling?.notifyNetworkAvailable()
-            refreshForegroundBanner()
+            // 切回前台时若通道曾长时间静默则直接毫秒级重建，并刷新 ICE 与前台保活通知
+            signaling?.notifyNetworkAvailable(forceReconnectIfStale = true)
+            mesh?.refreshIceIfNeeded()
+            refreshForegroundBanner(allowStartService = true)
         }
         if (!_uiState.value.privacyAccepted) return
         startNearbyPolling()
@@ -662,7 +670,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                     at = System.currentTimeMillis(),
                 )
             )
-            refreshForegroundBanner()
+            refreshForegroundBanner(allowStartService = false)
         }
         _uiState.update { it.copy(isAppForeground = false) }
         stopNearbyPolling()
@@ -744,6 +752,11 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     fun markNotificationAsked() {
         store.setNotificationAsked(true)
         _uiState.update { it.copy(prefs = it.prefs.copy(notificationAsked = true)) }
+    }
+
+    fun markBatteryOptAsked() {
+        store.setBatteryOptAsked(true)
+        _uiState.update { it.copy(prefs = it.prefs.copy(batteryOptAsked = true)) }
     }
 
     fun markCameraPermAsked() {
@@ -3131,7 +3144,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    fun refreshForegroundBanner() {
+    fun refreshForegroundBanner(allowStartService: Boolean = true) {
         val room = _uiState.value.activeRoom ?: return
         lastForegroundBannerPercent = -1
         lastForegroundBannerTitle = ""
@@ -3148,6 +3161,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
             appContext,
             title = "湾聊房间 #${room.roomCode}",
             text = statusText,
+            allowStartService = allowStartService,
         )
     }
 

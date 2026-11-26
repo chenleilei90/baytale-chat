@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
@@ -180,6 +181,28 @@ class MainActivity : ComponentActivity() {
                         notificationPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                     } else {
                         viewModel.markNotificationAsked()
+                    }
+                }
+            }
+
+            // 进房后按需拉起一次系统「允许后台无限制运行」白名单弹窗（错开通知权限弹窗避免冲突）
+            LaunchedEffect(uiState.activeRoom?.roomCode, uiState.prefs.batteryOptAsked, uiState.prefs.notificationAsked) {
+                val roomReady = uiState.activeRoom != null
+                val notifSettled = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU || uiState.prefs.notificationAsked
+                if (roomReady && !uiState.prefs.batteryOptAsked && notifSettled) {
+                    delay(500L)
+                    val pm = getSystemService(POWER_SERVICE) as? PowerManager
+                    val ignoring = pm?.isIgnoringBatteryOptimizations(packageName) == true
+                    viewModel.markBatteryOptAsked()
+                    if (!ignoring) {
+                        runCatching {
+                            startActivity(
+                                Intent(
+                                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                    Uri.parse("package:$packageName"),
+                                )
+                            )
+                        }
                     }
                 }
             }

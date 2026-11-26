@@ -38,6 +38,7 @@ data class AppUserPrefs(
     val acceptClipShare: Boolean = true,
     val onboardingDone: Boolean = false,
     val notificationAsked: Boolean = false,
+    val batteryOptAsked: Boolean = false,
     val minimizeHintShown: Boolean = false,
     val cameraPermAsked: Boolean = false,
     val audioPermAsked: Boolean = false,
@@ -123,6 +124,7 @@ class AppPrefsStore(context: Context) {
             acceptClipShare = sp.getBoolean(KEY_ACCEPT_CLIP_SHARE, true),
             onboardingDone = sp.getBoolean(KEY_ONBOARDING_DONE, false),
             notificationAsked = sp.getBoolean(KEY_NOTIFICATION_ASKED, false),
+            batteryOptAsked = sp.getBoolean(KEY_BATTERY_OPT_ASKED, false),
             minimizeHintShown = sp.getBoolean(KEY_MINIMIZE_HINT_SHOWN, false),
             cameraPermAsked = sp.getBoolean(KEY_CAMERA_PERM_ASKED, false),
             audioPermAsked = sp.getBoolean(KEY_AUDIO_PERM_ASKED, false),
@@ -146,6 +148,7 @@ class AppPrefsStore(context: Context) {
             .putBoolean(KEY_ACCEPT_CLIP_SHARE, prefs.acceptClipShare)
             .putBoolean(KEY_ONBOARDING_DONE, prefs.onboardingDone)
             .putBoolean(KEY_NOTIFICATION_ASKED, prefs.notificationAsked)
+            .putBoolean(KEY_BATTERY_OPT_ASKED, prefs.batteryOptAsked)
             .putBoolean(KEY_MINIMIZE_HINT_SHOWN, prefs.minimizeHintShown)
             .putBoolean(KEY_CAMERA_PERM_ASKED, prefs.cameraPermAsked)
             .putBoolean(KEY_AUDIO_PERM_ASKED, prefs.audioPermAsked)
@@ -194,6 +197,11 @@ class AppPrefsStore(context: Context) {
 
     fun setNotificationAsked(asked: Boolean) {
         sp.edit().putBoolean(KEY_NOTIFICATION_ASKED, asked).apply()
+    }
+
+    // 记录「允许后台无限制运行」系统白名单引导已发起
+    fun setBatteryOptAsked(asked: Boolean) {
+        sp.edit().putBoolean(KEY_BATTERY_OPT_ASKED, asked).apply()
     }
 
     // 记录「收起房间」一次性引导提示已展示
@@ -586,6 +594,7 @@ class AppPrefsStore(context: Context) {
         private const val KEY_ACCEPT_CLIP_SHARE = "accept_clip_share_v1"
         private const val KEY_ONBOARDING_DONE = "onboarding_done_v1"
         private const val KEY_NOTIFICATION_ASKED = "notification_asked_v1"
+        private const val KEY_BATTERY_OPT_ASKED = "battery_opt_asked"
         private const val KEY_MINIMIZE_HINT_SHOWN = "minimize_hint_shown_v1"
         private const val KEY_CAMERA_PERM_ASKED = "camera_perm_asked_v1"
         private const val KEY_AUDIO_PERM_ASKED = "audio_perm_asked_v1"

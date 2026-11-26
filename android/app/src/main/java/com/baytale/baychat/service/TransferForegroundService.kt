@@ -211,7 +211,13 @@ class TransferForegroundService : Service() {
             return builder.build()
         }
 
-        fun updateStatus(context: Context, title: String, text: String, progress: Int = -1) {
+        fun updateStatus(
+            context: Context,
+            title: String,
+            text: String,
+            progress: Int = -1,
+            allowStartService: Boolean = true,
+        ) {
             val appCtx = context.applicationContext
             // 服务已在运行时直接刷新通知栏，避免大文件传输产生高频 startForegroundService IPC 风暴
             if (isServiceRunning.get()) {
@@ -221,6 +227,7 @@ class TransferForegroundService : Service() {
                     return
                 }
             }
+            if (!allowStartService) return
             runCatching {
                 val intent = Intent(appCtx, TransferForegroundService::class.java).apply {
                     action = ACTION_UPDATE

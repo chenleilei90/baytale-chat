@@ -84,8 +84,8 @@ class SignalingClient(
         openSocket()
     }
 
-    // B17：系统网络恢复时清零退避计数；仅在完成 join 握手后发送 ping 探活，避免抢先于首条 join 触发 INVALID_JOIN
-    fun notifyNetworkAvailable() {
+    // B17：系统网络恢复或切回前台时清零退避计数；半开死连接直接毫秒级重建，已连接则 1.2s 快速探活
+    fun notifyNetworkAvailable(forceReconnectIfStale: Boolean = false) {
         if (closedManually.get()) return
         reconnectAttempts = 0
         val currentWs = webSocket
@@ -93,12 +93,21 @@ class SignalingClient(
             reconnectJob?.cancel()
             reconnectJob = null
             openSocket()
-        } else if (!joinedReady.get()) {
-            // 正在建立 join 握手中，等待握手超时若仍无响应再重建连接
-            val checkStartAt = System.currentTimeMillis()
+            return
+        }
+        val idleMs = System.currentTimeMillis() - lastServerActivityAt
+        if (forceReconnectIfStale && idleMs > 15_000L) {
             probeJob?.cancel()
+            probeJob = null
+            openSocket()
+            return
+        }
+        if (!joinedReady.get()) {
+            // 正在建立 join 握手中，若已有探活任务运行则不重复重置计时
+            if (probeJob?.isActive == true) return
+            val checkStartAt = System.currentTimeMillis()
             probeJob = scope.launch {
-                delay(3_000L)
+                delay(1_500L)
                 if (!closedManually.get() && !joinedReady.get() &&
                     this@SignalingClient.webSocket === currentWs && lastServerActivityAt < checkStartAt
                 ) {
@@ -106,15 +115,15 @@ class SignalingClient(
                 }
             }
         } else {
+            if (probeJob?.isActive == true) return
             val probeSentAt = System.currentTimeMillis()
             val sent = sendRawImmediate(currentWs, SignalEnvelope(type = "ping"))
             if (!sent) {
                 openSocket()
                 return
             }
-            probeJob?.cancel()
             probeJob = scope.launch {
-                delay(3_000L)
+                delay(1_200L)
                 if (!closedManually.get() && this@SignalingClient.webSocket === currentWs && lastServerActivityAt < probeSentAt) {
                     openSocket()
                 }
@@ -126,7 +135,7 @@ class SignalingClient(
     private fun openSocket() {
         if (closedManually.get()) return
         joinedReady.set(false)
-        cleanupSocketOnly()
+        cleanupSocketOnly(graceful = false)
 
         val request = Request.Builder().url(wsUrl).build()
         val ws = okHttpClient.newWebSocket(
@@ -314,7 +323,7 @@ class SignalingClient(
         joinedReady.set(false)
         outboundQueue.clear()
         stopTimers()
-        cleanupSocketOnly()
+        cleanupSocketOnly(graceful = true)
     }
 
     private fun startHeartbeat() {
@@ -343,9 +352,14 @@ class SignalingClient(
         probeJob = null
     }
 
-    private fun cleanupSocketOnly() {
+    private fun cleanupSocketOnly(graceful: Boolean = false) {
         val old = webSocket
         webSocket = null
-        runCatching { old?.close(1000, "client_close") }
+        if (graceful) {
+            runCatching { old?.close(1000, "client_close") }
+        } else {
+            // 重连重建时直接 cancel 立即释放僵死连接，不等待四次挥手超时
+            runCatching { old?.cancel() }
+        }
     }
 }

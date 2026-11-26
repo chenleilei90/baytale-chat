@@ -7,6 +7,8 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- 允许申请系统电池优化白名单，避免国产机型切后台冻结网络与断流 -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <!-- 前台保活传输服务与 Android 13+ 通知权限 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
