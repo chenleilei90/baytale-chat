@@ -130,6 +130,11 @@ export const PickupSendModal: React.FC<PickupSendModalProps> = ({
       setErrorText(`总大小超过单次取件码上限 ${maxTotalMB}MB`);
       return;
     }
+    const cleanPwd = password.trim();
+    if (cleanPwd && !/^\d{5,}$/.test(cleanPwd)) {
+      setErrorText('取件密码至少输入 5 位数字（留空免密）');
+      return;
+    }
 
     setUploading(true);
     try {
@@ -438,10 +443,11 @@ export const PickupSendModal: React.FC<PickupSendModalProps> = ({
               <input
                 className="field-input with-prefix"
                 type="password"
+                inputMode="numeric"
                 disabled={uploading}
                 value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="可选：设置取件密码（留空免密）"
+                onChange={(e) => setPassword(e.target.value.replace(/\D/g, '').slice(0, 20))}
+                placeholder="可选：取件密码（至少 5 位数字，留空免密）"
               />
             </div>
 

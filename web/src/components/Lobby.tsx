@@ -431,6 +431,10 @@ export const Lobby: React.FC<LobbyProps> = ({
     if (submitting || randomJoining) return;
     setErrorText('');
     const cleanPwd = roomPassword.trim();
+    if (cleanPwd && !/^\d{5,}$/.test(cleanPwd)) {
+      setErrorText('新建房间密码至少输入 5 位数字（留空免密）');
+      return;
+    }
     const maxLimit = serverConfig?.maxRoomPeers || 6;
     setSubmitting(true);
     try {
@@ -523,8 +527,13 @@ export const Lobby: React.FC<LobbyProps> = ({
   const handleConfirmCreateFixedRoom = async () => {
     const code = confirmCreateCode;
     if (!code) return;
-    setConfirmCreateCode(null);
     const cleanPwd = roomPassword.trim();
+    if (cleanPwd && !/^\d{5,}$/.test(cleanPwd)) {
+      setConfirmCreateCode(null);
+      setErrorText('新建房间密码至少输入 5 位数字（留空免密）');
+      return;
+    }
+    setConfirmCreateCode(null);
     const maxLimit = serverConfig?.maxRoomPeers || 6;
     setSubmitting(true);
     try {
@@ -1222,7 +1231,7 @@ export const Lobby: React.FC<LobbyProps> = ({
                           </div>
 
                           <div className="lobby-field-group">
-                            <span className="lobby-field-label">访问密码（可选）</span>
+                            <span className="lobby-field-label">访问密码（可选，至少 5 位数字）</span>
                             <div className="input-group">
                               <span className="input-prefix-icon">
                                 <Lock size={14} aria-hidden="true" />
@@ -1230,12 +1239,13 @@ export const Lobby: React.FC<LobbyProps> = ({
                               <input
                                 className="field-input with-prefix"
                                 type="password"
+                                inputMode="numeric"
                                 value={roomPassword}
                                 onChange={(e) => {
-                                  setRoomPassword(e.target.value);
+                                  setRoomPassword(e.target.value.replace(/\D/g, '').slice(0, 20));
                                   setErrorText('');
                                 }}
-                                placeholder="留空表示免密，凭口令进入"
+                                placeholder="至少 5 位数字，留空表示免密进入"
                               />
                             </div>
                           </div>
