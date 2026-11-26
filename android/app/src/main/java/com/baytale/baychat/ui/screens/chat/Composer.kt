@@ -85,6 +85,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
@@ -116,6 +117,7 @@ import com.baytale.baychat.ui.theme.BayTheme
 import com.baytale.baychat.ui.theme.BayType
 import java.text.BreakIterator
 import kotlin.coroutines.cancellation.CancellationException
+import kotlin.math.hypot
 
 // 新版微信式按住说话三段手势区域：松开发送 / 上滑左取消 / 上滑右转文字
 enum class VoiceGestureZone {
@@ -175,7 +177,9 @@ fun Composer(
     val latestIsRecording by rememberUpdatedState(state.isRecordingVoice)
     val latestHapticEnabled by rememberUpdatedState(state.prefs.hapticEnabled)
     val latestOnZoneChanged by rememberUpdatedState(onVoiceZoneChanged)
+    val latestInputEmpty by rememberUpdatedState(inputText.isEmpty())
     val upThresholdPx = remember(density) { with(density) { 72.dp.toPx() } }
+    val touchSlopPx = remember(density) { with(density) { 16.dp.toPx() } }
 
     // 1. 多文件选择器（SAF 零权限）
     val filePicker = rememberLauncherForActivityResult(
@@ -559,30 +563,135 @@ fun Composer(
                     )
                 }
             } else {
-                BayTextField(
-                    value = inputText,
-                    onValueChange = { next ->
-                        onInputTextChange(next)
-                        vm.updateDraft(roomCode, next)
-                        vm.onDraftTypingChanged(next.isNotBlank())
-                    },
-                    placeholder = "输入消息...",
-                    singleLine = false,
-                    maxLines = 4,
-                    containerColor = colors.wechatPeerBubble,
-                    focusedContainerColor = colors.wechatPeerBubble,
-                    minHeightDp = 44.dp,
-                    verticalPadding = 10.dp,
+                // 文字输入框：空内容时支持短按弹键盘输入、长按（>=280ms）直接触发流式语音转文字
+                Box(
                     modifier = Modifier
                         .weight(1f)
-                        .focusRequester(inputFocusRequester)
-                        .onFocusChanged { focusState ->
-                            if (focusState.isFocused) {
-                                if (showAttachmentPanel) onShowAttachmentPanelChange(false)
-                                if (showEmojiPanel) onShowEmojiPanelChange(false)
+                        .pointerInput(upThresholdPx, touchSlopPx) {
+                            awaitEachGesture {
+                                if (!latestInputEmpty || latestIsRecording) return@awaitEachGesture
+                                val down = awaitFirstDown(
+                                    requireUnconsumed = false,
+                                    pass = PointerEventPass.Initial,
+                                )
+                                if (!latestInputEmpty || latestIsRecording) return@awaitEachGesture
+
+                                val earlyExit = withTimeoutOrNull(280L) {
+                                    while (true) {
+                                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                                        val change = event.changes.firstOrNull { it.id == down.id }
+                                            ?: return@withTimeoutOrNull true
+                                        if (!change.pressed) return@withTimeoutOrNull true
+                                        val dist = hypot(
+                                            (change.position.x - down.position.x).toDouble(),
+                                            (change.position.y - down.position.y).toDouble(),
+                                        ).toFloat()
+                                        if (dist > touchSlopPx) return@withTimeoutOrNull true
+                                    }
+                                    @Suppress("UNREACHABLE_CODE")
+                                    true
+                                }
+                                if (earlyExit != null) return@awaitEachGesture
+
+                                val granted = ContextCompat.checkSelfPermission(
+                                    context,
+                                    Manifest.permission.RECORD_AUDIO,
+                                ) == PackageManager.PERMISSION_GRANTED
+                                if (!granted) {
+                                    audioPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                    return@awaitEachGesture
+                                }
+
+                                focusManager.clearFocus()
+                                keyboardController?.hide()
+                                onShowAttachmentPanelChange(false)
+                                onShowEmojiPanelChange(false)
+                                BayHaptic.heavy(haptic, latestHapticEnabled)
+                                isPressingVoice = true
+                                voiceZone = VoiceGestureZone.CONVERT_TEXT
+                                latestOnZoneChanged(VoiceGestureZone.CONVERT_TEXT)
+
+                                val started = vm.startVoiceRecording()
+                                if (!started) {
+                                    isPressingVoice = false
+                                    voiceZone = VoiceGestureZone.SEND
+                                    latestOnZoneChanged(VoiceGestureZone.SEND)
+                                    return@awaitEachGesture
+                                }
+                                vm.onVoiceEnterConvertZone()
+
+                                try {
+                                    while (true) {
+                                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                                        val change = event.changes.firstOrNull { it.id == down.id }
+                                        if (change == null) {
+                                            if (latestIsRecording) {
+                                                vm.cancelVoiceRecording()
+                                            }
+                                            break
+                                        }
+                                        if (!change.pressed) {
+                                            change.consume()
+                                            if (voiceZone == VoiceGestureZone.CANCEL) {
+                                                if (latestIsRecording) {
+                                                    vm.cancelVoiceRecording()
+                                                }
+                                            } else if (latestIsRecording) {
+                                                vm.finishVoiceGestureToTranscribe()
+                                            }
+                                            break
+                                        }
+                                        val dyUp = down.position.y - change.position.y
+                                        val nextZone = if (dyUp > upThresholdPx && change.position.x < size.width * 0.5f) {
+                                            VoiceGestureZone.CANCEL
+                                        } else {
+                                            VoiceGestureZone.CONVERT_TEXT
+                                        }
+                                        if (nextZone != voiceZone) {
+                                            voiceZone = nextZone
+                                            latestOnZoneChanged(nextZone)
+                                            BayHaptic.tap(haptic, latestHapticEnabled)
+                                        }
+                                        change.consume()
+                                    }
+                                } catch (e: CancellationException) {
+                                    if (latestIsRecording) {
+                                        vm.cancelVoiceRecording()
+                                    }
+                                    throw e
+                                } finally {
+                                    isPressingVoice = false
+                                    voiceZone = VoiceGestureZone.SEND
+                                    latestOnZoneChanged(VoiceGestureZone.SEND)
+                                }
                             }
                         },
-                )
+                ) {
+                    BayTextField(
+                        value = inputText,
+                        onValueChange = { next ->
+                            onInputTextChange(next)
+                            vm.updateDraft(roomCode, next)
+                            vm.onDraftTypingChanged(next.isNotBlank())
+                        },
+                        placeholder = "点击输入，长按转文字",
+                        singleLine = false,
+                        maxLines = 4,
+                        containerColor = colors.wechatPeerBubble,
+                        focusedContainerColor = colors.wechatPeerBubble,
+                        minHeightDp = 44.dp,
+                        verticalPadding = 10.dp,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .focusRequester(inputFocusRequester)
+                            .onFocusChanged { focusState ->
+                                if (focusState.isFocused) {
+                                    if (showAttachmentPanel) onShowAttachmentPanelChange(false)
+                                    if (showEmojiPanel) onShowEmojiPanelChange(false)
+                                }
+                            },
+                    )
+                }
             }
 
             // 表情按钮（仅键盘文本模式下展示，与软键盘和附件面板严格互斥）
