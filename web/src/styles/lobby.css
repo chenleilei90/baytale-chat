@@ -1803,7 +1803,9 @@
   height: 100%;
   display: flex;
   overflow: hidden;
-  background: var(--bg);
+  background:
+    radial-gradient(60% 38% at 55% -10%, rgba(20, 184, 166, 0.055), transparent 72%),
+    var(--bg);
 }
 
 .workspace-rail {
@@ -1816,6 +1818,22 @@
   gap: 14px;
   border-right: 0.5px solid var(--separator);
   overflow-y: auto;
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
+  transition: width 260ms var(--ease-spring), padding 260ms var(--ease-spring), opacity 180ms ease, border-color 180ms ease;
+}
+
+@media (min-width: 881px) {
+  .workspace-rail.collapsed {
+    width: 0 !important;
+    min-width: 0;
+    padding-left: 0;
+    padding-right: 0;
+    border-right-width: 0;
+    opacity: 0;
+    overflow: hidden;
+    pointer-events: none;
+  }
 }
 
 .workspace-rail-brand {
@@ -1851,12 +1869,13 @@
   font-weight: 600;
   color: var(--text-secondary);
   cursor: pointer;
-  transition: background-color 140ms ease, color 140ms ease, transform 100ms ease;
+  transition: background-color 160ms ease, color 160ms ease, transform 180ms var(--ease-spring);
 }
 
 .workspace-rail-item:hover {
   background: var(--fill);
   color: var(--text-primary);
+  transform: translateX(2px);
 }
 
 .workspace-rail-item.active {
@@ -1993,7 +2012,9 @@
 .workspace-desktop-topbar {
   height: 60px;
   flex-shrink: 0;
-  background: var(--surface);
+  background: color-mix(in srgb, var(--surface) 84%, transparent);
+  backdrop-filter: blur(18px) saturate(160%);
+  -webkit-backdrop-filter: blur(18px) saturate(160%);
   border-bottom: 0.5px solid var(--separator);
   padding: 0 clamp(16px, 2.4vw, 36px);
   display: flex;
@@ -2004,7 +2025,7 @@
 
 .workspace-desktop-topbar-left {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 12px;
   min-width: 0;
 }
@@ -2044,6 +2065,9 @@
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
+  scroll-behavior: smooth;
   padding: clamp(16px, 2vw, 28px) clamp(16px, 2.4vw, 36px) 52px;
 }
 
@@ -2346,8 +2370,13 @@ html[data-appearance='dark'][data-accent='geek'] .btn-jelly {
   align-items: stretch;
 }
 
+.p2p-lobby-workbench.no-right {
+  grid-template-columns: minmax(220px, 3fr) minmax(0, 9fr);
+}
+
 @media (max-width: 1200px) {
-  .p2p-lobby-workbench {
+  .p2p-lobby-workbench,
+  .p2p-lobby-workbench.no-right {
     grid-template-columns: minmax(220px, 3fr) minmax(0, 7fr);
   }
   .p2p-lobby-workbench .p2p-col-right {
@@ -2356,7 +2385,8 @@ html[data-appearance='dark'][data-accent='geek'] .btn-jelly {
 }
 
 @media (max-width: 880px) {
-  .p2p-lobby-workbench {
+  .p2p-lobby-workbench,
+  .p2p-lobby-workbench.no-right {
     grid-template-columns: minmax(0, 1fr);
     min-height: auto;
   }
@@ -2545,9 +2575,15 @@ html[data-appearance='dark'][data-accent='geek'] .p2p-node-card {
   padding: 13px 14px;
   background: var(--fill);
   border: 1px solid var(--separator);
+  box-shadow: var(--surface-highlight);
   display: flex;
   flex-direction: column;
   gap: 8px;
+  transition: transform 180ms var(--ease-spring), border-color 160ms ease, box-shadow 180ms ease;
+}
+.p2p-transfer-item:hover {
+  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--separator));
 }
 
 .p2p-transfer-head {

@@ -27,6 +27,10 @@ import {
   Lock,
   Package,
   Palette,
+  PanelLeftClose,
+  PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
   Pin,
   Plus,
   Radio,
@@ -195,6 +199,45 @@ export const Lobby: React.FC<LobbyProps> = ({
   onToast,
 }) => {
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('quick');
+  const [railOpen, setRailOpen] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('baychat_lobby_rail_open') !== '0';
+    } catch {
+      return true;
+    }
+  });
+  const [lobbyMonitorOpen, setLobbyMonitorOpen] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('baychat_lobby_right_open') !== '0';
+    } catch {
+      return true;
+    }
+  });
+
+  // 切换大厅左侧导航栏与右侧监控栏并持久化偏好
+  const handleToggleRail = () => {
+    setRailOpen((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('baychat_lobby_rail_open', next ? '1' : '0');
+      } catch {
+        // 忽略存储限制
+      }
+      return next;
+    });
+  };
+
+  const handleToggleLobbyMonitor = () => {
+    setLobbyMonitorOpen((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('baychat_lobby_right_open', next ? '1' : '0');
+      } catch {
+        // 忽略存储限制
+      }
+      return next;
+    });
+  };
 
   // 快传工作台：房间进入 / 创建状态
   const [roomInput, setRoomInput] = useState(initialJoinCode || '');
@@ -887,8 +930,8 @@ export const Lobby: React.FC<LobbyProps> = ({
 
   return (
     <div className="workspace-shell" onClick={() => settingsPopoverOpen && setSettingsPopoverOpen(false)}>
-      {/* 桌面端 248px 左侧导航栏 */}
-      <aside className="workspace-rail" aria-label="主功能导航">
+      {/* 桌面端比例左侧导航栏（支持一键收起） */}
+      <aside className={`workspace-rail ${!railOpen ? 'collapsed' : ''}`} aria-label="主功能导航">
         <div className="workspace-rail-brand">
           <div className="brand-mark">
             <Send size={17} strokeWidth={2.3} aria-hidden="true" />
@@ -976,10 +1019,39 @@ export const Lobby: React.FC<LobbyProps> = ({
       <div className="workspace-content-col">
         <header className="workspace-desktop-topbar">
           <div className="workspace-desktop-topbar-left">
+            <button
+              type="button"
+              className="btn btn-glass btn-icon"
+              onClick={handleToggleRail}
+              title={railOpen ? '收起左侧导航栏' : '展开左侧导航栏'}
+              aria-label={railOpen ? '收起左侧导航栏' : '展开左侧导航栏'}
+            >
+              {railOpen ? (
+                <PanelLeftClose size={16} aria-hidden="true" />
+              ) : (
+                <PanelLeftOpen size={16} aria-hidden="true" />
+              )}
+            </button>
             <h1 className="workspace-desktop-title">{topbarMeta[activeTab].title}</h1>
             <span className="workspace-desktop-sub">{topbarMeta[activeTab].subtitle}</span>
           </div>
           <div className="workspace-desktop-topbar-actions">
+            {activeTab === 'quick' && (
+              <button
+                type="button"
+                className={`btn btn-sm ${lobbyMonitorOpen ? 'btn-soft' : 'btn-glass'}`}
+                onClick={handleToggleLobbyMonitor}
+                title={lobbyMonitorOpen ? '收起右侧监控面板' : '展开右侧监控面板'}
+                aria-label={lobbyMonitorOpen ? '收起右侧监控面板' : '展开右侧监控面板'}
+              >
+                {lobbyMonitorOpen ? (
+                  <PanelRightClose size={14} aria-hidden="true" />
+                ) : (
+                  <PanelRightOpen size={14} aria-hidden="true" />
+                )}
+                <span>{lobbyMonitorOpen ? '收起监控' : '监控面板'}</span>
+              </button>
+            )}
             <button
               type="button"
               className="btn btn-soft btn-sm"
@@ -1043,7 +1115,7 @@ export const Lobby: React.FC<LobbyProps> = ({
           <div className="workspace-canvas">
             {/* ================== TAB 1: P2PLink 1:1 三栏极客直连工作台 ================== */}
             {activeTab === 'quick' && (
-              <div className="p2p-lobby-workbench">
+              <div className={`p2p-lobby-workbench ${!lobbyMonitorOpen ? 'no-right' : ''}`}>
                 {/* ---------- 左栏：我的节点 + 在线设备与常用房间 + E2EE 加密卡 ---------- */}
                 <aside className="p2p-col-panel p2p-col-left">
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 12, minHeight: 0, flex: 1 }}>
@@ -1647,6 +1719,7 @@ export const Lobby: React.FC<LobbyProps> = ({
                 </section>
 
                 {/* ---------- 右栏：24 分片矩阵 + 局域网发现开关 + 实时吞吐波形 ---------- */}
+                {lobbyMonitorOpen && (
                 <aside className="p2p-col-panel p2p-col-right">
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                     {/* 模块 1：断点续传 & 4MB 分片矩阵 */}
@@ -1735,6 +1808,7 @@ export const Lobby: React.FC<LobbyProps> = ({
                     </div>
                   </div>
                 </aside>
+                )}
               </div>
             )}
 

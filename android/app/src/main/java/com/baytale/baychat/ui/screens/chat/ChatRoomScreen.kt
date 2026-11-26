@@ -420,13 +420,12 @@ fun ChatRoomScreen(
     val blankSpaceInteraction = remember { MutableInteractionSource() }
 
     Box(modifier = Modifier.fillMaxSize()) {
-        // UX-1：外层统一处理 WindowInsets.ime.union(WindowInsets.navigationBars)，消除键盘与小白条双重垫高
+        // UX-1：由底部 Composer / 批量操作栏各自处理 WindowInsets.ime 与 navigationBars，确保微信式键盘与面板同高无缝切换
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .background(colors.chatBg)
-                .statusBarsPadding()
-                .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars)),
+                .statusBarsPadding(),
         ) {
             // 1. 顶部房间导航栏（多选模式下切换为取消与已选择数量）
             if (selectionMode) {
@@ -1191,7 +1190,8 @@ fun ChatRoomScreen(
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .background(colors.surface),
+                        .background(colors.surface)
+                        .navigationBarsPadding(),
                 ) {
                     Box(
                         modifier = Modifier

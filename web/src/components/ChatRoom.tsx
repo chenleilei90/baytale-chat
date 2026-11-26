@@ -41,10 +41,13 @@ import {
   Clipboard,
   Forward,
   Globe,
-  Activity,
   ShieldCheck,
   FolderUp,
   Key,
+  PanelLeftClose,
+  PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
 } from 'lucide-react';
 import QRCode from 'qrcode';
 import type {
@@ -318,7 +321,45 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   const [attachmentPopoverOpen, setAttachmentPopoverOpen] = useState(false);
   const [customLimitMBInput, setCustomLimitMBInput] = useState('');
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [monitorOpen, setMonitorOpen] = useState(true);
+  const [desktopSidebarOpen, setDesktopSidebarOpen] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('baychat_chat_left_open') !== '0';
+    } catch {
+      return true;
+    }
+  });
+  const [monitorOpen, setMonitorOpen] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('baychat_chat_right_open') !== '0';
+    } catch {
+      return true;
+    }
+  });
+
+  // 切换桌面端左侧面板与右侧监控栏并持久化偏好
+  const handleToggleDesktopSidebar = () => {
+    setDesktopSidebarOpen((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('baychat_chat_left_open', next ? '1' : '0');
+      } catch {
+        // 忽略无痕模式存储异常
+      }
+      return next;
+    });
+  };
+
+  const handleToggleMonitor = () => {
+    setMonitorOpen((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('baychat_chat_right_open', next ? '1' : '0');
+      } catch {
+        // 忽略无痕模式存储异常
+      }
+      return next;
+    });
+  };
   const [showInvite, setShowInvite] = useState(false);
   const [showWhiteboard, setShowWhiteboard] = useState(false);
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
@@ -3110,6 +3151,20 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
 
           <button
             type="button"
+            className="btn btn-glass btn-icon hide-mobile"
+            onClick={handleToggleDesktopSidebar}
+            title={desktopSidebarOpen ? '收起左侧边栏' : '展开左侧边栏'}
+            aria-label={desktopSidebarOpen ? '收起左侧边栏' : '展开左侧边栏'}
+          >
+            {desktopSidebarOpen ? (
+              <PanelLeftClose size={16} aria-hidden="true" />
+            ) : (
+              <PanelLeftOpen size={16} aria-hidden="true" />
+            )}
+          </button>
+
+          <button
+            type="button"
             className="btn btn-glass btn-sm mono nav-room-btn"
             onClick={async () => {
               if (await copyTextToClipboard(roomCode)) {
@@ -3198,12 +3253,16 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           <button
             type="button"
             className={`btn btn-sm p2p-monitor-toggle ${monitorOpen ? 'btn-jelly' : 'btn-glass'}`}
-            onClick={() => setMonitorOpen((v) => !v)}
+            onClick={handleToggleMonitor}
             title={monitorOpen ? '收起右侧 P2P 监控面板' : '展开右侧 P2P 监控面板'}
-            aria-label="切换 P2P 监控面板"
+            aria-label={monitorOpen ? '收起右侧 P2P 监控面板' : '展开右侧 P2P 监控面板'}
           >
-            <Activity size={13} aria-hidden="true" />
-            <span>监控</span>
+            {monitorOpen ? (
+              <PanelRightClose size={14} aria-hidden="true" />
+            ) : (
+              <PanelRightOpen size={14} aria-hidden="true" />
+            )}
+            <span>{monitorOpen ? '收起监控' : '监控面板'}</span>
           </button>
 
           <button
@@ -3647,7 +3706,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
 
       {/* 主体双栏工作台 */}
       <div className="chat-layout">
-        <aside className={`chat-side-bento ${sidebarOpen ? 'open' : ''}`}>
+        <aside className={`chat-side-bento ${sidebarOpen ? 'open' : ''} ${!desktopSidebarOpen ? 'desktop-collapsed' : ''}`}>
           {/* 移动端专属顶部房间快捷面板 */}
           <div className="mobile-drawer-tools">
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
@@ -4556,7 +4615,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                 <button
                   type="button"
                   className="btn btn-jelly btn-sm"
-                  style={{ height: 34, padding: '0 15px', borderRadius: 12, flexShrink: 0 }}
+                  style={{ height: 34, padding: '0 18px', borderRadius: 999, flexShrink: 0 }}
                   disabled={!inputText.trim() && !pendingPaste}
                   onClick={() => {
                     if (pendingPaste) void handleSendPendingPaste();

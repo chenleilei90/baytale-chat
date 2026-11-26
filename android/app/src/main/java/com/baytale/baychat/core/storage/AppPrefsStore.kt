@@ -53,9 +53,17 @@ class AppPrefsStore(context: Context) {
         migrateLegacyThemeIfNeeded()
     }
 
-    // 若旧版存有 "neon" 暗黑主题，自动迁移为清风极简 (AIR) + 强制深色外观并立即持久化
+    // 若旧版存有 "neon" 暗黑主题，或首次升级至极客青绿默认体系，一次性完成迁移并保留用户后续自主切换权
     private fun migrateLegacyThemeIfNeeded() {
         val rawTheme = sp.getString(KEY_THEME_V2, null)
+        if (!sp.getBoolean(KEY_GEEK_DEFAULT_MIGRATED_V1, false)) {
+            sp.edit()
+                .putString(KEY_THEME_V2, AppThemeMode.GEEK.id)
+                .putString(KEY_APPEARANCE, AppearanceMode.DARK.id)
+                .putBoolean(KEY_GEEK_DEFAULT_MIGRATED_V1, true)
+                .apply()
+            return
+        }
         if (rawTheme.equals(AppThemeMode.NEON.id, ignoreCase = true)) {
             sp.edit()
                 .putString(KEY_THEME_V2, AppThemeMode.AIR.id)
@@ -575,6 +583,7 @@ class AppPrefsStore(context: Context) {
         private const val KEY_PRIVACY_ACCEPTED = "privacy_accepted_v1"
         private const val KEY_PROFILE = "user_profile"
         private const val KEY_THEME_V2 = "theme_mode_v2"
+        private const val KEY_GEEK_DEFAULT_MIGRATED_V1 = "geek_default_migrated_v1"
         private const val KEY_AUTO_ACCEPT = "auto_accept_small"
         private const val KEY_AUTO_ACCEPT_MB = "auto_accept_max_mb"
         private const val KEY_IMAGE_ORIGINAL = "image_original"

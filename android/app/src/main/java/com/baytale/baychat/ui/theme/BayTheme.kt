@@ -105,6 +105,7 @@ private val DarkFileTypeColors = BayFileTypeColors(
  * 解析主题主色（NEON 已废弃，传入时自动回退至 AIR 海湾蓝）。
  */
 internal fun accentColorFor(mode: AppThemeMode, isDark: Boolean): Color = when (mode) {
+    AppThemeMode.GEEK -> if (isDark) Color(0xFF14B8A6) else Color(0xFF0D9488)
     AppThemeMode.AIR, AppThemeMode.NEON -> if (isDark) Color(0xFF0A84FF) else Color(0xFF007AFF)
     AppThemeMode.MINT -> if (isDark) Color(0xFF3CC4D8) else Color(0xFF14A3B8)
     AppThemeMode.BERRY -> if (isDark) Color(0xFF7D7AFF) else Color(0xFF5E5CE6)
@@ -117,6 +118,36 @@ internal fun accentColorFor(mode: AppThemeMode, isDark: Boolean): Color = when (
  */
 fun bayColorsFor(accentMode: AppThemeMode, isDark: Boolean): BayColors {
     val accent = accentColorFor(accentMode, isDark)
+    if (accentMode == AppThemeMode.GEEK && isDark) {
+        // 极客青绿深色模式：与 Web 端保持 1:1 一致的 Slate + Teal 高对比通透层级
+        return BayColors(
+            bg = Color(0xFF020617),
+            surface = Color(0xFF0B1220),
+            surfaceElevated = Color(0xFF111B2E),
+            fill = Color(0xB81E293B),
+            fillStrong = Color(0xC7334155),
+            separator = Color(0x2994A3B8),
+            accent = accent,
+            accentSoft = accent.copy(alpha = 0.18f),
+            onAccent = Color(0xFF041214),
+            textPrimary = Color(0xFFF8FAFC),
+            textSecondary = Color(0xFFCBD5E1),
+            textTertiary = Color(0xFF94A3B8),
+            success = Color(0xFF34D399),
+            warning = Color(0xFFFBBF24),
+            danger = Color(0xFFFB7185),
+            toastBg = Color(0xFF1E293B),
+            popupSurface = Color(0xFF1E293B),
+            popupContent = Color(0xFFF8FAFC),
+            chatBg = Color(0xFF020617),
+            wechatSelfBubble = Color(0xFF14B8A6),
+            wechatSelfText = Color(0xFF041214),
+            wechatPeerBubble = Color(0xFF162235),
+            wechatComposerBg = Color(0xFF0B1220),
+            isDark = true,
+            fileTypeColors = DarkFileTypeColors,
+        )
+    }
     return if (isDark) {
         BayColors(
             bg = Color(0xFF000000),

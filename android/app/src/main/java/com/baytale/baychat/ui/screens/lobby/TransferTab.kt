@@ -1,6 +1,9 @@
 package com.baytale.baychat.ui.screens.lobby
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Box
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -54,6 +57,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.baytale.baychat.core.model.FileTransferInfo
 import com.baytale.baychat.core.model.PartialResumeItem
 import com.baytale.baychat.core.model.SavedPickupRecord
@@ -261,6 +265,28 @@ fun TransferTab(
                                 )
                             }
                         } else {
+                            // 24 分片实时矩阵总览卡（真实数据驱动）
+                            item(key = "p2p_chunk_matrix") {
+                                val primaryActive = activeTransfers.firstOrNull()
+                                val primaryPartial = state.partialTransfers.firstOrNull()
+                                val matrixTitle = primaryActive?.fileName ?: primaryPartial?.fileName ?: "P2P 分片队列"
+                                val progressFraction = when {
+                                    primaryActive != null -> {
+                                        val snap = state.transferProgress[primaryActive.transferId]
+                                        val done = snap?.transferredBytes ?: primaryActive.transferredBytes
+                                        if (primaryActive.fileSize > 0L) (done.toFloat() / primaryActive.fileSize.toFloat()).coerceIn(0f, 1f) else 0f
+                                    }
+                                    primaryPartial != null && primaryPartial.fileSize > 0L ->
+                                        (primaryPartial.receivedBytes.toFloat() / primaryPartial.fileSize.toFloat()).coerceIn(0f, 1f)
+                                    else -> 0f
+                                }
+                                ChunkMatrixMonitorCard(
+                                    fileName = matrixTitle,
+                                    progressFraction = progressFraction,
+                                    isTransferring = primaryActive?.status == TransferStatus.TRANSFERRING,
+                                )
+                            }
+
                             if (activeTransfers.isNotEmpty()) {
                                 item(key = "active_header") {
                                     BaySectionHeader(
@@ -926,6 +952,110 @@ private fun PickupSummaryCard(
                 style = BayIconStyle.Plain,
                 size = 34.dp,
             )
+        }
+    }
+}
+
+private val CHUNK_MATRIX_ORDER = intArrayOf(
+    0, 6, 13, 2, 19, 8, 15, 4, 21, 10, 1, 17,
+    7, 12, 23, 3, 14, 9, 20, 5, 16, 11, 22, 18,
+)
+
+/**
+ * 与 Web 端右侧 P2PMonitorPanel 呼应的 24 分片进度矩阵卡片。
+ */
+@Composable
+private fun ChunkMatrixMonitorCard(
+    fileName: String,
+    progressFraction: Float,
+    isTransferring: Boolean,
+) {
+    val colors = BayTheme.colors
+    val percent = (progressFraction.coerceIn(0f, 1f) * 100f).toInt()
+    val doneCount = ((progressFraction.coerceIn(0f, 1f)) * 24f).toInt().coerceIn(0, 24)
+
+    val cellStates = remember(doneCount, isTransferring) {
+        val arr = Array(24) { 0 } // 0=待传输, 1=传输中/已锁定, 2=已完成
+        for (i in 0 until doneCount) {
+            arr[CHUNK_MATRIX_ORDER[i]] = 2
+        }
+        if (doneCount < 24) {
+            arr[CHUNK_MATRIX_ORDER[doneCount]] = if (isTransferring) 1 else 3 // 3=断点锁定
+        }
+        arr
+    }
+
+    BayCard(modifier = Modifier.fillMaxWidth()) {
+        Column(verticalArrangement = Arrangement.spacedBy(BaySpacing.sm)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "断点续传 · 24 分片矩阵",
+                    style = BayType.footnote.copy(fontWeight = FontWeight.Bold),
+                    color = colors.textPrimary,
+                )
+                Text(
+                    text = "$percent% · 24 Chunks",
+                    style = BayType.caption.copy(fontFamily = FontFamily.Monospace),
+                    color = colors.accent,
+                )
+            }
+
+            Text(
+                text = fileName,
+                style = BayType.caption,
+                color = colors.textSecondary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                for (rowIdx in 0 until 4) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        for (colIdx in 0 until 6) {
+                            val idx = rowIdx * 6 + colIdx
+                            val st = cellStates[idx]
+                            val bgColor = when (st) {
+                                2 -> colors.accent
+                                1 -> colors.accentSoft
+                                3 -> colors.warning.copy(alpha = 0.22f)
+                                else -> colors.fill
+                            }
+                            val textColor = when (st) {
+                                2 -> colors.onAccent
+                                1 -> colors.accent
+                                3 -> colors.warning
+                                else -> colors.textTertiary
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(22.dp)
+                                    .clip(BayShapes.xsShape)
+                                    .background(bgColor)
+                                    .border(1.dp, colors.separator, BayShapes.xsShape),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    text = "${idx + 1}",
+                                    style = TextStyle(
+                                        fontSize = 10.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontWeight = if (st > 0) FontWeight.Bold else FontWeight.Normal,
+                                    ),
+                                    color = textColor,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }

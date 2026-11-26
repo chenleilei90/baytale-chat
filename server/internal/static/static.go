@@ -41,9 +41,11 @@ func spaHandler(root fs.FS) http.Handler {
 			stat, _ := f.Stat()
 			_ = f.Close()
 			if stat != nil && !stat.IsDir() {
-				// 带哈希指纹的静态构建资源可长期缓存
+				// 带哈希指纹的静态构建资源可长期缓存，入口 HTML 禁止强缓存以确保版本及时更新
 				if strings.HasPrefix(cleanPath, "assets/") {
 					w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+				} else if cleanPath == "index.html" {
+					w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 				}
 				fileServer.ServeHTTP(w, r)
 				return
@@ -55,7 +57,7 @@ func spaHandler(root fs.FS) http.Handler {
 			indexBytes, err := fs.ReadFile(root, "index.html")
 			if err == nil {
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
-				w.Header().Set("Cache-Control", "no-cache")
+				w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 				_, _ = w.Write(indexBytes)
 				return
 			}

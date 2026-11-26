@@ -2,7 +2,7 @@
    BayChat — Bay Design 2.0 聊天工作台与辅助组件专属样式
    ========================================================================== */
 
-/* 页面根布局画布（纯色背景，无装饰壳与渐变） */
+/* 页面根布局画布（现代极简质感微光晕，不干扰正文字面可读性） */
 .chat-shell {
   position: relative;
   width: 100%;
@@ -10,7 +10,9 @@
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  background: var(--bg);
+  background:
+    radial-gradient(65% 40% at 50% -8%, rgba(20, 184, 166, 0.06), transparent 70%),
+    var(--bg);
   z-index: 1;
 }
 
@@ -242,9 +244,9 @@
   height: 26px;
 }
 
-/* 桌面端文本气泡行长收敛保护（自适应大屏铺满比例） */
+/* 桌面端消息行最大占宽比例保护（避免短消息被子容器压缩换行） */
 @media (min-width: 881px) {
-  .bubble-text {
+  .msg-item {
     max-width: 68%;
   }
 }
@@ -844,12 +846,17 @@ html[data-appearance='dark'] .file-kind-code {
   width: clamp(240px, 22%, 460px);
   flex-shrink: 0;
   background: var(--surface);
+  border: 1px solid var(--separator);
+  box-shadow: var(--surface-highlight);
   border-radius: var(--r-lg);
   padding: 12px;
   display: flex;
   flex-direction: column;
   gap: 12px;
   overflow-y: auto;
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
+  transition: width 260ms var(--ease-spring), opacity 180ms ease;
 }
 
 @media (max-width: 1179px) {
@@ -859,14 +866,33 @@ html[data-appearance='dark'] .file-kind-code {
   }
 }
 
+@media (min-width: 881px) {
+  .chat-side-bento.desktop-collapsed {
+    width: 0 !important;
+    min-width: 0;
+    padding-left: 0;
+    padding-right: 0;
+    border-width: 0;
+    opacity: 0;
+    overflow: hidden;
+    pointer-events: none;
+    margin-right: calc(-1 * var(--space-fluid));
+  }
+}
+
 .p2p-card {
   background: var(--fill);
   border: 1px solid var(--separator);
+  box-shadow: var(--surface-highlight);
   border-radius: var(--r-md);
-  padding: 11px;
+  padding: 12px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
+  transition: transform 180ms var(--ease-spring), border-color 160ms ease, box-shadow 180ms ease;
+}
+.p2p-card:hover {
+  border-color: color-mix(in srgb, var(--accent) 32%, var(--separator));
 }
 
 .p2p-card-head {
@@ -928,13 +954,13 @@ html[data-appearance='dark'] .file-kind-code {
 }
 
 .p2p-chunk-cell {
-  height: 20px;
+  height: 22px;
   border-radius: 5px;
   border: 1px solid var(--separator);
   background: var(--surface);
   color: var(--text-muted);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 9px;
+  font-size: 10px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -975,16 +1001,20 @@ html[data-appearance='dark'] .file-kind-code {
 }
 
 .p2p-task-pill {
+  display: inline-flex;
+  align-items: center;
   max-width: 100%;
+  min-height: 26px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  padding: 2px 7px;
-  border-radius: var(--r-full);
+  padding: 4px 10px;
+  border-radius: 8px;
   border: 1px solid var(--separator);
   background: var(--surface);
   color: var(--text-secondary);
-  font-size: 10px;
+  font-size: 11px;
+  line-height: 1.35;
   cursor: pointer;
 }
 
@@ -1117,10 +1147,10 @@ html[data-appearance='dark'] .file-kind-code {
 .p2p-drop-strip {
   margin-top: 6px;
   width: 100%;
-  padding: 8px 12px;
-  border-radius: var(--r-md);
-  border: 1.5px dashed var(--accent);
-  background: var(--accent-soft);
+  padding: 7px 12px;
+  border-radius: 12px;
+  border: 1px dashed rgba(20, 184, 166, 0.36);
+  background: rgba(20, 184, 166, 0.06);
   color: var(--text-primary);
   display: flex;
   align-items: center;
@@ -1160,4 +1190,17 @@ html[data-appearance='dark'] .file-kind-code {
   padding: 3px 9px;
   border-radius: var(--r-sm);
   flex-shrink: 0;
+}
+
+/* 极客青绿深色模式：柔和顶栏高亮按钮对比度，避免整块荧光色刺眼 */
+html[data-appearance='dark'][data-accent='geek'] .chat-top-nav .btn-jelly {
+  background: rgba(20, 184, 166, 0.22);
+  color: #5EEAD4;
+  border: 1px solid rgba(20, 184, 166, 0.42);
+}
+
+html[data-appearance='dark'][data-accent='geek'] .chat-top-nav .btn-soft {
+  background: rgba(20, 184, 166, 0.14);
+  color: #2DD4BF;
+  border: 1px solid rgba(20, 184, 166, 0.26);
 }

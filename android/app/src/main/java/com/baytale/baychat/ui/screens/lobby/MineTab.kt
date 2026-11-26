@@ -56,6 +56,7 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.app.NotificationManagerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -90,6 +91,7 @@ import com.baytale.baychat.ui.theme.BayType
 import com.baytale.baychat.ui.theme.themeOrbColor
 
 private val THEME_PALETTE_MODES = listOf(
+    AppThemeMode.GEEK,
     AppThemeMode.AIR,
     AppThemeMode.MINT,
     AppThemeMode.BERRY,
@@ -328,6 +330,7 @@ fun MineTab(
                                     Text(
                                         text = mode.label,
                                         style = BayType.caption.copy(
+                                            fontSize = 11.sp,
                                             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
                                         ),
                                         color = if (selected) colors.accent else colors.textSecondary,

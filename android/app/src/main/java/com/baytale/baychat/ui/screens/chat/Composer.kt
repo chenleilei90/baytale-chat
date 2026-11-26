@@ -13,6 +13,10 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -26,11 +30,14 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -61,6 +68,7 @@ import androidx.compose.material.icons.rounded.Send
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -70,6 +78,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -651,142 +660,197 @@ fun Composer(
             }
         }
 
-        // 多模态附件宫格面板（纯色圆角图标按钮，零描边）
-        AnimatedVisibility(
-            visible = showAttachmentPanel && !state.isRecordingVoice,
-            enter = expandVertically() + fadeIn(),
-            exit = shrinkVertically() + fadeOut(),
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(colors.bg)
-                    .padding(horizontal = BaySpacing.lg, vertical = BaySpacing.lg),
-                verticalArrangement = Arrangement.spacedBy(BaySpacing.lg),
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(BaySpacing.md),
-                ) {
-                    AttachmentGridItem(
-                        icon = Icons.Rounded.PhotoLibrary,
-                        label = "相册",
-                        tint = colors.fileTypeColors.image,
-                        onClick = {
-                            val galleryIntent = Intent(
-                                Intent.ACTION_PICK,
-                                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                            ).apply {
-                                type = "image/*"
-                                putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
-                                putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("image/*", "video/*"))
-                            }
-                            runCatching { galleryIntentLauncher.launch(galleryIntent) }
-                                .onFailure {
-                                    photoPicker.launch(
-                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo),
-                                    )
-                                }
-                        },
-                        modifier = Modifier.weight(1f),
-                    )
-                    AttachmentGridItem(
-                        icon = Icons.Rounded.PhotoCamera,
-                        label = "拍照",
-                        tint = colors.fileTypeColors.video,
-                        onClick = ::launchCameraCapture,
-                        modifier = Modifier.weight(1f),
-                    )
-                    AttachmentGridItem(
-                        icon = Icons.Rounded.InsertDriveFile,
-                        label = "文件",
-                        tint = colors.fileTypeColors.doc,
-                        onClick = { filePicker.launch(arrayOf("*/*")) },
-                        modifier = Modifier.weight(1f),
-                    )
-                    AttachmentGridItem(
-                        icon = Icons.Rounded.FolderZip,
-                        label = "文件夹",
-                        tint = colors.fileTypeColors.archive,
-                        onClick = { folderPicker.launch(null) },
-                        modifier = Modifier.weight(1f),
-                    )
-                }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(BaySpacing.md),
-                ) {
-                    AttachmentGridItem(
-                        icon = Icons.Rounded.ContentPaste,
-                        label = "剪贴板",
-                        tint = colors.accent,
-                        onClick = {
-                            val clipText = readTextFromClipboard(context)
-                            if (clipText.isNullOrBlank()) {
-                                vm.showToast("当前系统剪贴板为空")
-                            } else {
-                                BayHaptic.confirm(view, state.prefs.hapticEnabled)
-                                vm.sendClipboardSync(clipText)
-                                onShowAttachmentPanelChange(false)
-                            }
-                        },
-                        modifier = Modifier.weight(1f),
-                    )
-                    AttachmentGridItem(
-                        icon = Icons.Rounded.BookmarkBorder,
-                        label = "收藏",
-                        tint = colors.warning,
-                        onClick = {
-                            onShowAttachmentPanelChange(false)
-                            onOpenFavoritesPicker()
-                        },
-                        modifier = Modifier.weight(1f),
-                    )
-                    AttachmentGridItem(
-                        icon = Icons.Rounded.Send,
-                        label = "纸飞机",
-                        tint = colors.accent,
-                        onClick = {
-                            onShowAttachmentPanelChange(false)
-                            onOpenPlaneComposer()
-                        },
-                        modifier = Modifier.weight(1f),
-                    )
-                    Spacer(modifier = Modifier.weight(1f))
-                }
+        // 微信 1:1 底部共享高度面板容器：记录真实软键盘高度，键盘与 +/表情 面板切换高度零跳动，闭合展开整体平滑推进
+        val imeBottomDp = with(density) { WindowInsets.ime.getBottom(density).toDp() }
+        val navBarBottomDp = with(density) { WindowInsets.navigationBars.getBottom(density).toDp() }
+        var rememberedImeHeightDp by remember { mutableStateOf(276.dp) }
+        LaunchedEffect(imeBottomDp, navBarBottomDp) {
+            if (imeBottomDp > navBarBottomDp + 120.dp) {
+                rememberedImeHeightDp = imeBottomDp.coerceIn(240.dp, 380.dp)
             }
         }
-
-        // 微信 8.0+ 风格表情选择面板（统一 8 列可滚动网格：最近使用 + 所有表情 + 右下角浮动删除/绿色发送栏）
+        val anyPanelVisible = (showAttachmentPanel || (showEmojiPanel && !voiceMode)) && !state.isRecordingVoice
+        val targetBottomHeightDp = maxOf(
+            imeBottomDp,
+            if (anyPanelVisible) rememberedImeHeightDp else navBarBottomDp,
+        )
+        val animatedBottomHeight by animateDpAsState(
+            targetValue = targetBottomHeightDp,
+            animationSpec = if (imeBottomDp > navBarBottomDp) {
+                snap()
+            } else {
+                tween(durationMillis = 220, easing = FastOutSlowInEasing)
+            },
+            label = "composerBottomPanelHeight",
+        )
         val catalogEmojis = remember { EMOJI_CODEPOINTS.map(::emojiString) }
-        AnimatedVisibility(
-            visible = showEmojiPanel && !voiceMode && !state.isRecordingVoice,
-            enter = expandVertically() + fadeIn(),
-            exit = shrinkVertically() + fadeOut(),
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(animatedBottomHeight)
+                .clipToBounds()
+                .background(colors.wechatComposerBg),
         ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(280.dp)
-                    .background(colors.wechatComposerBg),
-            ) {
-                LazyVerticalGrid(
-                    columns = GridCells.Fixed(8),
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(
-                        start = BaySpacing.md,
-                        end = BaySpacing.md,
-                        top = BaySpacing.sm,
-                        bottom = 68.dp,
-                    ),
-                    horizontalArrangement = Arrangement.spacedBy(2.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp),
+            if (showAttachmentPanel && !state.isRecordingVoice) {
+                // + 号 4x2 多模态附件宫格面板（纯色圆角图标按钮，与键盘同高无缝替换）
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState())
+                        .padding(
+                            start = BaySpacing.lg,
+                            end = BaySpacing.lg,
+                            top = BaySpacing.lg,
+                            bottom = BaySpacing.lg + navBarBottomDp,
+                        ),
+                    verticalArrangement = Arrangement.spacedBy(BaySpacing.lg),
                 ) {
-                    if (state.recentEmojis.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(BaySpacing.md),
+                    ) {
+                        AttachmentGridItem(
+                            icon = Icons.Rounded.PhotoLibrary,
+                            label = "相册",
+                            tint = colors.fileTypeColors.image,
+                            onClick = {
+                                val galleryIntent = Intent(
+                                    Intent.ACTION_PICK,
+                                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                                ).apply {
+                                    type = "image/*"
+                                    putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+                                    putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("image/*", "video/*"))
+                                }
+                                runCatching { galleryIntentLauncher.launch(galleryIntent) }
+                                    .onFailure {
+                                        photoPicker.launch(
+                                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo),
+                                        )
+                                    }
+                            },
+                            modifier = Modifier.weight(1f),
+                        )
+                        AttachmentGridItem(
+                            icon = Icons.Rounded.PhotoCamera,
+                            label = "拍照",
+                            tint = colors.fileTypeColors.video,
+                            onClick = ::launchCameraCapture,
+                            modifier = Modifier.weight(1f),
+                        )
+                        AttachmentGridItem(
+                            icon = Icons.Rounded.InsertDriveFile,
+                            label = "文件",
+                            tint = colors.fileTypeColors.doc,
+                            onClick = { filePicker.launch(arrayOf("*/*")) },
+                            modifier = Modifier.weight(1f),
+                        )
+                        AttachmentGridItem(
+                            icon = Icons.Rounded.FolderZip,
+                            label = "文件夹",
+                            tint = colors.fileTypeColors.archive,
+                            onClick = { folderPicker.launch(null) },
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(BaySpacing.md),
+                    ) {
+                        AttachmentGridItem(
+                            icon = Icons.Rounded.ContentPaste,
+                            label = "剪贴板",
+                            tint = colors.accent,
+                            onClick = {
+                                val clipText = readTextFromClipboard(context)
+                                if (clipText.isNullOrBlank()) {
+                                    vm.showToast("当前系统剪贴板为空")
+                                } else {
+                                    BayHaptic.confirm(view, state.prefs.hapticEnabled)
+                                    vm.sendClipboardSync(clipText)
+                                    onShowAttachmentPanelChange(false)
+                                }
+                            },
+                            modifier = Modifier.weight(1f),
+                        )
+                        AttachmentGridItem(
+                            icon = Icons.Rounded.BookmarkBorder,
+                            label = "收藏",
+                            tint = colors.warning,
+                            onClick = {
+                                onShowAttachmentPanelChange(false)
+                                onOpenFavoritesPicker()
+                            },
+                            modifier = Modifier.weight(1f),
+                        )
+                        AttachmentGridItem(
+                            icon = Icons.Rounded.Send,
+                            label = "纸飞机",
+                            tint = colors.accent,
+                            onClick = {
+                                onShowAttachmentPanelChange(false)
+                                onOpenPlaneComposer()
+                            },
+                            modifier = Modifier.weight(1f),
+                        )
+                        Spacer(modifier = Modifier.weight(1f))
+                    }
+                }
+            } else if (showEmojiPanel && !voiceMode && !state.isRecordingVoice) {
+                // 微信 8.0+ 风格表情选择面板（统一 8 列可滚动网格：最近使用 + 所有表情 + 右下角浮动删除/绿色发送栏）
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(colors.wechatComposerBg),
+                ) {
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(8),
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(
+                            start = BaySpacing.md,
+                            end = BaySpacing.md,
+                            top = BaySpacing.sm,
+                            bottom = 68.dp + navBarBottomDp,
+                        ),
+                        horizontalArrangement = Arrangement.spacedBy(2.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        if (state.recentEmojis.isNotEmpty()) {
+                            item(span = { GridItemSpan(8) }) {
+                                Text(
+                                    text = "最近使用",
+                                    style = BayType.caption,
+                                    color = colors.textSecondary,
+                                    modifier = Modifier.padding(
+                                        horizontal = BaySpacing.xs,
+                                        vertical = BaySpacing.xs,
+                                    ),
+                                )
+                            }
+                            items(state.recentEmojis.take(8), key = { "rec_$it" }) { emoji ->
+                                Box(
+                                    modifier = Modifier
+                                        .defaultMinSize(minWidth = 44.dp, minHeight = 44.dp)
+                                        .clip(BayShapes.xsShape)
+                                        .bayClickable {
+                                            val updated = inputText + emoji
+                                            onInputTextChange(updated)
+                                            vm.updateDraft(roomCode, updated)
+                                            vm.onDraftTypingChanged(updated.isNotBlank())
+                                            vm.recordEmojiUsed(emoji)
+                                        },
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Text(text = emoji, style = BayType.title2)
+                                }
+                            }
+                        }
+
                         item(span = { GridItemSpan(8) }) {
                             Text(
-                                text = "最近使用",
+                                text = "所有表情",
                                 style = BayType.caption,
                                 color = colors.textSecondary,
                                 modifier = Modifier.padding(
@@ -795,7 +859,7 @@ fun Composer(
                                 ),
                             )
                         }
-                        items(state.recentEmojis.take(8), key = { "rec_$it" }) { emoji ->
+                        items(catalogEmojis, key = { it }) { emoji ->
                             Box(
                                 modifier = Modifier
                                     .defaultMinSize(minWidth = 44.dp, minHeight = 44.dp)
@@ -814,86 +878,57 @@ fun Composer(
                         }
                     }
 
-                    item(span = { GridItemSpan(8) }) {
-                        Text(
-                            text = "所有表情",
-                            style = BayType.caption,
-                            color = colors.textSecondary,
-                            modifier = Modifier.padding(
-                                horizontal = BaySpacing.xs,
-                                vertical = BaySpacing.xs,
-                            ),
-                        )
-                    }
-                    items(catalogEmojis, key = { it }) { emoji ->
+                    // 右下角微信风格浮动删除与发送栏
+                    val hasText = inputText.isNotBlank()
+                    Row(
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(end = BaySpacing.md, bottom = BaySpacing.md + navBarBottomDp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(BaySpacing.xs),
+                    ) {
                         Box(
                             modifier = Modifier
-                                .defaultMinSize(minWidth = 44.dp, minHeight = 44.dp)
-                                .clip(BayShapes.xsShape)
-                                .bayClickable {
-                                    val updated = inputText + emoji
-                                    onInputTextChange(updated)
-                                    vm.updateDraft(roomCode, updated)
-                                    vm.onDraftTypingChanged(updated.isNotBlank())
-                                    vm.recordEmojiUsed(emoji)
-                                },
+                                .defaultMinSize(minWidth = 46.dp, minHeight = 40.dp)
+                                .shadow(elevation = 2.dp, shape = BayShapes.smShape, clip = false)
+                                .clip(BayShapes.smShape)
+                                .background(colors.wechatPeerBubble)
+                                .bayClickable(enabled = inputText.isNotEmpty()) {
+                                    val next = deleteLastGraphemeCluster(inputText)
+                                    onInputTextChange(next)
+                                    vm.updateDraft(roomCode, next)
+                                    vm.onDraftTypingChanged(next.isNotBlank())
+                                }
+                                .padding(horizontal = BaySpacing.md),
                             contentAlignment = Alignment.Center,
                         ) {
-                            Text(text = emoji, style = BayType.title2)
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Rounded.Backspace,
+                                contentDescription = "删除",
+                                tint = if (inputText.isNotEmpty()) colors.textPrimary else colors.textTertiary,
+                                modifier = Modifier.size(18.dp),
+                            )
                         }
-                    }
-                }
-
-                // 右下角微信风格浮动删除与发送栏
-                val hasText = inputText.isNotBlank()
-                Row(
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(end = BaySpacing.md, bottom = BaySpacing.md),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(BaySpacing.xs),
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .defaultMinSize(minWidth = 46.dp, minHeight = 40.dp)
-                            .shadow(elevation = 2.dp, shape = BayShapes.smShape, clip = false)
-                            .clip(BayShapes.smShape)
-                            .background(colors.wechatPeerBubble)
-                            .bayClickable(enabled = inputText.isNotEmpty()) {
-                                val next = deleteLastGraphemeCluster(inputText)
-                                onInputTextChange(next)
-                                vm.updateDraft(roomCode, next)
-                                vm.onDraftTypingChanged(next.isNotBlank())
-                            }
-                            .padding(horizontal = BaySpacing.md),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Rounded.Backspace,
-                            contentDescription = "删除",
-                            tint = if (inputText.isNotEmpty()) colors.textPrimary else colors.textTertiary,
-                            modifier = Modifier.size(18.dp),
-                        )
-                    }
-                    Box(
-                        modifier = Modifier
-                            .defaultMinSize(minWidth = 58.dp, minHeight = 40.dp)
-                            .shadow(elevation = 2.dp, shape = BayShapes.smShape, clip = false)
-                            .clip(BayShapes.smShape)
-                            .background(if (hasText) colors.success else colors.wechatPeerBubble)
-                            .bayClickable(enabled = hasText) {
-                                val textToSend = inputText
-                                onInputTextChange("")
-                                vm.sendTextMessage(textToSend)
-                            }
-                            .padding(horizontal = BaySpacing.md),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(
-                            text = "发送",
-                            style = BayType.callout.copy(fontWeight = FontWeight.Medium),
-                            color = if (hasText) colors.onAccent else colors.textTertiary,
-                        )
+                        Box(
+                            modifier = Modifier
+                                .defaultMinSize(minWidth = 58.dp, minHeight = 40.dp)
+                                .shadow(elevation = 2.dp, shape = BayShapes.smShape, clip = false)
+                                .clip(BayShapes.smShape)
+                                .background(if (hasText) colors.success else colors.wechatPeerBubble)
+                                .bayClickable(enabled = hasText) {
+                                    val textToSend = inputText
+                                    onInputTextChange("")
+                                    vm.sendTextMessage(textToSend)
+                                }
+                                .padding(horizontal = BaySpacing.md),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                text = "发送",
+                                style = BayType.callout.copy(fontWeight = FontWeight.Medium),
+                                color = if (hasText) colors.onAccent else colors.textTertiary,
+                            )
+                        }
                     }
                 }
             }

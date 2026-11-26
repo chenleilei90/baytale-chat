@@ -18,6 +18,7 @@ enum class RoomMode(val wireValue: String) {
 }
 
 enum class AppThemeMode(val id: String, val label: String) {
+    GEEK("geek", "极客青绿"),
     AIR("air", "清风极简"),
     PEACH("peach", "蜜桃暖屿"),
     MINT("mint", "薄荷蓝"),

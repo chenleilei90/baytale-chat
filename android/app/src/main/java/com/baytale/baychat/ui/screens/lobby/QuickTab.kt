@@ -9,6 +9,10 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.rounded.Shield
+import androidx.compose.material.icons.rounded.Wifi
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -327,6 +331,18 @@ fun QuickTab(
                             onClear = { vm.clearPendingShare() },
                         )
                     }
+                }
+
+                // 2.5 P2PLink 本机节点与端到端加密状态卡
+                item(key = "p2p_node_card") {
+                    P2PNodeStatusCard(
+                        avatar = state.profile.avatar,
+                        name = state.profile.name,
+                        clientId = state.profile.clientId,
+                        nearbyDiscoverable = state.prefs.nearbyDiscoverable,
+                        nearbyCount = state.nearbyPeers.size,
+                        onOpenMine = { nav.switchTab(3) },
+                    )
                 }
 
                 // 3. 单入口核心直达卡片
@@ -1201,4 +1217,112 @@ private fun copyInviteLink(context: Context, vm: BayChatViewModel, code: String)
     val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
     cm?.setPrimaryClip(ClipData.newPlainText("BayChat", vm.buildInviteUrl(code)))
     vm.showToast("已复制 #$code 邀请链接")
+}
+
+/**
+ * 与 Web 端左侧 P2PLink 节点卡视觉对齐的本机节点与端到端加密状态卡。
+ */
+@Composable
+private fun P2PNodeStatusCard(
+    avatar: String,
+    name: String,
+    clientId: String,
+    nearbyDiscoverable: Boolean,
+    nearbyCount: Int,
+    onOpenMine: () -> Unit,
+) {
+    val colors = BayTheme.colors
+    BayCard(
+        onClick = onOpenMine,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(BaySpacing.sm)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(colors.success),
+                    )
+                    Text(
+                        text = "我的节点 (Android 端)",
+                        style = BayType.footnote.copy(fontWeight = FontWeight.SemiBold),
+                        color = colors.textSecondary,
+                    )
+                }
+                Row(
+                    modifier = Modifier
+                        .clip(BayShapes.fullShape)
+                        .background(colors.accentSoft)
+                        .padding(horizontal = 8.dp, vertical = 3.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Shield,
+                        contentDescription = null,
+                        tint = colors.accent,
+                        modifier = Modifier.size(11.dp),
+                    )
+                    Text(
+                        text = "AES-256-GCM · DTLS 1.3",
+                        style = BayType.caption.copy(fontFamily = FontFamily.Monospace),
+                        color = colors.accent,
+                    )
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(BaySpacing.md),
+            ) {
+                BayAvatar(emojiId = avatar, size = 38.dp)
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = name,
+                        style = BayType.callout.copy(fontWeight = FontWeight.Bold),
+                        color = colors.textPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = "ID: ${clientId.take(12)}...",
+                        style = BayType.caption.copy(fontFamily = FontFamily.Monospace),
+                        color = colors.textTertiary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Row(
+                    modifier = Modifier
+                        .clip(BayShapes.fullShape)
+                        .background(colors.fill)
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Wifi,
+                        contentDescription = null,
+                        tint = if (nearbyDiscoverable) colors.accent else colors.textTertiary,
+                        modifier = Modifier.size(12.dp),
+                    )
+                    Text(
+                        text = if (nearbyDiscoverable) "局域网 $nearbyCount 台" else "仅口令",
+                        style = BayType.caption,
+                        color = if (nearbyDiscoverable) colors.textPrimary else colors.textTertiary,
+                    )
+                }
+            }
+        }
+    }
 }
