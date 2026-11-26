@@ -146,7 +146,9 @@ fun ChatRoomScreen(
     val density = LocalDensity.current
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
-    val listState = rememberLazyListState()
+    val listState = rememberLazyListState(
+        initialFirstVisibleItemIndex = (room.messages.lastIndex).coerceAtLeast(0),
+    )
     val scope = rememberCoroutineScope()
     val inputFocusRequester = remember { FocusRequester() }
 
@@ -276,7 +278,8 @@ fun ChatRoomScreen(
             }
         }
     }
-    var lastSeenMessageCount by remember(room.roomCode) { mutableIntStateOf(visibleMessages.size) }
+    var lastSeenMessageCount by remember(room.roomCode) { mutableIntStateOf(0) }
+    var hasInitialScrolled by remember(room.roomCode) { mutableStateOf(false) }
     var unreadBelowCount by remember(room.roomCode) { mutableIntStateOf(0) }
     var lastScrolledUnreadId by remember(room.roomCode) { mutableStateOf<String?>(null) }
 
@@ -289,20 +292,45 @@ fun ChatRoomScreen(
         }
     }
 
-    // 首次出现「以下为新消息」标记时自动定位到首条未读位置
+    // 首次出现「以下为新消息」标记时自动定位到首条未读位置（仅挂起期间产生真实未读时触发）
     LaunchedEffect(state.firstUnreadMessageId, visibleMessages.size) {
         val targetId = state.firstUnreadMessageId ?: return@LaunchedEffect
         if (targetId == lastScrolledUnreadId) return@LaunchedEffect
         val idx = visibleMessages.indexOfFirst { it.id == targetId }
         if (idx >= 0) {
+            hasInitialScrolled = true
+            lastSeenMessageCount = visibleMessages.size
             lastScrolledUnreadId = targetId
             listState.animateScrollToItem(idx)
         }
     }
 
-    LaunchedEffect(visibleMessages.size, room.searchKeyword, room.filterKind) {
+    // 进房首次历史消息就绪与从挂起恢复时，直接定位至最新消息底部；后续实时新消息按是否在底部智能跟随
+    LaunchedEffect(room.roomCode, visibleMessages.size, room.searchKeyword, room.filterKind) {
         val currentSize = visibleMessages.size
         val isUnfiltered = room.searchKeyword.isBlank() && room.filterKind == "all"
+        if (currentSize == 0) {
+            lastSeenMessageCount = 0
+            return@LaunchedEffect
+        }
+        if (!hasInitialScrolled && isUnfiltered) {
+            val unreadId = state.firstUnreadMessageId
+            val unreadIdx = if (unreadId != null) visibleMessages.indexOfFirst { it.id == unreadId } else -1
+            hasInitialScrolled = true
+            lastSeenMessageCount = currentSize
+            unreadBelowCount = 0
+            if (unreadIdx >= 0 && unreadId != lastScrolledUnreadId) {
+                lastScrolledUnreadId = unreadId
+                listState.scrollToItem(unreadIdx)
+            } else {
+                listState.scrollToItem(currentSize - 1)
+                delay(120L)
+                val finalIdx = (visibleMessages.lastIndex).coerceAtLeast(0)
+                listState.scrollToItem(finalIdx, scrollOffset = 10_000)
+            }
+            return@LaunchedEffect
+        }
+
         val hasUnreadAnchor = state.firstUnreadMessageId != null &&
             state.firstUnreadMessageId != lastScrolledUnreadId &&
             visibleMessages.any { it.id == state.firstUnreadMessageId }
@@ -311,9 +339,7 @@ fun ChatRoomScreen(
             val lastIsSelf = visibleMessages.lastOrNull()?.isSelf == true
             if (isAtBottom || lastIsSelf) {
                 unreadBelowCount = 0
-                if (currentSize > 0) {
-                    listState.animateScrollToItem(currentSize - 1)
-                }
+                listState.animateScrollToItem(currentSize - 1)
             } else {
                 unreadBelowCount += added
             }

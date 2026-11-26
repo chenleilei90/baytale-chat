@@ -2733,29 +2733,9 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                             isOwner = joinedIsOwner,
                         )
                     }
-                    val isInitialHistorySync = awaitingInitialHistorySync
                     awaitingInitialHistorySync = false
-                    var firstHistoryUnreadId: String? = null
-                    val initialMentionIds = mutableListOf<String>()
-                    env.messages.orEmpty().forEach { cm ->
-                        val insertedItem = mergeCachedMessage(cm, fromCache = true)
-                        if (isInitialHistorySync && insertedItem != null && !insertedItem.isSelf && insertedItem.kind != ChatKind.SYSTEM) {
-                            if (firstHistoryUnreadId == null) {
-                                firstHistoryUnreadId = insertedItem.id
-                            }
-                            if (insertedItem.mentionedMe) {
-                                initialMentionIds.add(insertedItem.id)
-                            }
-                        }
-                    }
-                    if (firstHistoryUnreadId != null || initialMentionIds.isNotEmpty()) {
-                        _uiState.update { st ->
-                            st.copy(
-                                firstUnreadMessageId = st.firstUnreadMessageId ?: firstHistoryUnreadId,
-                                unreadMentionMessageIds = (st.unreadMentionMessageIds + initialMentionIds).distinct(),
-                            )
-                        }
-                    }
+                    // 进房同步历史消息改为单次原子批量合并（不再把历史最早消息误标为未读导致列表滚回顶部）
+                    mergeCachedMessagesBatch(env.messages.orEmpty(), fromCache = true)
                     newMesh.syncPeers(peerMap.keys.toList())
                     refreshForegroundBanner()
                     maybeRecoverPendingCameraCapture(code)
@@ -5625,11 +5605,15 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         showToast("房间与服务器缓存已彻底销毁")
     }
 
-    private fun mergeCachedMessage(cm: CachedMessage, fromCache: Boolean): ChatItem? {
-        val room = _uiState.value.activeRoom ?: return null
+    // 将服务端 CachedMessage 转换为本地 ChatItem；若为已存在的实时文件传输补全缓存直链则仅返回 null 并交由外部刷新
+    private fun buildChatItemFromCached(
+        roomCode: String,
+        cm: CachedMessage,
+        fromCache: Boolean,
+    ): ChatItem? {
         val isSelf = cm.senderId == selfPeerId
         if (!isSelf && isPeerBlockedInternal(cm.senderId, null, cm.senderName)) return null
-        val item = when (cm.kind) {
+        return when (cm.kind) {
             "image" -> if (!cm.mediaId.isNullOrBlank()) {
                 ChatItem(
                     id = cm.id,
@@ -5640,11 +5624,11 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                     isSelf = isSelf,
                     timestamp = cm.timestamp,
                     caption = cm.caption,
-                    imageUrl = api.buildCachedMediaUrl(room.roomCode, cm.mediaId),
+                    imageUrl = api.buildCachedMediaUrl(roomCode, cm.mediaId),
                     mediaId = cm.mediaId,
                     fromCache = fromCache,
                 )
-            } else return null
+            } else null
 
             "audio" -> if (!cm.mediaId.isNullOrBlank()) {
                 ChatItem(
@@ -5668,36 +5652,15 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                         isAudio = true,
                         direction = if (isSelf) TransferDirection.SEND else TransferDirection.RECEIVE,
                         status = TransferStatus.COMPLETED,
-                        cachedDownloadUrl = api.buildCachedMediaUrl(room.roomCode, cm.mediaId),
+                        cachedDownloadUrl = api.buildCachedMediaUrl(roomCode, cm.mediaId),
                         isHistoryRecord = true,
                     ),
                 )
-            } else return null
+            } else null
 
             "file_notice" -> {
                 val cachedUrl = cm.mediaId?.takeIf { it.isNotBlank() }
-                    ?.let { api.buildCachedFileUrl(room.roomCode, it) }
-                val basePrefix = cm.id.removePrefix("fnotice_")
-                val existingLive = room.messages.any { m ->
-                    m.kind == ChatKind.FILE && m.transfer != null &&
-                        (m.transfer.transferId == basePrefix || m.transfer.transferId.startsWith("${basePrefix}_"))
-                }
-                if (existingLive) {
-                    if (cachedUrl != null) {
-                        updateRoom { r ->
-                            r.copy(
-                                messages = r.messages.map { m ->
-                                    if (m.kind == ChatKind.FILE && m.transfer != null &&
-                                        (m.transfer.transferId == basePrefix || m.transfer.transferId.startsWith("${basePrefix}_"))
-                                    ) {
-                                        m.copy(transfer = m.transfer.copy(cachedDownloadUrl = cachedUrl))
-                                    } else m
-                                }
-                            )
-                        }
-                    }
-                    return null
-                }
+                    ?.let { api.buildCachedFileUrl(roomCode, it) }
                 ChatItem(
                     id = cm.id,
                     kind = ChatKind.FILE,
@@ -5745,9 +5708,77 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                 )
             }
         }
+    }
+
+    // 进房批量同步服务端历史记录：单次原子去重合并并按时间戳升序排列，保证最新消息始终在列表底部
+    private fun mergeCachedMessagesBatch(cachedList: List<CachedMessage>, fromCache: Boolean) {
+        if (cachedList.isEmpty()) return
+        updateRoom { r ->
+            val currentMessages = r.messages.toMutableList()
+            val existingIds = currentMessages.mapTo(HashSet()) { it.id }
+
+            cachedList.forEach { cm ->
+                if (cm.kind == "file_notice") {
+                    val basePrefix = cm.id.removePrefix("fnotice_")
+                    val cachedUrl = cm.mediaId?.takeIf { it.isNotBlank() }
+                        ?.let { api.buildCachedFileUrl(r.roomCode, it) }
+                    val existingLiveIdx = currentMessages.indexOfFirst { m ->
+                        m.kind == ChatKind.FILE && m.transfer != null &&
+                            (m.transfer.transferId == basePrefix || m.transfer.transferId.startsWith("${basePrefix}_"))
+                    }
+                    if (existingLiveIdx >= 0) {
+                        if (cachedUrl != null) {
+                            val live = currentMessages[existingLiveIdx]
+                            live.transfer?.let { tr ->
+                                currentMessages[existingLiveIdx] = live.copy(
+                                    transfer = tr.copy(cachedDownloadUrl = cachedUrl)
+                                )
+                            }
+                        }
+                        return@forEach
+                    }
+                }
+                if (cm.id in existingIds) return@forEach
+                val built = buildChatItemFromCached(r.roomCode, cm, fromCache) ?: return@forEach
+                existingIds.add(built.id)
+                currentMessages.add(built)
+            }
+
+            r.copy(messages = currentMessages.sortedBy { it.timestamp })
+        }
+    }
+
+    private fun mergeCachedMessage(cm: CachedMessage, fromCache: Boolean): ChatItem? {
+        val room = _uiState.value.activeRoom ?: return null
+        if (cm.kind == "file_notice") {
+            val cachedUrl = cm.mediaId?.takeIf { it.isNotBlank() }
+                ?.let { api.buildCachedFileUrl(room.roomCode, it) }
+            val basePrefix = cm.id.removePrefix("fnotice_")
+            val existingLive = room.messages.any { m ->
+                m.kind == ChatKind.FILE && m.transfer != null &&
+                    (m.transfer.transferId == basePrefix || m.transfer.transferId.startsWith("${basePrefix}_"))
+            }
+            if (existingLive) {
+                if (cachedUrl != null) {
+                    updateRoom { r ->
+                        r.copy(
+                            messages = r.messages.map { m ->
+                                if (m.kind == ChatKind.FILE && m.transfer != null &&
+                                    (m.transfer.transferId == basePrefix || m.transfer.transferId.startsWith("${basePrefix}_"))
+                                ) {
+                                    m.copy(transfer = m.transfer.copy(cachedDownloadUrl = cachedUrl))
+                                } else m
+                            }
+                        )
+                    }
+                }
+                return null
+            }
+        }
+        val item = buildChatItemFromCached(room.roomCode, cm, fromCache) ?: return null
         val inserted = appendMessageIfAbsent(item)
         if (!inserted) return null
-        if (!fromCache && !isSelf) {
+        if (!fromCache && !item.isSelf) {
             val previewText = when (item.kind) {
                 ChatKind.IMAGE -> "[图片]"
                 ChatKind.AUDIO -> "[语音消息]"
