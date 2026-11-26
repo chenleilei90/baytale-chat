@@ -1,5 +1,14 @@
 package com.baytale.baychat.ui.screens.update
 
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -13,21 +22,20 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Download
-import androidx.compose.material.icons.rounded.ErrorOutline
-import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.SystemUpdate
-import androidx.compose.material.icons.rounded.VerifiedUser
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -40,14 +48,106 @@ import com.baytale.baychat.ui.design.BayButtonSize
 import com.baytale.baychat.ui.design.BayButtonStyle
 import com.baytale.baychat.ui.design.BayCard
 import com.baytale.baychat.ui.design.BayDialog
-import com.baytale.baychat.ui.design.BayProgressBar
 import com.baytale.baychat.ui.theme.BayShapes
 import com.baytale.baychat.ui.theme.BaySpacing
 import com.baytale.baychat.ui.theme.BayTheme
 import com.baytale.baychat.ui.theme.BayType
 
 /**
- * 首页顶部应用自动更新状态横幅：覆盖 AVAILABLE / DOWNLOADING / PAUSED / VERIFYING / READY_TO_INSTALL / ERROR。
+ * 单条变色动效后台下载状态线：按状态区分颜色与动效（正在下载流光、暂停呼吸、失败红线、就绪绿线）。
+ */
+@Composable
+fun BayAnimatedStatusLine(
+    status: OtaUpdateStatus,
+    progress: Float,
+    modifier: Modifier = Modifier,
+) {
+    val colors = BayTheme.colors
+    val targetFraction = when (status) {
+        OtaUpdateStatus.VERIFYING,
+        OtaUpdateStatus.READY_TO_INSTALL -> 1f
+        OtaUpdateStatus.ERROR -> progress.coerceIn(0.18f, 1f)
+        else -> progress.coerceIn(0.04f, 1f)
+    }
+    val animatedFraction by animateFloatAsState(
+        targetValue = targetFraction,
+        animationSpec = tween(durationMillis = 260, easing = FastOutSlowInEasing),
+        label = "otaLineFraction",
+    )
+
+    val infiniteTransition = rememberInfiniteTransition(label = "otaStatusLineMotion")
+    // 下载/校验中：沿线持续向右扫过的亮光偏移（-0.25..1.25）
+    val flowPhase by infiniteTransition.animateFloat(
+        initialValue = -0.25f,
+        targetValue = 1.25f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1200, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart,
+        ),
+        label = "otaLineFlow",
+    )
+    // 暂停中：柔和呼吸透明度脉冲
+    val breathAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.45f,
+        targetValue = 1.0f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 950, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "otaLineBreath",
+    )
+
+    val lineColor = when (status) {
+        OtaUpdateStatus.PAUSED -> colors.warning
+        OtaUpdateStatus.ERROR -> colors.danger
+        OtaUpdateStatus.READY_TO_INSTALL -> colors.success
+        else -> colors.accent
+    }
+    val lineAlpha = if (status == OtaUpdateStatus.PAUSED) breathAlpha else 1f
+
+    Canvas(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(4.dp)
+            .clip(BayShapes.fullShape),
+    ) {
+        val radius = CornerRadius(size.height / 2f, size.height / 2f)
+        // 底轨
+        drawRoundRect(
+            color = colors.fill,
+            topLeft = Offset.Zero,
+            size = size,
+            cornerRadius = radius,
+        )
+
+        val activeWidth = (size.width * animatedFraction).coerceAtLeast(size.height)
+        drawRoundRect(
+            color = lineColor.copy(alpha = lineAlpha),
+            topLeft = Offset.Zero,
+            size = Size(width = activeWidth, height = size.height),
+            cornerRadius = radius,
+        )
+
+        // 正在下载 / 正在校验：在进度条上叠加平滑流动的高光脉冲段
+        if (status == OtaUpdateStatus.DOWNLOADING || status == OtaUpdateStatus.VERIFYING) {
+            val pulseWidth = (activeWidth * 0.28f).coerceAtLeast(size.height * 3f).coerceAtMost(activeWidth)
+            val travelSpan = (activeWidth - pulseWidth).coerceAtLeast(0f)
+            val pulseX = (flowPhase.coerceIn(0f, 1f) * travelSpan)
+            val shimmerAlpha = if (flowPhase in 0f..1f) 0.48f else 0.16f
+            drawRoundRect(
+                color = colors.onAccent.copy(alpha = shimmerAlpha),
+                topLeft = Offset(x = pulseX, y = 0f),
+                size = Size(width = pulseWidth, height = size.height),
+                cornerRadius = radius,
+            )
+        }
+    }
+}
+
+/**
+ * 首页顶部应用自动更新状态横幅：
+ * - AVAILABLE：显示新版本发现提示与操作按钮
+ * - DOWNLOADING / PAUSED / VERIFYING / READY_TO_INSTALL / ERROR：极简单行状态与百分比 + 单条变色动效状态线
  */
 @Composable
 fun UpdateBannerCard(
@@ -89,8 +189,7 @@ fun UpdateBannerCard(
                             overflow = TextOverflow.Ellipsis,
                         )
                         val desc = when {
-                            ota.hasPartialBreakpoint ->
-                                "已保存进度 ${ota.progressPercent}% (${FormatUtils.formatBytes(ota.downloadedBytes)} / ${FormatUtils.formatBytes(ota.totalBytes)})"
+                            ota.hasPartialBreakpoint -> "已保存断点 ${ota.progressPercent}%，可继续更新"
                             release.releaseNotes.isNotBlank() -> release.releaseNotes
                             release.sizeBytes > 0L -> "安装包 ${FormatUtils.formatBytes(release.sizeBytes)} · 支持断点续传"
                             else -> "支持后台断点下载与 SHA-256 校验"
@@ -126,202 +225,110 @@ fun UpdateBannerCard(
                 }
             }
 
-            OtaUpdateStatus.DOWNLOADING -> {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        val speedLabel = if (ota.speedBytesPerSec > 0L) {
-                            " · ${FormatUtils.formatBytes(ota.speedBytesPerSec)}/s"
-                        } else ""
-                        Text(
-                            text = "正在下载 v${release.versionName} · ${ota.progressPercent}%$speedLabel",
-                            style = BayType.subhead.copy(fontWeight = FontWeight.SemiBold),
-                            color = colors.accent,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        val sizeLine = buildString {
-                            append(FormatUtils.formatBytes(ota.downloadedBytes))
-                            if (ota.totalBytes > 0L) append(" / ${FormatUtils.formatBytes(ota.totalBytes)}")
-                            append(" · 支持后台继续")
-                        }
-                        Text(
-                            text = sizeLine,
-                            style = BayType.caption,
-                            color = colors.textSecondary,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(BaySpacing.sm))
-                    BayButton(
-                        text = "暂停",
-                        onClick = onPause,
-                        leadingIcon = Icons.Rounded.Pause,
-                        style = BayButtonStyle.Secondary,
-                        size = BayButtonSize.Small,
-                    )
-                }
-                Spacer(modifier = Modifier.height(BaySpacing.sm))
-                BayProgressBar(
-                    fraction = ota.progressFraction.coerceIn(0.02f, 1f),
-                    color = colors.accent,
-                    trackColor = colors.fill,
-                )
-            }
-
-            OtaUpdateStatus.PAUSED -> {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "v${release.versionName} 下载已暂停 · ${ota.progressPercent}%",
-                            style = BayType.subhead.copy(fontWeight = FontWeight.SemiBold),
-                            color = colors.warning,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        Text(
-                            text = "已保留进度 ${FormatUtils.formatBytes(ota.downloadedBytes)}" +
-                                if (ota.totalBytes > 0L) " / ${FormatUtils.formatBytes(ota.totalBytes)}" else "",
-                            style = BayType.caption,
-                            color = colors.textSecondary,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(BaySpacing.sm))
-                    BayButton(
-                        text = "继续下载",
-                        onClick = onStartOrResume,
-                        style = BayButtonStyle.Secondary,
-                        size = BayButtonSize.Small,
-                    )
-                }
-                Spacer(modifier = Modifier.height(BaySpacing.sm))
-                BayProgressBar(
-                    fraction = ota.progressFraction.coerceIn(0.02f, 1f),
-                    color = colors.warning,
-                    trackColor = colors.fill,
-                )
-            }
-
-            OtaUpdateStatus.VERIFYING -> {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(BaySpacing.md),
-                ) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(18.dp),
-                        strokeWidth = 2.dp,
-                        strokeCap = StrokeCap.Round,
-                        color = colors.accent,
-                    )
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "正在校验 v${release.versionName} 安装包",
-                            style = BayType.subhead.copy(fontWeight = FontWeight.SemiBold),
-                            color = colors.textPrimary,
-                        )
-                        Text(
-                            text = "正在执行 SHA-256 完整性校验...",
-                            style = BayType.caption,
-                            color = colors.textSecondary,
-                        )
-                    }
-                }
-                Spacer(modifier = Modifier.height(BaySpacing.sm))
-                BayProgressBar(
-                    fraction = 1f,
-                    color = colors.accent,
-                    trackColor = colors.fill,
-                )
-            }
-
-            OtaUpdateStatus.READY_TO_INSTALL -> {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
-                    BannerIconBadge(
-                        icon = Icons.Rounded.VerifiedUser,
-                        tint = colors.success,
-                        container = colors.success.copy(alpha = if (colors.isDark) 0.22f else 0.12f),
-                    )
-                    Spacer(modifier = Modifier.width(BaySpacing.md))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "v${release.versionName} 安装包已就绪",
-                            style = BayType.subhead.copy(fontWeight = FontWeight.SemiBold),
-                            color = colors.success,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        Text(
-                            text = "已完成 SHA-256 安全校验，点击即可安装",
-                            style = BayType.caption,
-                            color = colors.textSecondary,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(BaySpacing.sm))
-                    BayButton(
-                        text = "立即安装",
-                        onClick = onInstall,
-                        style = BayButtonStyle.Primary,
-                        size = BayButtonSize.Small,
-                    )
-                }
-            }
-
+            OtaUpdateStatus.DOWNLOADING,
+            OtaUpdateStatus.PAUSED,
+            OtaUpdateStatus.VERIFYING,
+            OtaUpdateStatus.READY_TO_INSTALL,
             OtaUpdateStatus.ERROR -> {
-                Row(
+                val statusColor = when (ota.status) {
+                    OtaUpdateStatus.PAUSED -> colors.warning
+                    OtaUpdateStatus.ERROR -> colors.danger
+                    OtaUpdateStatus.READY_TO_INSTALL -> colors.success
+                    else -> colors.accent
+                }
+                val statusText = when (ota.status) {
+                    OtaUpdateStatus.DOWNLOADING -> "正在下载 v${release.versionName}"
+                    OtaUpdateStatus.PAUSED -> "下载暂停"
+                    OtaUpdateStatus.VERIFYING -> "正在校验完整性"
+                    OtaUpdateStatus.READY_TO_INSTALL -> "v${release.versionName} 已就绪"
+                    OtaUpdateStatus.ERROR -> "下载失败"
+                    else -> ""
+                }
+                val percentText = when (ota.status) {
+                    OtaUpdateStatus.READY_TO_INSTALL -> "100%"
+                    OtaUpdateStatus.VERIFYING -> "校验中"
+                    else -> "${ota.progressPercent}%"
+                }
+
+                Column(
                     modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalArrangement = Arrangement.spacedBy(BaySpacing.sm),
                 ) {
-                    BannerIconBadge(
-                        icon = Icons.Rounded.ErrorOutline,
-                        tint = colors.danger,
-                        container = colors.danger.copy(alpha = if (colors.isDark) 0.22f else 0.12f),
-                    )
-                    Spacer(modifier = Modifier.width(BaySpacing.md))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "v${release.versionName} 更新中断",
-                            style = BayType.subhead.copy(fontWeight = FontWeight.SemiBold),
-                            color = colors.danger,
-                            maxLines = 1,
-                        )
-                        val errText = buildString {
-                            append(ota.errorMessage ?: "网络连接中断")
-                            if (ota.hasPartialBreakpoint) {
-                                append("（已保留 ${ota.progressPercent}% 断点）")
-                            }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Row(
+                            modifier = Modifier.weight(1f),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(BaySpacing.sm),
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(8.dp)
+                                    .clip(CircleShape)
+                                    .background(statusColor),
+                            )
+                            Text(
+                                text = statusText,
+                                style = BayType.subhead.copy(fontWeight = FontWeight.SemiBold),
+                                color = colors.textPrimary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false),
+                            )
+                            Text(
+                                text = percentText,
+                                style = BayType.subhead.copy(fontWeight = FontWeight.SemiBold),
+                                color = statusColor,
+                                maxLines = 1,
+                            )
                         }
-                        Text(
-                            text = errText,
-                            style = BayType.caption,
-                            color = colors.textSecondary,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                        )
+
+                        Spacer(modifier = Modifier.width(BaySpacing.sm))
+
+                        when (ota.status) {
+                            OtaUpdateStatus.DOWNLOADING -> {
+                                BayButton(
+                                    text = "暂停",
+                                    onClick = onPause,
+                                    style = BayButtonStyle.Secondary,
+                                    size = BayButtonSize.Small,
+                                )
+                            }
+                            OtaUpdateStatus.PAUSED -> {
+                                BayButton(
+                                    text = "继续",
+                                    onClick = onStartOrResume,
+                                    style = BayButtonStyle.Primary,
+                                    size = BayButtonSize.Small,
+                                )
+                            }
+                            OtaUpdateStatus.ERROR -> {
+                                BayButton(
+                                    text = "重试",
+                                    onClick = onStartOrResume,
+                                    style = BayButtonStyle.DestructiveSoft,
+                                    size = BayButtonSize.Small,
+                                )
+                            }
+                            OtaUpdateStatus.READY_TO_INSTALL -> {
+                                BayButton(
+                                    text = "安装",
+                                    onClick = onInstall,
+                                    style = BayButtonStyle.Primary,
+                                    size = BayButtonSize.Small,
+                                )
+                            }
+                            else -> Unit
+                        }
                     }
-                    Spacer(modifier = Modifier.width(BaySpacing.sm))
-                    BayButton(
-                        text = "重试",
-                        onClick = onStartOrResume,
-                        style = BayButtonStyle.DestructiveSoft,
-                        size = BayButtonSize.Small,
+
+                    // 单条变色动效状态线
+                    BayAnimatedStatusLine(
+                        status = ota.status,
+                        progress = ota.progressFraction,
                     )
                 }
             }
@@ -433,14 +440,13 @@ fun UpdateAvailableDialog(
                     if (ota.hasPartialBreakpoint) {
                         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Text(
-                                text = "检测到本地断点 ${ota.progressPercent}%（${FormatUtils.formatBytes(ota.downloadedBytes)} / ${FormatUtils.formatBytes(ota.totalBytes)}）",
+                                text = "检测到本地断点 ${ota.progressPercent}%",
                                 style = BayType.caption.copy(fontWeight = FontWeight.Medium),
                                 color = colors.accent,
                             )
-                            BayProgressBar(
-                                fraction = ota.progressFraction.coerceIn(0.02f, 1f),
-                                color = colors.accent,
-                                trackColor = colors.accentSoft,
+                            BayAnimatedStatusLine(
+                                status = ota.status,
+                                progress = ota.progressFraction,
                             )
                         }
                     } else {
@@ -459,47 +465,43 @@ fun UpdateAvailableDialog(
                             horizontalArrangement = Arrangement.SpaceBetween,
                         ) {
                             Text(
-                                text = "正在后台下载 · ${ota.progressPercent}%",
+                                text = "正在下载",
+                                style = BayType.caption.copy(fontWeight = FontWeight.SemiBold),
+                                color = colors.textPrimary,
+                            )
+                            Text(
+                                text = "${ota.progressPercent}%",
                                 style = BayType.caption.copy(fontWeight = FontWeight.SemiBold),
                                 color = colors.accent,
                             )
-                            if (ota.speedBytesPerSec > 0L) {
-                                Text(
-                                    text = "${FormatUtils.formatBytes(ota.speedBytesPerSec)}/s",
-                                    style = BayType.caption.copy(fontWeight = FontWeight.SemiBold),
-                                    color = colors.textSecondary,
-                                )
-                            }
                         }
-                        BayProgressBar(
-                            fraction = ota.progressFraction.coerceIn(0.02f, 1f),
-                            color = colors.accent,
-                            trackColor = colors.accentSoft,
-                        )
-                        Text(
-                            text = "${FormatUtils.formatBytes(ota.downloadedBytes)} / ${FormatUtils.formatBytes(ota.totalBytes)}",
-                            style = BayType.caption,
-                            color = colors.textSecondary,
+                        BayAnimatedStatusLine(
+                            status = ota.status,
+                            progress = ota.progressFraction,
                         )
                     }
                 }
 
                 OtaUpdateStatus.PAUSED -> {
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text(
-                            text = "下载已暂停 · 已保存 ${ota.progressPercent}%",
-                            style = BayType.caption.copy(fontWeight = FontWeight.SemiBold),
-                            color = colors.warning,
-                        )
-                        BayProgressBar(
-                            fraction = ota.progressFraction.coerceIn(0.02f, 1f),
-                            color = colors.warning,
-                            trackColor = colors.fill,
-                        )
-                        Text(
-                            text = "已保存 ${FormatUtils.formatBytes(ota.downloadedBytes)}，点击继续可从断点续传",
-                            style = BayType.caption,
-                            color = colors.textSecondary,
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Text(
+                                text = "下载暂停",
+                                style = BayType.caption.copy(fontWeight = FontWeight.SemiBold),
+                                color = colors.textPrimary,
+                            )
+                            Text(
+                                text = "${ota.progressPercent}%",
+                                style = BayType.caption.copy(fontWeight = FontWeight.SemiBold),
+                                color = colors.warning,
+                            )
+                        }
+                        BayAnimatedStatusLine(
+                            status = ota.status,
+                            progress = ota.progressFraction,
                         )
                     }
                 }
@@ -511,56 +513,61 @@ fun UpdateAvailableDialog(
                             style = BayType.caption.copy(fontWeight = FontWeight.SemiBold),
                             color = colors.accent,
                         )
-                        BayProgressBar(
-                            fraction = 1f,
-                            color = colors.accent,
-                            trackColor = colors.accentSoft,
+                        BayAnimatedStatusLine(
+                            status = ota.status,
+                            progress = 1f,
                         )
                     }
                 }
 
                 OtaUpdateStatus.READY_TO_INSTALL -> {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(BayShapes.smShape)
-                            .background(colors.success.copy(alpha = if (colors.isDark) 0.22f else 0.12f))
-                            .padding(BaySpacing.md),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(BaySpacing.sm),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Download,
-                            contentDescription = null,
-                            tint = colors.success,
-                            modifier = Modifier.size(18.dp),
-                        )
-                        Text(
-                            text = "v${release.versionName} 已通过 SHA-256 校验，可立即安装覆盖升级",
-                            style = BayType.caption.copy(fontWeight = FontWeight.Medium),
-                            color = colors.success,
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Text(
+                                text = "v${release.versionName} 已就绪",
+                                style = BayType.caption.copy(fontWeight = FontWeight.Medium),
+                                color = colors.success,
+                            )
+                            Text(
+                                text = "100%",
+                                style = BayType.caption.copy(fontWeight = FontWeight.SemiBold),
+                                color = colors.success,
+                            )
+                        }
+                        BayAnimatedStatusLine(
+                            status = ota.status,
+                            progress = 1f,
                         )
                     }
                 }
 
                 OtaUpdateStatus.ERROR -> {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(BayShapes.smShape)
-                            .background(colors.danger.copy(alpha = if (colors.isDark) 0.22f else 0.12f))
-                            .padding(BaySpacing.md),
-                    ) {
-                        val errDetail = buildString {
-                            append(ota.errorMessage ?: "下载中断")
-                            if (ota.hasPartialBreakpoint) {
-                                append("（已保留 ${ota.progressPercent}% 断点）")
-                            }
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Text(
+                                text = ota.errorMessage ?: "下载失败",
+                                style = BayType.caption.copy(fontWeight = FontWeight.Medium),
+                                color = colors.danger,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Spacer(modifier = Modifier.width(BaySpacing.sm))
+                            Text(
+                                text = "${ota.progressPercent}%",
+                                style = BayType.caption.copy(fontWeight = FontWeight.SemiBold),
+                                color = colors.danger,
+                            )
                         }
-                        Text(
-                            text = errDetail,
-                            style = BayType.caption.copy(fontWeight = FontWeight.Medium),
-                            color = colors.danger,
+                        BayAnimatedStatusLine(
+                            status = ota.status,
+                            progress = ota.progressFraction,
                         )
                     }
                 }

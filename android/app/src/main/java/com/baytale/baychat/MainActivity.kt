@@ -366,6 +366,16 @@ class MainActivity : ComponentActivity() {
                 viewModel.openUpdateDialog()
             }
 
+            AppUpdateService.ACTION_RESUME_OTA_DOWNLOAD -> {
+                val release = AppUpdateService.extractReleaseFromIntent(intent)
+                if (release != null && com.baytale.baychat.service.AppUpdateCenter.state.value.release == null) {
+                    com.baytale.baychat.service.AppUpdateCenter.updateState {
+                        it.copy(status = com.baytale.baychat.service.OtaUpdateStatus.PAUSED, release = release)
+                    }
+                }
+                viewModel.startOrResumeAppUpdate(silent = false)
+            }
+
             AppUpdateService.ACTION_OPEN_OTA_INSTALL -> {
                 viewModel.installReadyAppUpdate()
             }

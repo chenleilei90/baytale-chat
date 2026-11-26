@@ -34,12 +34,15 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 import java.io.File
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 // 应用自动更新状态机枚举
@@ -115,6 +118,9 @@ class AppUpdateService : Service() {
     private val pauseRequested = AtomicBoolean(false)
     private val silentBackgroundFlag = AtomicBoolean(false)
     private val runGeneration = AtomicLong(0L)
+    private val latestStartId = AtomicInteger(0)
+    // 串行化下载任务生命周期，严禁新旧协程并发写入同一个 .part 文件
+    private val downloadMutex = Mutex()
 
     @Volatile
     private var downloadJob: Job? = null
@@ -135,21 +141,22 @@ class AppUpdateService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         ensureChannel(this)
+        latestStartId.set(startId)
         when (intent?.action) {
             ACTION_PAUSE_DOWNLOAD -> {
-                handlePauseRequest()
+                handlePauseRequest(startId)
                 return START_NOT_STICKY
             }
 
             ACTION_CANCEL_DOWNLOAD -> {
-                handleCancelRequest()
+                handleCancelRequest(startId)
                 return START_NOT_STICKY
             }
 
             ACTION_START_DOWNLOAD, ACTION_RESUME_DOWNLOAD -> {
                 val release = extractRelease(intent) ?: AppUpdateCenter.state.value.release
                 if (release == null) {
-                    stopForegroundAndSelf()
+                    stopForegroundAndSelf(startId)
                     return START_NOT_STICKY
                 }
                 val isResume = intent.action == ACTION_RESUME_DOWNLOAD
@@ -158,12 +165,17 @@ class AppUpdateService : Service() {
                     EXTRA_FORCE_UPDATE,
                     AppUpdateCenter.state.value.isForceUpdate || release.forceUpdate,
                 )
-                handleStartOrResumeDownload(release = release, silent = silent, forceUpdate = forceUpdate)
+                handleStartOrResumeDownload(
+                    release = release,
+                    silent = silent,
+                    forceUpdate = forceUpdate,
+                    startId = startId,
+                )
                 return START_NOT_STICKY
             }
 
             else -> {
-                stopForegroundAndSelf()
+                stopForegroundAndSelf(startId)
                 return START_NOT_STICKY
             }
         }
@@ -171,7 +183,7 @@ class AppUpdateService : Service() {
 
     // Android 15 (API 35) dataSync 前台服务超时安全回调：优雅暂停并保留 .part 断点，绝不崩溃
     override fun onTimeout(startId: Int, fgsType: Int) {
-        handlePauseRequest()
+        handlePauseRequest(startId)
     }
 
     override fun onDestroy() {
@@ -187,6 +199,7 @@ class AppUpdateService : Service() {
         release: AppReleaseInfo,
         silent: Boolean,
         forceUpdate: Boolean,
+        startId: Int,
     ) {
         // 若当前已经在下载同一目标版本且未处于暂停中：不重启任务；若由静默切换为主动更新，同步升级标记
         val existingJob = downloadJob
@@ -209,7 +222,8 @@ class AppUpdateService : Service() {
             return
         }
 
-        // 先立即拉起前台通知，严格满足 Android 12-15 startForegroundService 5 秒内 startForeground 约束
+        // 递增世代号并先立即拉起前台通知，严格满足 Android 12-15 startForegroundService 5 秒内约束
+        val myGeneration = runGeneration.incrementAndGet()
         pauseRequested.set(false)
         silentBackgroundFlag.set(silent)
         activeVersionCode = release.versionCode
@@ -255,7 +269,7 @@ class AppUpdateService : Service() {
                     speedBytesPerSec = 0L,
                 )
             }
-            stopSelf()
+            stopSelfResult(startId)
             return
         }
 
@@ -264,190 +278,224 @@ class AppUpdateService : Service() {
         acquireLocks()
 
         val previousJob = downloadJob
-        val myGeneration = runGeneration.incrementAndGet()
         val updateManager = AppUpdateManager(applicationContext, otaHttpClient)
 
         downloadJob = serviceScope.launch {
-            // 等待上一个任务彻底释放文件句柄后再操作 .part，杜绝并发写入冲突
+            // 等待上一个任务彻底释放文件句柄后再拿锁进入下载，杜绝并发写坏 .part 引发 SHA-256 失败二次重下
             if (previousJob != null && previousJob.isActive) {
                 runCatching { previousJob.cancelAndJoin() }
             }
-            if (runGeneration.get() != myGeneration) return@launch
+            downloadMutex.withLock {
+                if (runGeneration.get() != myGeneration) return@withLock
 
-            try {
-                val result = updateManager.downloadRelease(
-                    release = release,
-                    shouldPause = { pauseRequested.get() || runGeneration.get() != myGeneration },
-                    onVerifying = {
-                        if (runGeneration.get() == myGeneration) {
+                try {
+                    val result = updateManager.downloadRelease(
+                        release = release,
+                        shouldPause = { pauseRequested.get() || runGeneration.get() != myGeneration },
+                        onVerifying = {
+                            if (runGeneration.get() == myGeneration) {
+                                AppUpdateCenter.updateState {
+                                    it.copy(
+                                        status = OtaUpdateStatus.VERIFYING,
+                                        speedBytesPerSec = 0L,
+                                    )
+                                }
+                                notifySafely(
+                                    NOTIFICATION_ID_PROGRESS,
+                                    buildProgressNotification(
+                                        release = release,
+                                        downloadedBytes = AppUpdateCenter.state.value.downloadedBytes,
+                                        totalBytes = AppUpdateCenter.state.value.totalBytes.coerceAtLeast(release.sizeBytes),
+                                        speedBps = 0L,
+                                        verifying = true,
+                                    ),
+                                )
+                            }
+                        },
+                        onProgress = { downloaded, total, speedBps, attempt ->
+                            if (runGeneration.get() == myGeneration) {
+                                val resolvedTotal = total.takeIf { it > 0L } ?: release.sizeBytes
+                                AppUpdateCenter.updateState {
+                                    it.copy(
+                                        status = OtaUpdateStatus.DOWNLOADING,
+                                        release = release,
+                                        downloadedBytes = downloaded,
+                                        totalBytes = resolvedTotal,
+                                        speedBytesPerSec = speedBps,
+                                        attempt = attempt,
+                                        errorMessage = null,
+                                    )
+                                }
+                                maybeUpdateProgressNotification(release, downloaded, resolvedTotal, speedBps)
+                            }
+                        },
+                    )
+
+                    // 若期间已触发新的暂停/重启，旧协程立即静默退出，绝不覆盖新状态
+                    if (runGeneration.get() != myGeneration) return@withLock
+
+                    when (result) {
+                        is ResumableApkDownloader.DownloadResult.Success -> {
+                            val finalSize = result.apkFile.length()
                             AppUpdateCenter.updateState {
                                 it.copy(
-                                    status = OtaUpdateStatus.VERIFYING,
+                                    status = OtaUpdateStatus.READY_TO_INSTALL,
+                                    release = release,
+                                    downloadedBytes = finalSize,
+                                    totalBytes = finalSize,
                                     speedBytesPerSec = 0L,
-                                )
-                            }
-                            notifySafely(
-                                NOTIFICATION_ID_PROGRESS,
-                                buildProgressNotification(
-                                    release = release,
-                                    downloadedBytes = AppUpdateCenter.state.value.downloadedBytes,
-                                    totalBytes = AppUpdateCenter.state.value.totalBytes.coerceAtLeast(release.sizeBytes),
-                                    speedBps = 0L,
-                                    verifying = true,
-                                ),
-                            )
-                        }
-                    },
-                    onProgress = { downloaded, total, speedBps, attempt ->
-                        if (runGeneration.get() == myGeneration) {
-                            val resolvedTotal = total.takeIf { it > 0L } ?: release.sizeBytes
-                            AppUpdateCenter.updateState {
-                                it.copy(
-                                    status = OtaUpdateStatus.DOWNLOADING,
-                                    release = release,
-                                    downloadedBytes = downloaded,
-                                    totalBytes = resolvedTotal,
-                                    speedBytesPerSec = speedBps,
-                                    attempt = attempt,
                                     errorMessage = null,
+                                    apkFilePath = result.apkFile.absolutePath,
                                 )
                             }
-                            maybeUpdateProgressNotification(release, downloaded, resolvedTotal, speedBps)
-                        }
-                    },
-                )
 
-                // 若期间已触发新的暂停/重启，旧协程立即静默退出，绝不覆盖新状态
-                if (runGeneration.get() != myGeneration) return@launch
+                            // 停止前台锁与进度通知，发送高优先级可点击完成通知
+                            releaseLocks()
+                            stopForeground(STOP_FOREGROUND_REMOVE)
+                            notificationManager()?.cancel(NOTIFICATION_ID_PROGRESS)
+                            notifySafely(NOTIFICATION_ID_READY, buildReadyToInstallNotification(release, result.apkFile))
 
-                when (result) {
-                    is ResumableApkDownloader.DownloadResult.Success -> {
-                        val finalSize = result.apkFile.length()
-                        AppUpdateCenter.updateState {
-                            it.copy(
-                                status = OtaUpdateStatus.READY_TO_INSTALL,
-                                release = release,
-                                downloadedBytes = finalSize,
-                                totalBytes = finalSize,
-                                speedBytesPerSec = 0L,
-                                errorMessage = null,
-                                apkFilePath = result.apkFile.absolutePath,
-                            )
-                        }
-
-                        // 停止前台锁与进度通知，发送高优先级可点击完成通知
-                        releaseLocks()
-                        stopForeground(STOP_FOREGROUND_REMOVE)
-                        notificationManager()?.cancel(NOTIFICATION_ID_PROGRESS)
-                        notifySafely(NOTIFICATION_ID_READY, buildReadyToInstallNotification(release, result.apkFile))
-
-                        // 主动点击更新（非静默后台）时，校验通过立刻拉起系统包安装器
-                        if (!silentBackgroundFlag.get()) {
-                            val outcome = withContext(Dispatchers.Main) {
-                                AppUpdateManager.launchInstaller(applicationContext, result.apkFile)
-                            }
-                            when (outcome) {
-                                is AppUpdateManager.UpdateInstallOutcome.InstallerLaunched -> {
-                                    AppUpdateCenter.emitEvent(OtaUiEvent.InstallerLaunched)
+                            // 主动点击更新（非静默后台）时，校验通过立刻拉起系统包安装器
+                            if (!silentBackgroundFlag.get()) {
+                                val outcome = withContext(Dispatchers.Main) {
+                                    AppUpdateManager.launchInstaller(applicationContext, result.apkFile)
                                 }
-                                is AppUpdateManager.UpdateInstallOutcome.NeedInstallPermission -> {
-                                    AppUpdateCenter.emitEvent(OtaUiEvent.NeedInstallPermission)
-                                }
-                                is AppUpdateManager.UpdateInstallOutcome.Error -> {
-                                    AppUpdateCenter.emitEvent(OtaUiEvent.Toast(outcome.message))
+                                when (outcome) {
+                                    is AppUpdateManager.UpdateInstallOutcome.InstallerLaunched -> {
+                                        AppUpdateCenter.emitEvent(OtaUiEvent.InstallerLaunched)
+                                    }
+                                    is AppUpdateManager.UpdateInstallOutcome.NeedInstallPermission -> {
+                                        AppUpdateCenter.emitEvent(OtaUiEvent.NeedInstallPermission)
+                                    }
+                                    is AppUpdateManager.UpdateInstallOutcome.Error -> {
+                                        AppUpdateCenter.emitEvent(OtaUiEvent.Toast(outcome.message))
+                                    }
                                 }
                             }
+                            if (runGeneration.get() == myGeneration) {
+                                stopSelfResult(startId)
+                            }
                         }
-                        stopSelf()
-                    }
 
-                    is ResumableApkDownloader.DownloadResult.Paused -> {
-                        onDownloadPaused(
-                            release = release,
-                            downloadedBytes = result.downloadedBytes,
-                            totalBytes = result.totalBytes.coerceAtLeast(release.sizeBytes),
-                        )
-                    }
-
-                    is ResumableApkDownloader.DownloadResult.Error -> {
-                        releaseLocks()
-                        stopForeground(STOP_FOREGROUND_REMOVE)
-                        notificationManager()?.cancel(NOTIFICATION_ID_PROGRESS)
-
-                        val resolvedTotal = result.totalBytes.coerceAtLeast(release.sizeBytes)
-                        AppUpdateCenter.updateState {
-                            it.copy(
-                                status = OtaUpdateStatus.ERROR,
+                        is ResumableApkDownloader.DownloadResult.Paused -> {
+                            onDownloadPaused(
                                 release = release,
                                 downloadedBytes = result.downloadedBytes,
-                                totalBytes = resolvedTotal,
-                                speedBytesPerSec = 0L,
-                                errorMessage = result.message,
-                                apkFilePath = null,
+                                totalBytes = result.totalBytes.coerceAtLeast(release.sizeBytes),
+                                expectedGen = myGeneration,
+                                stopStartId = startId,
                             )
                         }
 
-                        // 静默后台下载出错时不打扰用户通知栏；主动更新则发出可一键续传的提示通知
-                        if (!silentBackgroundFlag.get()) {
-                            notifySafely(
-                                NOTIFICATION_ID_PROGRESS,
-                                buildErrorNotification(release, result.message),
-                            )
+                        is ResumableApkDownloader.DownloadResult.Error -> {
+                            releaseLocks()
+                            stopForeground(STOP_FOREGROUND_REMOVE)
+                            notificationManager()?.cancel(NOTIFICATION_ID_PROGRESS)
+
+                            val resolvedTotal = result.totalBytes.coerceAtLeast(release.sizeBytes)
+                            AppUpdateCenter.updateState {
+                                it.copy(
+                                    status = OtaUpdateStatus.ERROR,
+                                    release = release,
+                                    downloadedBytes = result.downloadedBytes,
+                                    totalBytes = resolvedTotal,
+                                    speedBytesPerSec = 0L,
+                                    errorMessage = result.message,
+                                    apkFilePath = null,
+                                )
+                            }
+
+                            // 静默后台下载出错时不打扰用户通知栏；主动更新则发出可一键续传的提示通知
+                            if (!silentBackgroundFlag.get()) {
+                                notifySafely(
+                                    NOTIFICATION_ID_PROGRESS,
+                                    buildErrorNotification(release, result.message),
+                                )
+                            }
+                            if (runGeneration.get() == myGeneration) {
+                                stopSelfResult(startId)
+                            }
                         }
-                        stopSelf()
+                    }
+                } catch (_: CancellationException) {
+                    // 协程取消时绝不删除 .part 断点；暂停状态由 handlePauseRequest 统一收敛，避免重复写通知
+                } catch (e: Exception) {
+                    if (runGeneration.get() != myGeneration) return@withLock
+                    releaseLocks()
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    val msg = e.message ?: "后台更新服务异常中断"
+                    AppUpdateCenter.updateState {
+                        it.copy(
+                            status = OtaUpdateStatus.ERROR,
+                            speedBytesPerSec = 0L,
+                            errorMessage = msg,
+                        )
+                    }
+                    if (runGeneration.get() == myGeneration) {
+                        stopSelfResult(startId)
                     }
                 }
-            } catch (_: CancellationException) {
-                // 协程取消时绝不删除 .part 断点；暂停状态由 handlePauseRequest 统一收敛，避免重复写通知
-            } catch (e: Exception) {
-                if (runGeneration.get() != myGeneration) return@launch
-                releaseLocks()
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                val msg = e.message ?: "后台更新服务异常中断"
-                AppUpdateCenter.updateState {
-                    it.copy(
-                        status = OtaUpdateStatus.ERROR,
-                        speedBytesPerSec = 0L,
-                        errorMessage = msg,
-                    )
-                }
-                stopSelf()
             }
         }
     }
 
-    private fun handlePauseRequest() {
-        runGeneration.incrementAndGet()
+    private fun handlePauseRequest(startId: Int) {
+        val pauseGen = runGeneration.incrementAndGet()
         pauseRequested.set(true)
-        downloadJob?.cancel()
-        downloadJob = null
-        val snapshot = AppUpdateCenter.state.value
-        val release = snapshot.release
-        if (release != null) {
-            onDownloadPaused(
-                release = release,
-                downloadedBytes = snapshot.downloadedBytes,
-                totalBytes = snapshot.totalBytes.coerceAtLeast(release.sizeBytes),
-            )
-        } else {
-            stopForegroundAndSelf()
+        val activeJob = downloadJob
+        // 先触发取消并等待旧下载协程彻底退出、关闭 .part 文件流；绝不提前把 downloadJob 置空或同步 stopSelf()
+        activeJob?.cancel()
+        serviceScope.launch {
+            if (activeJob != null) {
+                runCatching { activeJob.join() }
+            }
+            if (runGeneration.get() != pauseGen) return@launch
+
+            val snapshot = AppUpdateCenter.state.value
+            val release = snapshot.release
+            if (release != null) {
+                val diskPartLen = ResumableApkDownloader.targetPartFile(
+                    AppUpdateManager.updatesDir(this@AppUpdateService),
+                    release,
+                ).takeIf { it.exists() && it.isFile }?.length() ?: 0L
+                val finalDownloaded = maxOf(snapshot.downloadedBytes, diskPartLen)
+                onDownloadPaused(
+                    release = release,
+                    downloadedBytes = finalDownloaded,
+                    totalBytes = snapshot.totalBytes.coerceAtLeast(release.sizeBytes),
+                    expectedGen = pauseGen,
+                    stopStartId = startId,
+                )
+            } else {
+                stopForegroundAndSelf(startId, expectedGen = pauseGen)
+            }
         }
     }
 
-    private fun handleCancelRequest() {
-        runGeneration.incrementAndGet()
+    private fun handleCancelRequest(startId: Int) {
+        val cancelGen = runGeneration.incrementAndGet()
         pauseRequested.set(true)
-        downloadJob?.cancel()
-        downloadJob = null
+        val activeJob = downloadJob
+        activeJob?.cancel()
         notificationManager()?.cancel(NOTIFICATION_ID_PROGRESS)
-        stopForegroundAndSelf()
+        serviceScope.launch {
+            if (activeJob != null) {
+                runCatching { activeJob.join() }
+            }
+            if (runGeneration.get() == cancelGen) {
+                stopForegroundAndSelf(startId, expectedGen = cancelGen)
+            }
+        }
     }
 
     private fun onDownloadPaused(
         release: AppReleaseInfo,
         downloadedBytes: Long,
         totalBytes: Long,
+        expectedGen: Long? = null,
+        stopStartId: Int? = null,
     ) {
+        if (expectedGen != null && runGeneration.get() != expectedGen) return
         releaseLocks()
         stopForeground(STOP_FOREGROUND_REMOVE)
         AppUpdateCenter.updateState {
@@ -465,13 +513,24 @@ class AppUpdateService : Service() {
             NOTIFICATION_ID_PROGRESS,
             buildPausedNotification(release, downloadedBytes, totalBytes),
         )
-        stopSelf()
+        if (stopStartId != null) {
+            if (expectedGen == null || runGeneration.get() == expectedGen) {
+                stopSelfResult(stopStartId)
+            }
+        } else {
+            stopSelf()
+        }
     }
 
-    private fun stopForegroundAndSelf() {
+    private fun stopForegroundAndSelf(startId: Int? = null, expectedGen: Long? = null) {
+        if (expectedGen != null && runGeneration.get() != expectedGen) return
         releaseLocks()
         runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
-        stopSelf()
+        if (startId != null) {
+            stopSelfResult(startId)
+        } else {
+            stopSelf()
+        }
     }
 
     private fun startForegroundSafely(notification: Notification): Boolean {
@@ -577,7 +636,7 @@ class AppUpdateService : Service() {
         }
 
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setSmallIcon(R.drawable.ic_stat_baychat)
             .setContentTitle(title)
             .setContentText(text)
             .setOngoing(true)
@@ -621,7 +680,7 @@ class AppUpdateService : Service() {
 
         val resumePi = buildResumePendingIntent(release)
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setSmallIcon(R.drawable.ic_stat_baychat)
             .setContentTitle(title)
             .setContentText(text)
             .setOngoing(false)
@@ -640,7 +699,7 @@ class AppUpdateService : Service() {
     ): Notification {
         val resumePi = buildResumePendingIntent(release)
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setSmallIcon(R.drawable.ic_stat_baychat)
             .setContentTitle("湾聊 v${release.versionName} 更新中断")
             .setContentText(errorMessage)
             .setOngoing(false)
@@ -671,7 +730,7 @@ class AppUpdateService : Service() {
 
         val notesText = release.releaseNotes.trim().ifBlank { "已完成 SHA-256 完整性校验，点击立即覆盖升级" }
         return NotificationCompat.Builder(this, READY_CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setSmallIcon(R.drawable.ic_stat_baychat)
             .setContentTitle("湾聊 v${release.versionName} 已下载就绪，点击一键安装")
             .setContentText(notesText)
             .setStyle(NotificationCompat.BigTextStyle().bigText(notesText))
@@ -704,13 +763,13 @@ class AppUpdateService : Service() {
     }
 
     private fun buildResumePendingIntent(release: AppReleaseInfo): PendingIntent {
-        val resumeIntent = Intent(this, AppUpdateService::class.java).apply {
-            action = ACTION_RESUME_DOWNLOAD
+        // 统一经 MainActivity 恢复续传，规避 Android 12-15 后台通知直接 getForegroundService 被拦截的问题
+        val resumeIntent = Intent(this, MainActivity::class.java).apply {
+            action = ACTION_RESUME_OTA_DOWNLOAD
             putExtra(EXTRA_RELEASE_JSON, otaJson.encodeToString(AppReleaseInfo.serializer(), release))
-            putExtra(EXTRA_SILENT, false)
-            putExtra(EXTRA_FORCE_UPDATE, AppUpdateCenter.state.value.isForceUpdate || release.forceUpdate)
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
-        return PendingIntent.getForegroundService(
+        return PendingIntent.getActivity(
             this,
             REQ_RESUME,
             resumeIntent,
@@ -718,12 +777,7 @@ class AppUpdateService : Service() {
         )
     }
 
-    private fun extractRelease(intent: Intent): AppReleaseInfo? {
-        val raw = intent.getStringExtra(EXTRA_RELEASE_JSON) ?: return null
-        return runCatching {
-            otaJson.decodeFromString(AppReleaseInfo.serializer(), raw)
-        }.getOrNull()
-    }
+    private fun extractRelease(intent: Intent): AppReleaseInfo? = extractReleaseFromIntent(intent)
 
     private fun notificationManager(): NotificationManager? =
         getSystemService(NotificationManager::class.java)
@@ -740,6 +794,7 @@ class AppUpdateService : Service() {
         const val READY_CHANNEL_ID = "baychat_ota_update_ready_channel"
         const val ACTION_OPEN_OTA_INSTALL = "com.baytale.baychat.action.OPEN_OTA_INSTALL"
         const val ACTION_OPEN_OTA_DIALOG = "com.baytale.baychat.ACTION_OPEN_OTA_DIALOG"
+        const val ACTION_RESUME_OTA_DOWNLOAD = "com.baytale.baychat.action.RESUME_OTA_DOWNLOAD"
 
         private const val ACTION_START_DOWNLOAD = "com.baytale.baychat.action.OTA_START"
         private const val ACTION_RESUME_DOWNLOAD = "com.baytale.baychat.action.OTA_RESUME"
@@ -764,6 +819,13 @@ class AppUpdateService : Service() {
         private val otaJson = Json {
             ignoreUnknownKeys = true
             encodeDefaults = true
+        }
+
+        fun extractReleaseFromIntent(intent: Intent?): AppReleaseInfo? {
+            val raw = intent?.getStringExtra(EXTRA_RELEASE_JSON) ?: return null
+            return runCatching {
+                otaJson.decodeFromString(AppReleaseInfo.serializer(), raw)
+            }.getOrNull()
         }
 
         // 专用于大体积 APK 断点续传的 OkHttpClient（支持 GitHub Release 跨域名 302 重定向）

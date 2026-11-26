@@ -360,6 +360,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     private val currentProcessCameraUris = ConcurrentHashMap.newKeySet<String>()
 
     private var awaitingInstallPermission: Boolean = false
+    private var lastOtaStartRequestMs: Long = 0L
     private var dismissedUpdateVersionInSession: Int = 0
     // 记录 peerId -> effectiveClientId 映射，避免成员离线后解除屏蔽仍残留拦截
     private val blockedPeerIdToClientId = ConcurrentHashMap<String, String>()
@@ -554,8 +555,10 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         }
         if (ota.status == OtaUpdateStatus.CHECKING ||
             ota.status == OtaUpdateStatus.DOWNLOADING ||
+            ota.status == OtaUpdateStatus.PAUSED ||
             ota.status == OtaUpdateStatus.VERIFYING ||
-            ota.status == OtaUpdateStatus.READY_TO_INSTALL
+            ota.status == OtaUpdateStatus.READY_TO_INSTALL ||
+            ota.status == OtaUpdateStatus.ERROR
         ) {
             return
         }
@@ -1520,9 +1523,17 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         }
 
         val now = System.currentTimeMillis()
-        if (!manual && !bypassThrottle) {
-            if (currentOta.status == OtaUpdateStatus.READY_TO_INSTALL) return
-            if (now - _uiState.value.prefs.lastUpdateCheckAt < FOREGROUND_UPDATE_CHECK_INTERVAL_MS) return
+        if (!manual) {
+            // 非手动检查时严禁覆盖用户手动暂停或已失败/就绪状态，杜绝前后台切换重新拉起二次下载
+            if (currentOta.status == OtaUpdateStatus.PAUSED ||
+                currentOta.status == OtaUpdateStatus.READY_TO_INSTALL ||
+                currentOta.status == OtaUpdateStatus.ERROR
+            ) {
+                return
+            }
+            if (!bypassThrottle && now - _uiState.value.prefs.lastUpdateCheckAt < FOREGROUND_UPDATE_CHECK_INTERVAL_MS) {
+                return
+            }
         }
 
         store.setLastUpdateCheckAt(now)
@@ -1643,6 +1654,15 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
             installReadyAppUpdate()
             return
         }
+        // 正在下载或校验中禁止重复启动；同时对短时间连点做 600ms 幂等防抖，杜绝下发双份服务 Intent
+        if (ota.status == OtaUpdateStatus.DOWNLOADING || ota.status == OtaUpdateStatus.VERIFYING) {
+            return
+        }
+        val now = System.currentTimeMillis()
+        if (now - lastOtaStartRequestMs < 600L) {
+            return
+        }
+        lastOtaStartRequestMs = now
         if (_uiState.value.prefs.ignoredVersionCode == release.versionCode) {
             store.setIgnoredVersionCode(0)
             _uiState.update { it.copy(prefs = it.prefs.copy(ignoredVersionCode = 0)) }
@@ -1654,6 +1674,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
             forceUpdate = ota.isForceUpdate,
         )
         if (!started) {
+            lastOtaStartRequestMs = 0L
             showToast("启动后台更新服务失败，请稍后重试")
         }
     }
