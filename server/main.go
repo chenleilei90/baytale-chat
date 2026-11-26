@@ -24,6 +24,7 @@ import (
 	"baychat/server/internal/room"
 	"baychat/server/internal/static"
 	"baychat/server/internal/turn"
+	"github.com/gorilla/websocket"
 )
 
 func main() {
@@ -699,6 +700,77 @@ func main() {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"text": strings.TrimSpace(result.Text),
 		})
+	})
+
+	// 实时流式语音识别 WebSocket 透传代理（转发至本机 sherpa-onnx 流式服务）
+	asrWsEndpoint := strings.TrimSpace(os.Getenv("ASR_WS_ENDPOINT"))
+	if asrWsEndpoint == "" {
+		asrWsEndpoint = "ws://127.0.0.1:18191"
+	}
+	asrUpgrader := websocket.Upgrader{
+		ReadBufferSize:  8192,
+		WriteBufferSize: 8192,
+		CheckOrigin: func(r *http.Request) bool {
+			return true
+		},
+	}
+	mux.HandleFunc("/ws/asr", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+		defer cancel()
+		upstreamConn, _, err := websocket.DefaultDialer.DialContext(ctx, asrWsEndpoint, nil)
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "ASR_WS_UNAVAILABLE", "实时语音识别服务暂不可用")
+			return
+		}
+		clientConn, err := asrUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			_ = upstreamConn.Close()
+			return
+		}
+		defer func() {
+			_ = clientConn.Close()
+			_ = upstreamConn.Close()
+		}()
+
+		clientConn.SetReadLimit(2 * 1024 * 1024)
+		done := make(chan struct{}, 2)
+
+		// 客户端 -> 上游流式 ASR（二进制 PCM / "eof" 控制帧）
+		go func() {
+			defer func() { done <- struct{}{} }()
+			for {
+				_ = clientConn.SetReadDeadline(time.Now().Add(90 * time.Second))
+				msgType, data, err := clientConn.ReadMessage()
+				if err != nil {
+					return
+				}
+				_ = upstreamConn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				if err := upstreamConn.WriteMessage(msgType, data); err != nil {
+					return
+				}
+			}
+		}()
+
+		// 上游流式 ASR -> 客户端（JSON 识别结果）
+		go func() {
+			defer func() { done <- struct{}{} }()
+			for {
+				_ = upstreamConn.SetReadDeadline(time.Now().Add(90 * time.Second))
+				msgType, data, err := upstreamConn.ReadMessage()
+				if err != nil {
+					return
+				}
+				_ = clientConn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				if err := clientConn.WriteMessage(msgType, data); err != nil {
+					return
+				}
+			}
+		}()
+
+		select {
+		case <-ctx.Done():
+		case <-done:
+		}
 	})
 
 	// WebSocket 信令与实时房间同步
