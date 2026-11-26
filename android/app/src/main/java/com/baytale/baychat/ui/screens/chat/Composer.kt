@@ -7,6 +7,7 @@ import android.content.ContextWrapper
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.provider.MediaStore
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -170,13 +171,34 @@ fun Composer(
         }
     }
 
-    // 2. 相册图片与视频选择器
+    // 2. 相册图片与视频选择器：优先拉起系统原生相册应用，异常回退至 PickMultipleVisualMedia
     val photoPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickMultipleVisualMedia(maxItems = 20),
     ) { uris ->
         if (uris.isNotEmpty()) {
             onShowAttachmentPanelChange(false)
             vm.sendUris(uris)
+        }
+    }
+
+    val galleryIntentLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        if (result.resultCode != Activity.RESULT_OK) return@rememberLauncherForActivityResult
+        val data = result.data ?: return@rememberLauncherForActivityResult
+        val picked = buildList {
+            data.clipData?.let { clip ->
+                for (i in 0 until clip.itemCount) {
+                    clip.getItemAt(i)?.uri?.let { add(it) }
+                }
+            }
+            if (isEmpty()) {
+                data.data?.let { add(it) }
+            }
+        }
+        if (picked.isNotEmpty()) {
+            onShowAttachmentPanelChange(false)
+            vm.sendUris(picked)
         }
     }
 
@@ -632,9 +654,20 @@ fun Composer(
                         label = "相册",
                         tint = colors.fileTypeColors.image,
                         onClick = {
-                            photoPicker.launch(
-                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo),
-                            )
+                            val galleryIntent = Intent(
+                                Intent.ACTION_PICK,
+                                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                            ).apply {
+                                type = "image/*"
+                                putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+                                putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("image/*", "video/*"))
+                            }
+                            runCatching { galleryIntentLauncher.launch(galleryIntent) }
+                                .onFailure {
+                                    photoPicker.launch(
+                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo),
+                                    )
+                                }
                         },
                         modifier = Modifier.weight(1f),
                     )

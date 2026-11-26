@@ -204,6 +204,7 @@ data class ActiveRoomSession(
     val ownerToken: String = "",
     val isOwner: Boolean = false,
     val selfPeerId: String = "",
+    val historySyncNonce: Int = 0,
 ) {
     // B14：严格判断 roomInfo.mode == ephemeral，避免 roomInfo 为空时误判为临时房
     val isEphemeral: Boolean
@@ -2828,8 +2829,9 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                     }
                     val isInitialSync = awaitingInitialHistorySync
                     awaitingInitialHistorySync = false
-                    // 进房同步历史消息改为单次原子批量合并（不再把历史最早消息误标为未读导致列表滚回顶部）
+                    // 进房同步历史消息改为单次原子批量合并，并递增 historySyncNonce 驱动聊天列表精准定位最新底部
                     val newlyMerged = mergeCachedMessagesBatch(env.messages.orEmpty(), fromCache = true)
+                    updateRoom { r -> r.copy(historySyncNonce = r.historySyncNonce + 1) }
                     // 若后台短暂断线重连后同步到对方新消息，立刻补发后台高优先级通知，绝不漏推
                     if (!isInitialSync && wasReconnected && isAppInBackgroundNow() && newlyMerged.isNotEmpty()) {
                         newlyMerged

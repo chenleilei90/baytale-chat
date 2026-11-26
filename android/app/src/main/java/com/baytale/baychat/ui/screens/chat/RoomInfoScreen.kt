@@ -36,6 +36,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
@@ -411,18 +412,28 @@ fun RoomInfoScreen(
                                 )
                                 BayTextField(
                                     value = draftPassword,
-                                    onValueChange = { draftPassword = it },
-                                    placeholder = "输入新密码（留空则取消密码）",
+                                    onValueChange = { raw ->
+                                        draftPassword = raw.filter { it.isDigit() }.take(20)
+                                    },
+                                    placeholder = "新密码（至少 5 位数字，留空取消密码）",
                                     isPassword = true,
-                                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                                    keyboardOptions = KeyboardOptions(
+                                        keyboardType = KeyboardType.NumberPassword,
+                                        imeAction = ImeAction.Done,
+                                    ),
                                     keyboardActions = KeyboardActions(
                                         onDone = {
                                             focusManager.clearFocus()
-                                            vm.updateRoomProfile(
-                                                topic = draftTopic,
-                                                newPassword = draftPassword,
-                                            )
-                                            showProfileEditor = false
+                                            val cleanPwd = draftPassword.trim()
+                                            if (cleanPwd.isNotEmpty() && cleanPwd.length < 5) {
+                                                vm.showToast("房间密码至少输入 5 位数字")
+                                            } else {
+                                                vm.updateRoomProfile(
+                                                    topic = draftTopic,
+                                                    newPassword = cleanPwd,
+                                                )
+                                                showProfileEditor = false
+                                            }
                                         },
                                     ),
                                 )
@@ -440,11 +451,16 @@ fun RoomInfoScreen(
                                     BayButton(
                                         text = "保存修改",
                                         onClick = {
-                                            vm.updateRoomProfile(
-                                                topic = draftTopic,
-                                                newPassword = draftPassword,
-                                            )
-                                            showProfileEditor = false
+                                            val cleanPwd = draftPassword.trim()
+                                            if (cleanPwd.isNotEmpty() && cleanPwd.length < 5) {
+                                                vm.showToast("房间密码至少输入 5 位数字")
+                                            } else {
+                                                vm.updateRoomProfile(
+                                                    topic = draftTopic,
+                                                    newPassword = cleanPwd,
+                                                )
+                                                showProfileEditor = false
+                                            }
                                         },
                                         style = BayButtonStyle.Primary,
                                         size = BayButtonSize.Medium,

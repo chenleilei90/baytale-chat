@@ -52,7 +52,7 @@ class BayChatApi(
 ) {
     private val json = Json {
         ignoreUnknownKeys = true
-        encodeDefaults = false
+        encodeDefaults = true
     }
 
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()

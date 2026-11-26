@@ -16,6 +16,7 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -40,8 +41,8 @@ import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -78,6 +79,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -146,9 +148,10 @@ fun ChatRoomScreen(
     val density = LocalDensity.current
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
-    val listState = rememberLazyListState(
-        initialFirstVisibleItemIndex = (room.messages.lastIndex).coerceAtLeast(0),
-    )
+    // 按 roomCode 独立创建 LazyListState，杜绝同槽位切房或重进残留旧滚动位置
+    val listState = remember(room.roomCode) {
+        LazyListState(firstVisibleItemIndex = (room.messages.lastIndex).coerceAtLeast(0))
+    }
     val scope = rememberCoroutineScope()
     val inputFocusRequester = remember { FocusRequester() }
 
@@ -280,8 +283,25 @@ fun ChatRoomScreen(
     }
     var lastSeenMessageCount by remember(room.roomCode) { mutableIntStateOf(0) }
     var hasInitialScrolled by remember(room.roomCode) { mutableStateOf(false) }
+    var lastHandledSyncNonce by remember(room.roomCode) { mutableIntStateOf(-1) }
     var unreadBelowCount by remember(room.roomCode) { mutableIntStateOf(0) }
     var lastScrolledUnreadId by remember(room.roomCode) { mutableStateOf<String?>(null) }
+
+    // 精准贴底：先滚动至末项，再在下一帧按末项实际高度补齐像素偏移，确保最后一条消息完整贴底可见
+    suspend fun snapToLatestBottom() {
+        val lastIdx = visibleMessages.lastIndex
+        if (lastIdx < 0) return
+        listState.scrollToItem(lastIdx)
+        withFrameNanos { }
+        val info = listState.layoutInfo
+        val lastItem = info.visibleItemsInfo.lastOrNull { it.index == lastIdx }
+        if (lastItem != null) {
+            val overflow = (lastItem.offset + lastItem.size) - info.viewportEndOffset
+            if (overflow > 0) {
+                listState.scrollBy(overflow.toFloat())
+            }
+        }
+    }
 
     // UX-1：软键盘弹出且列表原处于底部时，自动滚动到底部防止遮挡最后几条消息
     val isImeVisible = WindowInsets.ime.getBottom(density) > 0
@@ -299,34 +319,36 @@ fun ChatRoomScreen(
         val idx = visibleMessages.indexOfFirst { it.id == targetId }
         if (idx >= 0) {
             hasInitialScrolled = true
+            lastHandledSyncNonce = room.historySyncNonce
             lastSeenMessageCount = visibleMessages.size
             lastScrolledUnreadId = targetId
             listState.animateScrollToItem(idx)
         }
     }
 
-    // 进房首次历史消息就绪与从挂起恢复时，直接定位至最新消息底部；后续实时新消息按是否在底部智能跟随
-    LaunchedEffect(room.roomCode, visibleMessages.size, room.searchKeyword, room.filterKind) {
+    // 进房首次历史消息同步完成及从挂起恢复时，精准定位至最新消息底部；后续实时新消息按是否在底部智能跟随
+    LaunchedEffect(room.roomCode, room.historySyncNonce, visibleMessages.size, room.searchKeyword, room.filterKind) {
         val currentSize = visibleMessages.size
         val isUnfiltered = room.searchKeyword.isBlank() && room.filterKind == "all"
         if (currentSize == 0) {
             lastSeenMessageCount = 0
             return@LaunchedEffect
         }
-        if (!hasInitialScrolled && isUnfiltered) {
+        val needSyncScroll = (!hasInitialScrolled || room.historySyncNonce != lastHandledSyncNonce) && isUnfiltered
+        if (needSyncScroll) {
             val unreadId = state.firstUnreadMessageId
             val unreadIdx = if (unreadId != null) visibleMessages.indexOfFirst { it.id == unreadId } else -1
             hasInitialScrolled = true
+            lastHandledSyncNonce = room.historySyncNonce
             lastSeenMessageCount = currentSize
             unreadBelowCount = 0
             if (unreadIdx >= 0 && unreadId != lastScrolledUnreadId) {
                 lastScrolledUnreadId = unreadId
                 listState.scrollToItem(unreadIdx)
             } else {
-                listState.scrollToItem(currentSize - 1)
-                delay(120L)
-                val finalIdx = (visibleMessages.lastIndex).coerceAtLeast(0)
-                listState.scrollToItem(finalIdx, scrollOffset = 10_000)
+                snapToLatestBottom()
+                delay(160L)
+                snapToLatestBottom()
             }
             return@LaunchedEffect
         }
@@ -339,7 +361,7 @@ fun ChatRoomScreen(
             val lastIsSelf = visibleMessages.lastOrNull()?.isSelf == true
             if (isAtBottom || lastIsSelf) {
                 unreadBelowCount = 0
-                listState.animateScrollToItem(currentSize - 1)
+                snapToLatestBottom()
             } else {
                 unreadBelowCount += added
             }

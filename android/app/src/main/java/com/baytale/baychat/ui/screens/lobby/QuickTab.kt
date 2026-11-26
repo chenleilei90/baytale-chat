@@ -217,18 +217,23 @@ fun QuickTab(
                 topic = optionsDraft.topic,
             )
         } else {
-            // 无输入时新建私密房（B1：默认 allowRandom = false）
-            vm.createAndEnterRoom(
-                mode = optionsDraft.mode,
-                customCode = "",
-                password = optionsDraft.password,
-                privatePairOnly = optionsDraft.privatePairOnly,
-                retentionDays = optionsDraft.retentionDays,
-                maxFileSizeMB = optionsDraft.maxFileSizeMB,
-                saveFixedFavorite = optionsDraft.saveFixedFavorite,
-                allowRandom = false,
-                topic = optionsDraft.topic,
-            )
+            val cleanPwd = optionsDraft.password.trim()
+            if (cleanPwd.isNotEmpty() && (!cleanPwd.all { it.isDigit() } || cleanPwd.length < 5)) {
+                vm.showToast("新建房间密码至少输入 5 位数字")
+            } else {
+                // 无输入时新建私密房（B1：默认 allowRandom = false）
+                vm.createAndEnterRoom(
+                    mode = optionsDraft.mode,
+                    customCode = "",
+                    password = cleanPwd,
+                    privatePairOnly = optionsDraft.privatePairOnly,
+                    retentionDays = optionsDraft.retentionDays,
+                    maxFileSizeMB = optionsDraft.maxFileSizeMB,
+                    saveFixedFavorite = optionsDraft.saveFixedFavorite,
+                    allowRandom = false,
+                    topic = optionsDraft.topic,
+                )
+            }
         }
     }
 

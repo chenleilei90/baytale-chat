@@ -84,7 +84,7 @@ class SignalingClient(
         openSocket()
     }
 
-    // B17：系统网络恢复时清零退避计数；若旧连接处于半开状态，立即发送 ping 并在 3 秒无回包时重建连接
+    // B17：系统网络恢复时清零退避计数；仅在完成 join 握手后发送 ping 探活，避免抢先于首条 join 触发 INVALID_JOIN
     fun notifyNetworkAvailable() {
         if (closedManually.get()) return
         reconnectAttempts = 0
@@ -93,6 +93,18 @@ class SignalingClient(
             reconnectJob?.cancel()
             reconnectJob = null
             openSocket()
+        } else if (!joinedReady.get()) {
+            // 正在建立 join 握手中，等待握手超时若仍无响应再重建连接
+            val checkStartAt = System.currentTimeMillis()
+            probeJob?.cancel()
+            probeJob = scope.launch {
+                delay(3_000L)
+                if (!closedManually.get() && !joinedReady.get() &&
+                    this@SignalingClient.webSocket === currentWs && lastServerActivityAt < checkStartAt
+                ) {
+                    openSocket()
+                }
+            }
         } else {
             val probeSentAt = System.currentTimeMillis()
             val sent = sendRawImmediate(currentWs, SignalEnvelope(type = "ping"))
@@ -315,7 +327,9 @@ class SignalingClient(
                     openSocket()
                     break
                 }
-                webSocket?.let { sendRawImmediate(it, SignalEnvelope(type = "ping")) }
+                if (joinedReady.get()) {
+                    webSocket?.let { sendRawImmediate(it, SignalEnvelope(type = "ping")) }
+                }
             }
         }
     }

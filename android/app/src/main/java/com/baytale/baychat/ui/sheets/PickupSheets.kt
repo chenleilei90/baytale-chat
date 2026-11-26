@@ -399,13 +399,17 @@ fun PickupHubSheet(
 
                     BayTextField(
                         value = sendPassword,
-                        onValueChange = { if (!state.pickupBusy) sendPassword = it },
-                        placeholder = "可选取件密码（留空则无需密码）",
+                        onValueChange = { raw ->
+                            if (!state.pickupBusy) {
+                                sendPassword = raw.filter { ch -> ch.isDigit() }.take(20)
+                            }
+                        },
+                        placeholder = "可选取件密码（至少 5 位数字，留空免密）",
                         leadingIcon = Icons.Rounded.Lock,
                         isPassword = true,
                         enabled = !state.pickupBusy,
                         keyboardOptions = KeyboardOptions(
-                            keyboardType = KeyboardType.Password,
+                            keyboardType = KeyboardType.NumberPassword,
                             imeAction = ImeAction.Done,
                         ),
                         keyboardActions = KeyboardActions(
@@ -427,6 +431,11 @@ fun PickupHubSheet(
                             if (state.pickupBusy) return@BayButton
                             focusManager.clearFocus()
                             keyboardController?.hide()
+                            val cleanPwd = sendPassword.trim()
+                            if (cleanPwd.isNotEmpty() && cleanPwd.length < 5) {
+                                vm.showToast("取件密码至少输入 5 位数字")
+                                return@BayButton
+                            }
                             val targetUri = selectedUri ?: return@BayButton
                             createdRecord = null
                             submitStartedAt = System.currentTimeMillis()
@@ -435,7 +444,7 @@ fun PickupHubSheet(
                                 uri = targetUri,
                                 expireHours = expireHours,
                                 burnAfterRead = burnAfterRead,
-                                password = sendPassword.trim(),
+                                password = cleanPwd,
                             )
                         },
                         style = BayButtonStyle.Primary,
@@ -738,74 +747,108 @@ private fun PickupRecordCard(
     }
 
     BayCard(modifier = Modifier.fillMaxWidth()) {
-        Row(
+        Column(
             modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(BaySpacing.md),
+            verticalArrangement = Arrangement.spacedBy(BaySpacing.md),
         ) {
-            BayFileTypeIcon(
-                fileName = record.fileName,
-                mimeType = record.mimeType,
-                size = 42.dp,
-            )
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(2.dp),
+            // 顶层：文件图标 + 完整信息列（不再与操作按钮争抢宽度导致文字竖排错行）
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(BaySpacing.md),
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(BaySpacing.sm),
+                BayFileTypeIcon(
+                    fileName = record.fileName,
+                    mimeType = record.mimeType,
+                    size = 42.dp,
+                )
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    Text(
-                        text = record.code,
-                        style = BayType.headline.copy(fontWeight = FontWeight.Bold),
-                        color = if (expired) colors.textTertiary else colors.accent,
-                    )
-                    if (record.burnAfterRead) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(BaySpacing.sm),
+                        ) {
+                            Text(
+                                text = record.code,
+                                style = BayType.headline.copy(fontWeight = FontWeight.Bold),
+                                color = if (expired) colors.textTertiary else colors.accent,
+                                maxLines = 1,
+                                softWrap = false,
+                            )
+                            if (record.burnAfterRead) {
+                                Text(
+                                    text = "阅后即焚",
+                                    style = BayType.caption,
+                                    color = colors.warning,
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    modifier = Modifier
+                                        .clip(BayShapes.fullShape)
+                                        .background(colors.warning.copy(alpha = if (colors.isDark) 0.20f else 0.12f))
+                                        .padding(horizontal = BaySpacing.sm, vertical = 2.dp),
+                                )
+                            }
+                        }
                         Text(
-                            text = "阅后即焚",
+                            text = expiryText,
                             style = BayType.caption,
-                            color = colors.warning,
-                            modifier = Modifier
-                                .clip(BayShapes.fullShape)
-                                .background(colors.warning.copy(alpha = if (colors.isDark) 0.20f else 0.12f))
-                                .padding(horizontal = BaySpacing.sm, vertical = 2.dp),
+                            color = if (expired) colors.danger else colors.textSecondary,
+                            maxLines = 1,
+                            softWrap = false,
                         )
                     }
+                    PickupMiddleEllipsisFileName(
+                        fileName = record.fileName,
+                        style = BayType.subhead,
+                        color = colors.textPrimary,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Text(
+                        text = FormatUtils.formatBytes(record.fileSize),
+                        style = BayType.caption,
+                        color = colors.textSecondary,
+                        maxLines = 1,
+                        softWrap = false,
+                    )
                 }
-                PickupMiddleEllipsisFileName(
-                    fileName = record.fileName,
-                    style = BayType.subhead,
-                    color = colors.textPrimary,
-                    modifier = Modifier.fillMaxWidth(),
+            }
+
+            // 底层：均分横排快捷操作栏
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(BaySpacing.sm),
+            ) {
+                BayButton(
+                    text = "复制取件码",
+                    onClick = onCopyCode,
+                    leadingIcon = Icons.Rounded.ContentCopy,
+                    style = BayButtonStyle.Neutral,
+                    size = BayButtonSize.Small,
+                    modifier = Modifier.weight(1f),
                 )
-                Text(
-                    text = "${FormatUtils.formatBytes(record.fileSize)} · $expiryText",
-                    style = BayType.caption,
-                    color = if (expired) colors.danger else colors.textSecondary,
+                BayButton(
+                    text = "复制链接",
+                    onClick = onCopyLink,
+                    leadingIcon = Icons.Rounded.Link,
+                    style = BayButtonStyle.Secondary,
+                    size = BayButtonSize.Small,
+                    modifier = Modifier.weight(1f),
+                )
+                BayButton(
+                    text = "撤销",
+                    onClick = onRevoke,
+                    leadingIcon = Icons.Rounded.DeleteOutline,
+                    style = BayButtonStyle.DestructiveSoft,
+                    size = BayButtonSize.Small,
                 )
             }
-            BayIconButton(
-                icon = Icons.Rounded.ContentCopy,
-                contentDescription = "复制取件码",
-                onClick = onCopyCode,
-                style = BayIconStyle.Filled,
-                size = 34.dp,
-            )
-            BayIconButton(
-                icon = Icons.Rounded.Link,
-                contentDescription = "复制取件链接",
-                onClick = onCopyLink,
-                style = BayIconStyle.Accent,
-                size = 34.dp,
-            )
-            BayIconButton(
-                icon = Icons.Rounded.DeleteOutline,
-                contentDescription = "撤销取件码",
-                onClick = onRevoke,
-                style = BayIconStyle.Plain,
-                size = 34.dp,
-            )
         }
     }
 }

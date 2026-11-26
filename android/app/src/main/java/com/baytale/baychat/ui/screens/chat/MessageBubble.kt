@@ -266,8 +266,8 @@ fun MessageBubble(
             horizontalAlignment = if (item.isSelf) Alignment.End else Alignment.Start,
             modifier = Modifier.weight(1f, fill = false),
         ) {
-            // 同组首条消息展示发送者昵称与时间
-            if (isFirstInGroup) {
+            // 同组首条消息仅在需要展示发送者昵称（他人）或极简云端标识时渲染，时间由居中时间分割线统一展示避免重复
+            if (isFirstInGroup && (!item.isSelf || item.fromCache)) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -287,19 +287,11 @@ fun MessageBubble(
                                 .clip(BayShapes.xsShape),
                         )
                     }
-                    Text(
-                        text = FormatUtils.formatClock(item.timestamp),
-                        style = BayType.caption.copy(
-                            fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Normal,
-                        ),
-                        color = colors.textSecondary,
-                    )
                     if (item.fromCache) {
                         Text(
                             text = "云端",
                             style = BayType.caption.copy(fontWeight = FontWeight.Normal),
-                            color = colors.textSecondary,
+                            color = colors.textTertiary,
                         )
                     }
                 }

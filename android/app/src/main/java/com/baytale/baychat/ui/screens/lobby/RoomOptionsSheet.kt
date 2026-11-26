@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Bookmark
@@ -26,6 +27,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.baytale.baychat.core.model.RoomMode
 import com.baytale.baychat.core.util.FormatUtils
@@ -206,14 +208,27 @@ fun RoomOptionsSheet(
             }
 
             // 4. 可选访问密码与房间主题
+            var passwordError by remember { mutableStateOf(false) }
             Column(verticalArrangement = Arrangement.spacedBy(BaySpacing.md)) {
                 BayTextField(
                     value = localDraft.password,
-                    onValueChange = { localDraft = localDraft.copy(password = it.take(40)) },
-                    placeholder = "访问密码（可选，留空免密）",
+                    onValueChange = { raw ->
+                        val digits = raw.filter { it.isDigit() }.take(20)
+                        localDraft = localDraft.copy(password = digits)
+                        if (digits.isEmpty() || digits.length >= 5) passwordError = false
+                    },
+                    placeholder = "访问密码（至少 5 位数字，留空免密）",
                     leadingIcon = Icons.Rounded.Lock,
                     isPassword = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
                 )
+                if (passwordError) {
+                    Text(
+                        text = "新建房间密码至少输入 5 位数字（留空则免密）",
+                        style = BayType.caption,
+                        color = colors.danger,
+                    )
+                }
                 BayTextField(
                     value = localDraft.topic,
                     onValueChange = { localDraft = localDraft.copy(topic = it.take(40)) },
@@ -252,8 +267,13 @@ fun RoomOptionsSheet(
             BayButton(
                 text = "应用设置",
                 onClick = {
-                    onApply(localDraft)
-                    onDismiss()
+                    val cleanPwd = localDraft.password.trim()
+                    if (cleanPwd.isNotEmpty() && cleanPwd.length < 5) {
+                        passwordError = true
+                    } else {
+                        onApply(localDraft.copy(password = cleanPwd))
+                        onDismiss()
+                    }
                 },
                 style = BayButtonStyle.Primary,
                 size = BayButtonSize.Large,
