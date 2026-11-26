@@ -72,6 +72,7 @@ func main() {
 		"POST /api/planes/{id}/report":  {Capacity: 10, Window: time.Hour},
 		"POST /api/report":              {Capacity: 10, Window: time.Hour},
 		"POST /api/asr":                 {Capacity: 30, Window: time.Minute},
+		"POST /api/asr/correct":         {Capacity: 30, Window: time.Minute},
 	})
 
 	// 定期清理限流器的空闲令牌桶
@@ -699,6 +700,60 @@ func main() {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"text": strings.TrimSpace(result.Text),
+		})
+	})
+
+	// 语音识别文本 AI 纠错接口（转发至本机 ASR/AI 纠错服务）
+	asrCorrectEndpoint := "http://127.0.0.1:18190/correct"
+	if strings.HasSuffix(asrEndpoint, "/transcribe") {
+		asrCorrectEndpoint = strings.TrimSuffix(asrEndpoint, "/transcribe") + "/correct"
+	}
+	asrCorrectClient := &http.Client{Timeout: 12 * time.Second}
+	mux.HandleFunc("POST /api/asr/correct", func(w http.ResponseWriter, r *http.Request) {
+		if !allowRate(limiter, "POST /api/asr/correct", w, r) {
+			return
+		}
+		var req struct {
+			Text string `json:"text"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 16*1024+1)).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_JSON", "请求参数格式错误")
+			return
+		}
+		req.Text = strings.TrimSpace(req.Text)
+		if req.Text == "" {
+			writeError(w, http.StatusBadRequest, "EMPTY_TEXT", "待纠错内容为空")
+			return
+		}
+		payload, _ := json.Marshal(map[string]string{"text": req.Text})
+		upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, asrCorrectEndpoint, bytes.NewReader(payload))
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "ASR_UNAVAILABLE", "AI 纠错服务暂不可用")
+			return
+		}
+		upstreamReq.Header.Set("Content-Type", "application/json")
+		resp, err := asrCorrectClient.Do(upstreamReq)
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "ASR_UNAVAILABLE", "AI 纠错服务暂不可用")
+			return
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+		if err != nil || resp.StatusCode >= 400 {
+			writeError(w, http.StatusServiceUnavailable, "ASR_CORRECT_FAILED", "AI 纠错处理失败")
+			return
+		}
+		var result struct {
+			Text    string `json:"text"`
+			LlmUsed bool   `json:"llmUsed"`
+		}
+		if err := json.Unmarshal(body, &result); err != nil {
+			writeError(w, http.StatusServiceUnavailable, "ASR_CORRECT_FAILED", "AI 纠错结果解析失败")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"text":    strings.TrimSpace(result.Text),
+			"llmUsed": result.LlmUsed,
 		})
 	})
 
