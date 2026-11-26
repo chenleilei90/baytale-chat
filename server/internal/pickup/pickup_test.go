@@ -29,7 +29,8 @@ func newTestPickupStore(t *testing.T, maxFileMB, maxTotalMB, quotaMB int) (*Stor
 
 func TestPickupUploadResumePasswordAndDownload(t *testing.T) {
 	st, dir := newTestPickupStore(t, 10, 20, 50)
-	now := time.Date(2026, 11, 25, 10, 0, 0, 0, time.UTC)
+	// 使用相对当前时间作为模拟时钟基准，避免服务重启 NewStore 用真实时间恢复时误判为已过期
+	now := time.Now().UTC().Truncate(time.Second)
 	st.SetNowFunc(func() time.Time { return now })
 
 	payload := []byte("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ")
@@ -119,7 +120,7 @@ func TestPickupUploadResumePasswordAndDownload(t *testing.T) {
 
 func TestPickupBurnAfterReadAndQuotaAndDelete(t *testing.T) {
 	st, _ := newTestPickupStore(t, 2, 3, 4)
-	now := time.Date(2026, 11, 25, 10, 0, 0, 0, time.UTC)
+	now := time.Now().UTC().Truncate(time.Second)
 	st.SetNowFunc(func() time.Time { return now })
 
 	// 超过单文件限制 (2MB)
