@@ -25,6 +25,7 @@ import {
   Laptop,
   Lock,
   Package,
+  Palette,
   Pin,
   Plus,
   Radio,
@@ -86,6 +87,7 @@ import { Avatar } from './Avatar';
 import { AppearancePicker, PalettePicker, Switch } from './Controls';
 import { PickupLookupModal, PickupSendModal } from './PickupModal';
 import { PlaneViewerModal, renderPlaneKindIcon } from './PlaneViewerModal';
+import { SettingsPopover } from './SettingsPopover';
 
 export type WorkspaceTab = 'quick' | 'discover' | 'transfer' | 'mine';
 
@@ -251,6 +253,7 @@ export const Lobby: React.FC<LobbyProps> = ({
   const [favSearch, setFavSearch] = useState('');
   const [storageBytes, setStorageBytes] = useState(() => estimateLocalStorageBytes());
   const [confirmClearLocalOpen, setConfirmClearLocalOpen] = useState(false);
+  const [settingsPopoverOpen, setSettingsPopoverOpen] = useState(false);
 
   const codeInputRef = useRef<HTMLInputElement | null>(null);
   const passwordInputRef = useRef<HTMLInputElement | null>(null);
@@ -824,9 +827,62 @@ export const Lobby: React.FC<LobbyProps> = ({
     { id: 'mine', label: '我的', icon: <UserRound size={18} aria-hidden="true" /> },
   ];
 
+  const totalTransferBytes = useMemo(
+    () => transferRecords.reduce((sum, item) => sum + (item.fileSize || 0), 0),
+    [transferRecords]
+  );
+
+  // 左侧导航栏「常用房间」快捷列表：合并常驻收藏与最近加入（最多 5 项，去重）
+  const railQuickRooms = useMemo(() => {
+    const merged: {
+      key: string;
+      code: string;
+      label: string;
+      hasPassword: boolean;
+      kind: 'fixed' | 'recent';
+      fixedItem?: SavedFixedRoom;
+      recentItem?: RecentRoom;
+    }[] = [];
+    const seen = new Set<string>();
+    for (const r of savedFixedRooms) {
+      if (seen.has(r.code)) continue;
+      seen.add(r.code);
+      merged.push({
+        key: `fixed_${r.code}`,
+        code: r.code,
+        label: r.label?.trim() || `#${r.code}`,
+        hasPassword: r.hasPassword,
+        kind: 'fixed',
+        fixedItem: r,
+      });
+      if (merged.length >= 5) return merged;
+    }
+    for (const r of recentRooms) {
+      if (seen.has(r.code)) continue;
+      seen.add(r.code);
+      merged.push({
+        key: `recent_${r.code}`,
+        code: r.code,
+        label: `#${r.code}`,
+        hasPassword: r.hasPassword,
+        kind: 'recent',
+        recentItem: r,
+      });
+      if (merged.length >= 5) return merged;
+    }
+    return merged;
+  }, [savedFixedRooms, recentRooms]);
+
+  const topbarMeta: Record<WorkspaceTab, { title: string; subtitle: string }> = {
+    quick: { title: '快传工作台', subtitle: '以数据存储与直传为核心，支持 1~7 天服务器缓存及端到端传输' },
+    discover: { title: '发现广场', subtitle: '浏览公开免密存储房间与实时放飞的纸飞机文件清单' },
+    transfer: { title: '传输与取件中心', subtitle: '集中管理服务器 6 位离线取件码与本机文件传输历史' },
+    mine: { title: '我的与偏好设置', subtitle: '本机身份名片、通知提醒、外观主题、收藏与缓存空间管理' },
+  };
+
   return (
-    <div className="workspace-shell">
-      {/* 桌面端 220px 左侧导航栏 */}
+    <div className="workspace-shell" onClick={() => settingsPopoverOpen && setSettingsPopoverOpen(false)}>
+      {/* 桌面端 248px 左侧导航栏 */}
       <aside className="workspace-rail" aria-label="主功能导航">
         <div className="workspace-rail-brand">
           <div className="brand-mark">
@@ -837,6 +893,16 @@ export const Lobby: React.FC<LobbyProps> = ({
             <div className="brand-sub">跨端文件存储与直传</div>
           </div>
         </div>
+
+        <button
+          type="button"
+          className="btn btn-jelly workspace-rail-cta"
+          disabled={submitting || randomJoining}
+          onClick={() => void handleDirectCreateNewRoom()}
+        >
+          <Plus size={16} aria-hidden="true" />
+          <span>新建存储房间</span>
+        </button>
 
         <nav className="workspace-rail-nav">
           {navItems.map((item) => (
@@ -856,6 +922,33 @@ export const Lobby: React.FC<LobbyProps> = ({
           ))}
         </nav>
 
+        <div className="workspace-rail-rooms">
+          <div className="workspace-rail-section-label">常用房间</div>
+          {railQuickRooms.length === 0 ? (
+            <div className="workspace-rail-rooms-empty">暂无最近房间记录</div>
+          ) : (
+            <div className="workspace-rail-room-list">
+              {railQuickRooms.map((item) => (
+                <button
+                  key={item.key}
+                  type="button"
+                  className="workspace-rail-room-btn"
+                  onClick={() =>
+                    item.kind === 'fixed' && item.fixedItem
+                      ? void handleQuickEnterSaved(item.fixedItem)
+                      : item.recentItem
+                        ? void handleQuickEnterRecent(item.recentItem)
+                        : undefined
+                  }
+                >
+                  <span className="workspace-rail-room-name mono">{item.label}</span>
+                  {item.hasPassword && <Lock size={12} className="lobby-room-lock" aria-hidden="true" />}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
         <div className="workspace-rail-footer">
           <button
             type="button"
@@ -874,8 +967,53 @@ export const Lobby: React.FC<LobbyProps> = ({
         </div>
       </aside>
 
-      {/* 右侧主内容区域（移动端含精简顶栏） */}
+      {/* 右侧主内容区域（桌面端含自适应顶部栏，移动端含精简顶栏） */}
       <div className="workspace-content-col">
+        <header className="workspace-desktop-topbar">
+          <div className="workspace-desktop-topbar-left">
+            <h1 className="workspace-desktop-title">{topbarMeta[activeTab].title}</h1>
+            <span className="workspace-desktop-sub">{topbarMeta[activeTab].subtitle}</span>
+          </div>
+          <div className="workspace-desktop-topbar-actions">
+            <button
+              type="button"
+              className="btn btn-soft btn-sm"
+              onClick={() => setPickupSendOpen(true)}
+            >
+              <Package size={14} aria-hidden="true" /> 发取件码
+            </button>
+            <button
+              type="button"
+              className="btn btn-glass btn-sm"
+              onClick={() => setPickupLookupOpen(true)}
+            >
+              <KeyRound size={14} aria-hidden="true" /> 输码取件
+            </button>
+            <div className="workspace-settings-anchor" onClick={(e) => e.stopPropagation()}>
+              <button
+                type="button"
+                className="btn btn-ghost btn-icon"
+                aria-label="外观与偏好设置"
+                title="外观与偏好设置"
+                onClick={() => setSettingsPopoverOpen((prev) => !prev)}
+              >
+                <Palette size={16} aria-hidden="true" />
+              </button>
+              {settingsPopoverOpen && (
+                <SettingsPopover
+                  appearance={appearance}
+                  theme={theme}
+                  prefs={prefs}
+                  onSelectAppearance={onSelectAppearance}
+                  onSelectTheme={onSelectTheme}
+                  onUpdatePrefs={onUpdatePrefs}
+                  onClose={() => setSettingsPopoverOpen(false)}
+                />
+              )}
+            </div>
+          </div>
+        </header>
+
         <header className="workspace-mobile-topbar">
           <div className="brand-pill">
             <div className="brand-mark">
@@ -1172,159 +1310,183 @@ export const Lobby: React.FC<LobbyProps> = ({
                   </form>
                 </section>
 
-                {/* 双栏功能区：离线取件码 + 附近同局域网设备 */}
-                <section className="lobby-main-grid">
+                {/* 双栏工作区：左栏我的房间（最近+常驻），右栏取件码 + 附近设备 */}
+                <section className="lobby-quick-dashboard">
+                  {/* 最近访问与常驻基地 */}
                   <div className="glass-bento lobby-card">
                     <div className="lobby-card-head">
-                      <h2 className="lobby-card-title">
-                        <Package size={16} className="lobby-card-title-icon" aria-hidden="true" />
-                        <span>取件码 · 离线暂存投递</span>
-                      </h2>
-                      <span className="pill pill-accent mono">
-                        {myPickups.length > 0 ? `${myPickups.length} 枚生效中` : '6 位取件码'}
-                      </span>
-                    </div>
-                    <p className="lobby-empty-desc">
-                      对方不在线也能先上传到服务器，生成 6 位数字取件码与提取链接，支持 1~72 小时有效期与取后即焚。
-                    </p>
-                    <div className="lobby-two-btn-grid">
-                      <button
-                        type="button"
-                        className="btn btn-jelly lobby-touch-pill"
-                        onClick={() => setPickupSendOpen(true)}
-                      >
-                        <Package size={15} aria-hidden="true" /> 发送文件取件码
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-soft lobby-touch-pill"
-                        onClick={() => setPickupLookupOpen(true)}
-                      >
-                        <KeyRound size={15} aria-hidden="true" /> 输入取件码提取
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="glass-bento lobby-card">
-                    <div className="lobby-card-head">
-                      <h2 className="lobby-card-title">
-                        <Radio size={16} className="lobby-card-title-icon" aria-hidden="true" />
-                        <span>附近设备（同局域网）</span>
-                      </h2>
-                      <span className="pill pill-neutral mono">{nearbyDevices.length}</span>
-                    </div>
-                    <Switch
-                      checked={prefs.nearbyDiscoverable}
-                      onChange={(v) => onUpdatePrefs({ ...prefs, nearbyDiscoverable: v })}
-                      label="允许附近设备发现我"
-                      description="同 Wi-Fi 下点击对方头像即可邀请进房直传"
-                    />
-                    {prefs.nearbyDiscoverable && (
-                      <div className="lobby-nearby-box">
-                        {nearbyDevices.length === 0 ? (
-                          <div className="lobby-nearby-empty">
-                            正在扫描同一网络下在线的手机或电脑...
-                          </div>
-                        ) : (
-                          <div className="lobby-nearby-strip">
-                            {nearbyDevices.map((dev) => (
-                              <button
-                                key={dev.clientId}
-                                type="button"
-                                className="btn btn-glass lobby-nearby-card"
-                                disabled={invitingId === dev.clientId}
-                                onClick={() => void handleInviteNearbyDevice(dev)}
-                              >
-                                <Avatar name={dev.name} avatar={dev.avatar} size={36} />
-                                <span className="lobby-nearby-name">{dev.name}</span>
-                                <span className="lobby-nearby-plat">
-                                  {dev.device === 'android' ? <Smartphone size={11} aria-hidden="true" /> : <Laptop size={11} aria-hidden="true" />}
-                                  <span>{dev.device === 'android' ? 'Android' : 'Web'}</span>
-                                </span>
-                              </button>
-                            ))}
-                          </div>
-                        )}
+                      <div className="segmented">
+                        <button
+                          type="button"
+                          className={`seg-item ${roomTab === 'recent' ? 'active' : ''}`}
+                          onClick={() => setRoomTab('recent')}
+                        >
+                          最近房间 ({recentRooms.length})
+                        </button>
+                        <button
+                          type="button"
+                          className={`seg-item ${roomTab === 'saved' ? 'active' : ''}`}
+                          onClick={() => setRoomTab('saved')}
+                        >
+                          常驻收藏 ({savedFixedRooms.length})
+                        </button>
                       </div>
-                    )}
-                  </div>
-                </section>
-
-                {/* 最近访问与常驻基地 */}
-                <section className="glass-bento lobby-card">
-                  <div className="lobby-card-head">
-                    <div className="segmented">
-                      <button
-                        type="button"
-                        className={`seg-item ${roomTab === 'recent' ? 'active' : ''}`}
-                        onClick={() => setRoomTab('recent')}
-                      >
-                        最近房间 ({recentRooms.length})
-                      </button>
-                      <button
-                        type="button"
-                        className={`seg-item ${roomTab === 'saved' ? 'active' : ''}`}
-                        onClick={() => setRoomTab('saved')}
-                      >
-                        常驻收藏 ({savedFixedRooms.length})
-                      </button>
+                      {roomTab === 'recent' && recentRooms.length > 0 && (
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-sm lobby-clear-recent-btn"
+                          onClick={onClearRecentRooms}
+                        >
+                          清空最近
+                        </button>
+                      )}
                     </div>
-                    {roomTab === 'recent' && recentRooms.length > 0 && (
-                      <button
-                        type="button"
-                        className="btn btn-ghost btn-sm lobby-clear-recent-btn"
-                        onClick={onClearRecentRooms}
-                      >
-                        清空最近
-                      </button>
-                    )}
-                  </div>
 
-                  {roomTab === 'recent' ? (
-                    recentRooms.length === 0 ? (
-                      <div className="lobby-empty-card">
+                    {roomTab === 'recent' ? (
+                      recentRooms.length === 0 ? (
+                        <div className="lobby-empty-card centered">
+                          <div className="lobby-empty-title">
+                            <Clock size={16} className="lobby-card-title-icon" aria-hidden="true" />
+                            <span>暂无最近加入的房间</span>
+                          </div>
+                          <div className="lobby-empty-desc">
+                            在上方输入口令或点击「创建临时房间」，系统会自动记录常用房间以便一键回访。
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="lobby-room-list">
+                          {recentRooms.map((item) => (
+                            <div
+                              key={item.code}
+                              className="lobby-room-item"
+                              onClick={() => void handleQuickEnterRecent(item)}
+                            >
+                              <div className="lobby-room-meta">
+                                <div className="mono lobby-room-code">
+                                  <span>#{item.code}</span>
+                                  <span className="pill pill-neutral">
+                                    {item.mode === 'fixed' ? '常驻' : '临时'}
+                                  </span>
+                                  {item.hasPassword && <Lock size={12} className="lobby-room-lock" aria-hidden="true" />}
+                                </div>
+                                <div className="lobby-room-sub">
+                                  {formatRelativeTime(item.lastVisitedAt)} · {item.password ? '已记密码' : '点击进入'}
+                                </div>
+                              </div>
+                              <div className="lobby-card-actions" onClick={(e) => e.stopPropagation()}>
+                                <button
+                                  type="button"
+                                  className="btn btn-soft btn-sm lobby-touch-pill"
+                                  onClick={() => void handleQuickEnterRecent(item)}
+                                >
+                                  进入
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn btn-ghost btn-icon lobby-touch-icon"
+                                  title="移除该记录"
+                                  aria-label={`移除房间 ${item.code}`}
+                                  onClick={() => onRemoveRecentRoom(item.code)}
+                                >
+                                  <Trash2 size={14} aria-hidden="true" />
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )
+                    ) : savedFixedRooms.length === 0 ? (
+                      <div className="lobby-empty-card centered">
                         <div className="lobby-empty-title">
-                          <Clock size={15} className="lobby-card-title-icon" aria-hidden="true" />
-                          <span>暂无最近加入的房间</span>
+                          <Pin size={16} className="lobby-card-title-icon" aria-hidden="true" />
+                          <span>暂无常驻收藏房间</span>
                         </div>
                         <div className="lobby-empty-desc">
-                          输入口令或点击上方「创建临时房间」，系统会自动记录常去房间。
+                          展开上方「保留期与上限设置」切换为「常驻基地」并创建，即可永久固定并自定义备注名称。
                         </div>
                       </div>
                     ) : (
                       <div className="lobby-room-list">
-                        {recentRooms.map((item) => (
+                        {savedFixedRooms.map((item) => (
                           <div
                             key={item.code}
                             className="lobby-room-item"
-                            onClick={() => void handleQuickEnterRecent(item)}
+                            onClick={() => void handleQuickEnterSaved(item)}
                           >
                             <div className="lobby-room-meta">
-                              <div className="mono lobby-room-code">
-                                <span>#{item.code}</span>
-                                <span className="pill pill-neutral">
-                                  {item.mode === 'fixed' ? '常驻' : '临时'}
-                                </span>
-                                {item.hasPassword && <Lock size={12} className="lobby-room-lock" aria-hidden="true" />}
-                              </div>
+                              {editingLabelCode === item.code ? (
+                                <div className="lobby-rename-row" onClick={(e) => e.stopPropagation()}>
+                                  <input
+                                    className="field-input lobby-rename-input"
+                                    value={editingLabelValue}
+                                    maxLength={24}
+                                    placeholder={`备注名（例如：公司资料库）`}
+                                    autoFocus
+                                    onChange={(e) => setEditingLabelValue(e.target.value)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Enter') {
+                                        onRenameSavedRoom(item.code, editingLabelValue);
+                                        setEditingLabelCode(null);
+                                      } else if (e.key === 'Escape') {
+                                        setEditingLabelCode(null);
+                                      }
+                                    }}
+                                  />
+                                  <button
+                                    type="button"
+                                    className="btn btn-jelly btn-sm"
+                                    onClick={() => {
+                                      onRenameSavedRoom(item.code, editingLabelValue);
+                                      setEditingLabelCode(null);
+                                    }}
+                                  >
+                                    <Check size={13} aria-hidden="true" />
+                                  </button>
+                                </div>
+                              ) : (
+                                <div className="mono lobby-room-code">
+                                  <span>{item.label ? `${item.label} (#${item.code})` : `#${item.code}`}</span>
+                                  {item.hasPassword && <Lock size={12} className="lobby-room-lock" aria-hidden="true" />}
+                                  {item.ownerToken && <span className="pill pill-accent">房主</span>}
+                                </div>
+                              )}
                               <div className="lobby-room-sub">
-                                {formatRelativeTime(item.lastVisitedAt)} · {item.password ? '已记密码' : '点击进入'}
+                                {formatRelativeTime(item.lastVisitedAt)}
                               </div>
                             </div>
                             <div className="lobby-card-actions" onClick={(e) => e.stopPropagation()}>
                               <button
                                 type="button"
-                                className="btn btn-soft btn-sm lobby-touch-pill"
-                                onClick={() => void handleQuickEnterRecent(item)}
+                                className="btn btn-ghost btn-icon lobby-touch-icon"
+                                title="编辑备注名称"
+                                aria-label={`编辑房间 ${item.code} 备注`}
+                                onClick={() => {
+                                  setEditingLabelCode(item.code);
+                                  setEditingLabelValue(item.label || '');
+                                }}
                               >
-                                进入
+                                <Edit3 size={14} aria-hidden="true" />
                               </button>
                               <button
                                 type="button"
                                 className="btn btn-ghost btn-icon lobby-touch-icon"
-                                title="移除该记录"
-                                aria-label={`移除房间 ${item.code}`}
-                                onClick={() => onRemoveRecentRoom(item.code)}
+                                title="复制邀请链接"
+                                aria-label={`复制房间 ${item.code} 邀请链接`}
+                                onClick={async () => {
+                                  const url = `${window.location.origin}/?room=${encodeURIComponent(item.code)}`;
+                                  if (await copyTextToClipboard(url)) {
+                                    onToast(`已复制 #${item.code} 邀请链接`);
+                                  }
+                                }}
+                              >
+                                <Copy size={14} aria-hidden="true" />
+                              </button>
+                              <button
+                                type="button"
+                                className="btn btn-ghost btn-icon lobby-touch-icon"
+                                title="取消收藏"
+                                aria-label={`取消收藏房间 ${item.code}`}
+                                onClick={() => onRemoveSavedRoom(item.code)}
                               >
                                 <Trash2 size={14} aria-hidden="true" />
                               </button>
@@ -1332,107 +1494,86 @@ export const Lobby: React.FC<LobbyProps> = ({
                           </div>
                         ))}
                       </div>
-                    )
-                  ) : savedFixedRooms.length === 0 ? (
-                    <div className="lobby-empty-card">
-                      <div className="lobby-empty-title">
-                        <Pin size={15} className="lobby-card-title-icon" aria-hidden="true" />
-                        <span>暂无常驻收藏房间</span>
+                    )}
+                  </div>
+
+                  {/* 右侧：取件码 + 附近设备堆叠 */}
+                  <div className="lobby-right-stack">
+                    <div className="glass-bento lobby-card">
+                      <div className="lobby-card-head">
+                        <h2 className="lobby-card-title">
+                          <Package size={16} className="lobby-card-title-icon" aria-hidden="true" />
+                          <span>取件码 · 离线暂存投递</span>
+                        </h2>
+                        <span className="pill pill-accent mono">
+                          {myPickups.length > 0 ? `${myPickups.length} 枚生效中` : '6 位取件码'}
+                        </span>
                       </div>
-                      <div className="lobby-empty-desc">
-                        展开「保留期与上限设置」切换为「常驻基地」并创建，即可永久固定并自定义备注名称。
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="lobby-room-list">
-                      {savedFixedRooms.map((item) => (
-                        <div
-                          key={item.code}
-                          className="lobby-room-item"
-                          onClick={() => void handleQuickEnterSaved(item)}
+                      <p className="lobby-empty-desc">
+                        对方不在线也能先上传到服务器，生成 6 位数字取件码与提取链接，支持 1~72 小时有效期与取后即焚。
+                      </p>
+                      <div className="lobby-two-btn-grid">
+                        <button
+                          type="button"
+                          className="btn btn-jelly lobby-touch-pill"
+                          onClick={() => setPickupSendOpen(true)}
                         >
-                          <div className="lobby-room-meta">
-                            {editingLabelCode === item.code ? (
-                              <div className="lobby-rename-row" onClick={(e) => e.stopPropagation()}>
-                                <input
-                                  className="field-input lobby-rename-input"
-                                  value={editingLabelValue}
-                                  maxLength={24}
-                                  placeholder={`备注名（例如：公司资料库）`}
-                                  autoFocus
-                                  onChange={(e) => setEditingLabelValue(e.target.value)}
-                                  onKeyDown={(e) => {
-                                    if (e.key === 'Enter') {
-                                      onRenameSavedRoom(item.code, editingLabelValue);
-                                      setEditingLabelCode(null);
-                                    } else if (e.key === 'Escape') {
-                                      setEditingLabelCode(null);
-                                    }
-                                  }}
-                                />
-                                <button
-                                  type="button"
-                                  className="btn btn-jelly btn-sm"
-                                  onClick={() => {
-                                    onRenameSavedRoom(item.code, editingLabelValue);
-                                    setEditingLabelCode(null);
-                                  }}
-                                >
-                                  <Check size={13} aria-hidden="true" />
-                                </button>
-                              </div>
-                            ) : (
-                              <div className="mono lobby-room-code">
-                                <span>{item.label ? `${item.label} (#${item.code})` : `#${item.code}`}</span>
-                                {item.hasPassword && <Lock size={12} className="lobby-room-lock" aria-hidden="true" />}
-                                {item.ownerToken && <span className="pill pill-accent">房主</span>}
-                              </div>
-                            )}
-                            <div className="lobby-room-sub">
-                              {formatRelativeTime(item.lastVisitedAt)}
-                            </div>
-                          </div>
-                          <div className="lobby-card-actions" onClick={(e) => e.stopPropagation()}>
-                            <button
-                              type="button"
-                              className="btn btn-ghost btn-icon lobby-touch-icon"
-                              title="编辑备注名称"
-                              aria-label={`编辑房间 ${item.code} 备注`}
-                              onClick={() => {
-                                setEditingLabelCode(item.code);
-                                setEditingLabelValue(item.label || '');
-                              }}
-                            >
-                              <Edit3 size={14} aria-hidden="true" />
-                            </button>
-                            <button
-                              type="button"
-                              className="btn btn-ghost btn-icon lobby-touch-icon"
-                              title="复制邀请链接"
-                              aria-label={`复制房间 ${item.code} 邀请链接`}
-                              onClick={async () => {
-                                const url = `${window.location.origin}/?room=${encodeURIComponent(item.code)}`;
-                                if (await copyTextToClipboard(url)) {
-                                  onToast(`已复制 #${item.code} 邀请链接`);
-                                }
-                              }}
-                            >
-                              <Copy size={14} aria-hidden="true" />
-                            </button>
-                            <button
-                              type="button"
-                              className="btn btn-ghost btn-icon lobby-touch-icon"
-                              title="取消收藏"
-                              aria-label={`取消收藏房间 ${item.code}`}
-                              onClick={() => onRemoveSavedRoom(item.code)}
-                            >
-                              <Trash2 size={14} aria-hidden="true" />
-                            </button>
-                          </div>
-                        </div>
-                      ))}
+                          <Package size={15} aria-hidden="true" /> 发送文件取件码
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-soft lobby-touch-pill"
+                          onClick={() => setPickupLookupOpen(true)}
+                        >
+                          <KeyRound size={15} aria-hidden="true" /> 输入取件码提取
+                        </button>
+                      </div>
                     </div>
-                  )}
+
+                    <div className="glass-bento lobby-card">
+                      <div className="lobby-card-head">
+                        <h2 className="lobby-card-title">
+                          <Radio size={16} className="lobby-card-title-icon" aria-hidden="true" />
+                          <span>附近设备（同局域网）</span>
+                        </h2>
+                        <span className="pill pill-neutral mono">{nearbyDevices.length}</span>
+                      </div>
+                      <Switch
+                        checked={prefs.nearbyDiscoverable}
+                        onChange={(v) => onUpdatePrefs({ ...prefs, nearbyDiscoverable: v })}
+                        label="允许附近设备发现我"
+                        description="同 Wi-Fi 下点击对方头像即可邀请进房直传"
+                      />
+                      {prefs.nearbyDiscoverable && (
+                        <div className="lobby-nearby-box">
+                          {nearbyDevices.length === 0 ? (
+                            <div className="lobby-nearby-empty">
+                              正在扫描同一网络下在线的手机或电脑...
+                            </div>
+                          ) : (
+                            <div className="lobby-nearby-strip">
+                              {nearbyDevices.map((dev) => (
+                                <button
+                                  key={dev.clientId}
+                                  type="button"
+                                  className="btn btn-glass lobby-nearby-card"
+                                  disabled={invitingId === dev.clientId}
+                                  onClick={() => void handleInviteNearbyDevice(dev)}
+                                >
+                                  <Avatar name={dev.name} avatar={dev.avatar} size={36} />
+                                  <span className="lobby-nearby-name">{dev.name}</span>
+                                  <span className="lobby-nearby-plat">
+                                    {dev.device === 'android' ? <Smartphone size={11} aria-hidden="true" /> : <Laptop size={11} aria-hidden="true" />}
+                                    <span>{dev.device === 'android' ? 'Android' : 'Web'}</span>
+                                  </span>
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
                 </section>
               </div>
             )}
@@ -1443,7 +1584,7 @@ export const Lobby: React.FC<LobbyProps> = ({
                 {/* 公开房间广场 */}
                 <section className="glass-bento lobby-card">
                   <div className="lobby-card-head lobby-discover-head">
-                    <div>
+                    <div className="lobby-card-title-col">
                       <h2 className="lobby-card-title">
                         <Globe size={17} className="lobby-card-title-icon" aria-hidden="true" />
                         <span>公开房间广场</span>
@@ -1454,6 +1595,18 @@ export const Lobby: React.FC<LobbyProps> = ({
                       </p>
                     </div>
                     <div className="lobby-discover-actions">
+                      <div className="input-group lobby-inline-search">
+                        <span className="input-prefix-icon">
+                          <Search size={14} aria-hidden="true" />
+                        </span>
+                        <input
+                          className="field-input with-prefix lobby-inline-search-input"
+                          value={publicSearch}
+                          onChange={(e) => setPublicSearch(e.target.value)}
+                          placeholder="搜索房号或主题..."
+                          aria-label="搜索公开房间"
+                        />
+                      </div>
                       <button
                         type="button"
                         className="btn btn-jelly btn-sm lobby-touch-pill"
@@ -1481,29 +1634,16 @@ export const Lobby: React.FC<LobbyProps> = ({
                     </div>
                   </div>
 
-                  <div className="input-group">
-                    <span className="input-prefix-icon">
-                      <Search size={14} aria-hidden="true" />
-                    </span>
-                    <input
-                      className="field-input with-prefix"
-                      value={publicSearch}
-                      onChange={(e) => setPublicSearch(e.target.value)}
-                      placeholder="按房间号或主题关键字筛选公开房间..."
-                      aria-label="搜索公开房间"
-                    />
-                  </div>
-
                   {publicRoomsError ? (
                     <div className="alert-strip">{publicRoomsError}</div>
                   ) : publicRoomsLoading && publicRooms.length === 0 ? (
-                    <div className="lobby-empty-card">
+                    <div className="lobby-empty-card centered">
                       <div className="lobby-empty-desc">正在加载当前活跃的公开房间...</div>
                     </div>
                   ) : filteredPublicRooms.length === 0 ? (
-                    <div className="lobby-empty-card">
+                    <div className="lobby-empty-card centered">
                       <div className="lobby-empty-title">
-                        <Globe size={15} className="lobby-card-title-icon" aria-hidden="true" />
+                        <Globe size={16} className="lobby-card-title-icon" aria-hidden="true" />
                         <span>{publicSearch ? '未匹配到相关公开房间' : '暂无公开开放的房间'}</span>
                       </div>
                       <div className="lobby-empty-desc">
@@ -1557,40 +1697,41 @@ export const Lobby: React.FC<LobbyProps> = ({
                         房间成员主动放飞的文件清单快照，若已勾选授权且房主未改密可直接免密进房下载
                       </p>
                     </div>
-                    <button
-                      type="button"
-                      className="btn btn-ghost btn-icon lobby-touch-icon"
-                      disabled={planesLoading}
-                      aria-label="刷新纸飞机广场"
-                      onClick={() => void loadPlanes()}
-                    >
-                      <RefreshCw size={15} className={planesLoading ? 'bay-spin' : ''} aria-hidden="true" />
-                    </button>
-                  </div>
-
-                  <div className="input-group">
-                    <span className="input-prefix-icon">
-                      <Search size={14} aria-hidden="true" />
-                    </span>
-                    <input
-                      className="field-input with-prefix"
-                      value={planeSearch}
-                      onChange={(e) => setPlaneSearch(e.target.value)}
-                      placeholder="搜索纸飞机描述、文件名、房间号或发送人..."
-                      aria-label="搜索纸飞机"
-                    />
+                    <div className="lobby-discover-actions">
+                      <div className="input-group lobby-inline-search">
+                        <span className="input-prefix-icon">
+                          <Search size={14} aria-hidden="true" />
+                        </span>
+                        <input
+                          className="field-input with-prefix lobby-inline-search-input"
+                          value={planeSearch}
+                          onChange={(e) => setPlaneSearch(e.target.value)}
+                          placeholder="搜索文件名、房号或发送人..."
+                          aria-label="搜索纸飞机"
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-icon lobby-touch-icon"
+                        disabled={planesLoading}
+                        aria-label="刷新纸飞机广场"
+                        onClick={() => void loadPlanes()}
+                      >
+                        <RefreshCw size={15} className={planesLoading ? 'bay-spin' : ''} aria-hidden="true" />
+                      </button>
+                    </div>
                   </div>
 
                   {planesError ? (
                     <div className="alert-strip">{planesError}</div>
                   ) : planesLoading && planes.length === 0 ? (
-                    <div className="lobby-empty-card">
+                    <div className="lobby-empty-card centered">
                       <div className="lobby-empty-desc">正在加载纸飞机清单...</div>
                     </div>
                   ) : filteredPlanes.length === 0 ? (
-                    <div className="lobby-empty-card">
+                    <div className="lobby-empty-card centered">
                       <div className="lobby-empty-title">
-                        <Send size={15} className="lobby-card-title-icon" aria-hidden="true" />
+                        <Send size={16} className="lobby-card-title-icon" aria-hidden="true" />
                         <span>{planeSearch ? '未匹配到相关纸飞机' : '暂无公开纸飞机'}</span>
                       </div>
                       <div className="lobby-empty-desc">
@@ -1664,187 +1805,204 @@ export const Lobby: React.FC<LobbyProps> = ({
             {/* ================== TAB 3: 传输与取件码中心 ================== */}
             {activeTab === 'transfer' && (
               <div className="workspace-tab-stack">
-                <section className="glass-bento lobby-card">
-                  <div className="lobby-card-head lobby-discover-head">
-                    <div>
-                      <h2 className="lobby-card-title">
-                        <Package size={17} className="lobby-card-title-icon" aria-hidden="true" />
-                        <span>我的取件码（服务器暂存）</span>
-                        <span className="pill pill-accent mono">{myPickups.length}</span>
-                      </h2>
-                      <p className="lobby-card-sub">
-                        随时复制取件码或直链发给好友，支持直接预览取件页与撤销物理清理
-                      </p>
-                    </div>
-                    <div className="lobby-discover-actions">
-                      <button
-                        type="button"
-                        className="btn btn-jelly btn-sm lobby-touch-pill"
-                        onClick={() => setPickupSendOpen(true)}
-                      >
-                        <Package size={14} aria-hidden="true" /> 发取件码
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-soft btn-sm lobby-touch-pill"
-                        onClick={() => setPickupLookupOpen(true)}
-                      >
-                        <KeyRound size={14} aria-hidden="true" /> 输码取件
-                      </button>
-                    </div>
+                <section className="lobby-kpi-strip" aria-label="传输概览">
+                  <div className="glass-bento lobby-kpi-card">
+                    <span className="lobby-kpi-label">生效取件码</span>
+                    <strong className="lobby-kpi-value mono">{myPickups.length} 枚</strong>
                   </div>
+                  <div className="glass-bento lobby-kpi-card">
+                    <span className="lobby-kpi-label">历史传输记录</span>
+                    <strong className="lobby-kpi-value mono">{transferRecords.length} 条</strong>
+                  </div>
+                  <div className="glass-bento lobby-kpi-card">
+                    <span className="lobby-kpi-label">累计传输体积</span>
+                    <strong className="lobby-kpi-value mono">{formatBytes(totalTransferBytes)}</strong>
+                  </div>
+                </section>
 
-                  {myPickups.length === 0 ? (
-                    <div className="lobby-empty-card">
-                      <div className="lobby-empty-title">
-                        <Package size={15} className="lobby-card-title-icon" aria-hidden="true" />
-                        <span>当前没有生效中的取件码</span>
+                <div className="lobby-split-grid">
+                  <section className="glass-bento lobby-card">
+                    <div className="lobby-card-head lobby-discover-head">
+                      <div className="lobby-card-title-col">
+                        <h2 className="lobby-card-title">
+                          <Package size={17} className="lobby-card-title-icon" aria-hidden="true" />
+                          <span>我的取件码（服务器暂存）</span>
+                          <span className="pill pill-accent mono">{myPickups.length}</span>
+                        </h2>
+                        <p className="lobby-card-sub">
+                          随时复制取件码或直链发给好友，支持直接预览取件页与撤销物理清理
+                        </p>
                       </div>
-                      <div className="lobby-empty-desc">
-                        点击右上角「发取件码」上传文件后，系统会在此列表集中展示并跟踪有效期。
+                      <div className="lobby-discover-actions">
+                        <button
+                          type="button"
+                          className="btn btn-jelly btn-sm lobby-touch-pill"
+                          onClick={() => setPickupSendOpen(true)}
+                        >
+                          <Package size={14} aria-hidden="true" /> 发取件码
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-soft btn-sm lobby-touch-pill"
+                          onClick={() => setPickupLookupOpen(true)}
+                        >
+                          <KeyRound size={14} aria-hidden="true" /> 输码取件
+                        </button>
                       </div>
                     </div>
-                  ) : (
-                    <div className="lobby-room-list">
-                      {myPickups.map((item) => (
-                        <div key={item.code} className="lobby-room-item">
-                          <div className="lobby-room-meta">
-                            <div className="mono lobby-room-code">
-                              <span>#{item.code}</span>
-                              {item.burnAfterRead && (
-                                <span className="pill pill-warm">
-                                  <Flame size={10} aria-hidden="true" /> 即焚
-                                </span>
-                              )}
-                              {item.hasPassword && <Lock size={12} className="lobby-room-lock" aria-hidden="true" />}
+
+                    {myPickups.length === 0 ? (
+                      <div className="lobby-empty-card centered">
+                        <div className="lobby-empty-title">
+                          <Package size={16} className="lobby-card-title-icon" aria-hidden="true" />
+                          <span>当前没有生效中的取件码</span>
+                        </div>
+                        <div className="lobby-empty-desc">
+                          点击右上角「发取件码」上传文件后，系统会在此列表集中展示并跟踪有效期。
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="lobby-room-list">
+                        {myPickups.map((item) => (
+                          <div key={item.code} className="lobby-room-item">
+                            <div className="lobby-room-meta">
+                              <div className="mono lobby-room-code">
+                                <span>#{item.code}</span>
+                                {item.burnAfterRead && (
+                                  <span className="pill pill-warm">
+                                    <Flame size={10} aria-hidden="true" /> 即焚
+                                  </span>
+                                )}
+                                {item.hasPassword && <Lock size={12} className="lobby-room-lock" aria-hidden="true" />}
+                              </div>
+                              <div className="lobby-room-sub mono">
+                                {item.fileCount} 个文件 · {formatBytes(item.totalSize)} · {formatExpiryTime(item.expiresAt)}
+                              </div>
                             </div>
-                            <div className="lobby-room-sub mono">
-                              {item.fileCount} 个文件 · {formatBytes(item.totalSize)} · {formatExpiryTime(item.expiresAt)}
+                            <div className="lobby-card-actions">
+                              <button
+                                type="button"
+                                className="btn btn-soft btn-sm lobby-touch-pill"
+                                onClick={() => onOpenPickupPage(item.code)}
+                              >
+                                <ExternalLink size={13} aria-hidden="true" /> 提取页
+                              </button>
+                              <button
+                                type="button"
+                                className="btn btn-ghost btn-icon lobby-touch-icon"
+                                title="复制取件链接"
+                                aria-label={`复制取件码 ${item.code} 的链接`}
+                                onClick={async () => {
+                                  const url = `${window.location.origin}/p/${item.code}`;
+                                  if (await copyTextToClipboard(url)) {
+                                    onToast(`已复制 #${item.code} 提取链接`);
+                                  }
+                                }}
+                              >
+                                <Copy size={14} aria-hidden="true" />
+                              </button>
+                              <button
+                                type="button"
+                                className="btn btn-danger-soft btn-icon lobby-touch-icon"
+                                title="撤销并销毁"
+                                aria-label={`撤销取件码 ${item.code}`}
+                                onClick={() => onRevokePickup(item)}
+                              >
+                                <Trash2 size={14} aria-hidden="true" />
+                              </button>
                             </div>
                           </div>
-                          <div className="lobby-card-actions">
+                        ))}
+                      </div>
+                    )}
+                  </section>
+
+                  {/* 历史文件传输记录 */}
+                  <section className="glass-bento lobby-card">
+                    <div className="lobby-card-head lobby-discover-head">
+                      <div className="lobby-card-title-col">
+                        <h2 className="lobby-card-title">
+                          <History size={17} className="lobby-card-title-icon" aria-hidden="true" />
+                          <span>本机 P2P 传输历史</span>
+                          <span className="pill pill-neutral mono">{filteredTransfers.length}</span>
+                        </h2>
+                      </div>
+                      <div className="lobby-discover-actions">
+                        <div className="segmented">
+                          {(
+                            [
+                              { id: 'all', label: '全部' },
+                              { id: 'send', label: '发出' },
+                              { id: 'receive', label: '接收' },
+                            ] as const
+                          ).map((f) => (
                             <button
+                              key={f.id}
                               type="button"
-                              className="btn btn-soft btn-sm lobby-touch-pill"
-                              onClick={() => onOpenPickupPage(item.code)}
+                              className={`seg-item ${transferFilter === f.id ? 'active' : ''}`}
+                              onClick={() => setTransferFilter(f.id)}
                             >
-                              <ExternalLink size={13} aria-hidden="true" /> 提取页
+                              {f.label}
                             </button>
+                          ))}
+                        </div>
+                        {transferRecords.length > 0 && (
+                          <button
+                            type="button"
+                            className="btn btn-ghost btn-sm lobby-clear-recent-btn"
+                            onClick={onClearTransferRecords}
+                          >
+                            清空历史
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {filteredTransfers.length === 0 ? (
+                      <div className="lobby-empty-card centered">
+                        <div className="lobby-empty-title">
+                          <FileIcon size={16} className="lobby-card-title-icon" aria-hidden="true" />
+                          <span>暂无 P2P 文件传输记录</span>
+                        </div>
+                        <div className="lobby-empty-desc">
+                          在房间内完成任意文件收发后，都会自动记录文件名、体积、SHA-256 校验结果与来源房间。
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="lobby-room-list">
+                        {filteredTransfers.map((tr) => (
+                          <div key={tr.id} className="lobby-room-item">
+                            <div className="lobby-room-meta">
+                              <div className="lobby-room-code">
+                                <span className={`pill ${tr.direction === 'send' ? 'pill-accent' : 'pill-emerald'}`}>
+                                  {tr.direction === 'send' ? '发出' : '接收'}
+                                </span>
+                                <span className="workspace-file-title">{tr.fileName}</span>
+                                {tr.verified && (
+                                  <span className="pill pill-emerald" title="SHA-256 完整校验通过">
+                                    <ShieldCheck size={10} aria-hidden="true" /> 已校验
+                                  </span>
+                                )}
+                              </div>
+                              <div className="lobby-room-sub mono">
+                                {formatBytes(tr.fileSize)} · 房间 #{tr.roomCode} · {tr.peerName || '对端伙伴'} · {formatRelativeTime(tr.createdAt)}
+                              </div>
+                            </div>
                             <button
                               type="button"
                               className="btn btn-ghost btn-icon lobby-touch-icon"
-                              title="复制取件链接"
-                              aria-label={`复制取件码 ${item.code} 的链接`}
-                              onClick={async () => {
-                                const url = `${window.location.origin}/p/${item.code}`;
-                                if (await copyTextToClipboard(url)) {
-                                  onToast(`已复制 #${item.code} 提取链接`);
-                                }
-                              }}
-                            >
-                              <Copy size={14} aria-hidden="true" />
-                            </button>
-                            <button
-                              type="button"
-                              className="btn btn-danger-soft btn-icon lobby-touch-icon"
-                              title="撤销并销毁"
-                              aria-label={`撤销取件码 ${item.code}`}
-                              onClick={() => onRevokePickup(item)}
+                              title="删除该条传输记录"
+                              aria-label={`删除 ${tr.fileName}`}
+                              onClick={() => onRemoveTransferRecord(tr.id)}
                             >
                               <Trash2 size={14} aria-hidden="true" />
                             </button>
                           </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </section>
-
-                {/* 历史文件传输记录 */}
-                <section className="glass-bento lobby-card">
-                  <div className="lobby-card-head lobby-discover-head">
-                    <div>
-                      <h2 className="lobby-card-title">
-                        <History size={17} className="lobby-card-title-icon" aria-hidden="true" />
-                        <span>本机 P2P 传输历史</span>
-                        <span className="pill pill-neutral mono">{filteredTransfers.length}</span>
-                      </h2>
-                    </div>
-                    <div className="lobby-discover-actions">
-                      <div className="segmented">
-                        {(
-                          [
-                            { id: 'all', label: '全部' },
-                            { id: 'send', label: '发出' },
-                            { id: 'receive', label: '接收' },
-                          ] as const
-                        ).map((f) => (
-                          <button
-                            key={f.id}
-                            type="button"
-                            className={`seg-item ${transferFilter === f.id ? 'active' : ''}`}
-                            onClick={() => setTransferFilter(f.id)}
-                          >
-                            {f.label}
-                          </button>
                         ))}
                       </div>
-                      {transferRecords.length > 0 && (
-                        <button
-                          type="button"
-                          className="btn btn-ghost btn-sm lobby-clear-recent-btn"
-                          onClick={onClearTransferRecords}
-                        >
-                          清空历史
-                        </button>
-                      )}
-                    </div>
-                  </div>
-
-                  {filteredTransfers.length === 0 ? (
-                    <div className="lobby-empty-card">
-                      <div className="lobby-empty-title">
-                        <FileIcon size={15} className="lobby-card-title-icon" aria-hidden="true" />
-                        <span>暂无 P2P 文件传输记录</span>
-                      </div>
-                      <div className="lobby-empty-desc">
-                        在房间内完成任意文件收发后，都会自动记录文件名、体积、SHA-256 校验结果与来源房间。
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="lobby-room-list">
-                      {filteredTransfers.map((tr) => (
-                        <div key={tr.id} className="lobby-room-item">
-                          <div className="lobby-room-meta">
-                            <div className="lobby-room-code">
-                              <span className={`pill ${tr.direction === 'send' ? 'pill-accent' : 'pill-emerald'}`}>
-                                {tr.direction === 'send' ? '发出' : '接收'}
-                              </span>
-                              <span className="workspace-file-title">{tr.fileName}</span>
-                              {tr.verified && (
-                                <span className="pill pill-emerald" title="SHA-256 完整校验通过">
-                                  <ShieldCheck size={10} aria-hidden="true" /> 已校验
-                                </span>
-                              )}
-                            </div>
-                            <div className="lobby-room-sub mono">
-                              {formatBytes(tr.fileSize)} · 房间 #{tr.roomCode} · {tr.peerName || '对端伙伴'} · {formatRelativeTime(tr.createdAt)}
-                            </div>
-                          </div>
-                          <button
-                            type="button"
-                            className="btn btn-ghost btn-icon lobby-touch-icon"
-                            title="删除该条传输记录"
-                            aria-label={`删除 ${tr.fileName}`}
-                            onClick={() => onRemoveTransferRecord(tr.id)}
-                          >
-                            <Trash2 size={14} aria-hidden="true" />
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </section>
+                    )}
+                  </section>
+                </div>
               </div>
             )}
 
@@ -2006,150 +2164,155 @@ export const Lobby: React.FC<LobbyProps> = ({
                   </div>
                 </section>
 
-                {/* 我的收藏 */}
-                <section className="glass-bento lobby-card">
-                  <div className="lobby-card-head lobby-discover-head">
-                    <div>
-                      <h2 className="lobby-card-title">
-                        <Bookmark size={16} className="lobby-card-title-icon" aria-hidden="true" />
-                        <span>我的收藏</span>
-                        <span className="pill pill-neutral mono">{favorites.length}</span>
-                      </h2>
-                    </div>
-                    {favorites.length > 0 && (
-                      <button
-                        type="button"
-                        className="btn btn-ghost btn-sm lobby-clear-recent-btn"
-                        onClick={onClearFavorites}
-                      >
-                        清空收藏
-                      </button>
-                    )}
-                  </div>
-
-                  {favorites.length > 0 && (
-                    <div className="input-group">
-                      <span className="input-prefix-icon">
-                        <Search size={14} aria-hidden="true" />
-                      </span>
-                      <input
-                        className="field-input with-prefix"
-                        value={favSearch}
-                        onChange={(e) => setFavSearch(e.target.value)}
-                        placeholder="搜索收藏文字、文件名或来源房间..."
-                      />
-                    </div>
-                  )}
-
-                  {filteredFavorites.length === 0 ? (
-                    <div className="lobby-empty-card">
-                      <div className="lobby-empty-title">
-                        <Bookmark size={15} className="lobby-card-title-icon" aria-hidden="true" />
-                        <span>{favSearch ? '未找到匹配收藏项' : '暂无收藏内容'}</span>
-                      </div>
-                      <div className="lobby-empty-desc">
-                        在聊天消息栏点击书签图标，即可把关键链接、文件记录与笔记永久保存于此。
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="lobby-room-list">
-                      {filteredFavorites.map((fav) => (
-                        <div key={fav.id} className="lobby-room-item">
-                          <div className="lobby-room-meta">
-                            <div className="lobby-room-code">
-                              <span className="pill pill-neutral">#{fav.roomCode}</span>
-                              <span>{fav.fileName || fav.text?.slice(0, 64) || '媒体收藏'}</span>
-                            </div>
-                            <div className="lobby-room-sub">
-                              来自 {fav.senderName} · {formatRelativeTime(fav.createdAt)}
-                              {fav.fileSize ? ` · ${formatBytes(fav.fileSize)}` : ''}
-                            </div>
-                          </div>
-                          <div className="lobby-card-actions">
-                            {(fav.text || fav.fileName) && (
-                              <button
-                                type="button"
-                                className="btn btn-ghost btn-icon lobby-touch-icon"
-                                title="复制内容"
-                                aria-label="复制收藏内容"
-                                onClick={async () => {
-                                  if (await copyTextToClipboard(fav.text || fav.fileName || '')) {
-                                    onToast('已复制到剪贴板');
-                                  }
-                                }}
-                              >
-                                <Copy size={14} aria-hidden="true" />
-                              </button>
-                            )}
-                            <button
-                              type="button"
-                              className="btn btn-ghost btn-icon lobby-touch-icon"
-                              title="取消收藏"
-                              aria-label="删除该条收藏"
-                              onClick={() => onRemoveFavorite(fav.id)}
-                            >
-                              <Trash2 size={14} aria-hidden="true" />
-                            </button>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </section>
-
-                {/* 已屏蔽成员 + 本地数据空间 */}
-                <section className="lobby-main-grid">
+                {/* 我的收藏 + 屏蔽/本地存储双栏 */}
+                <section className="lobby-split-grid">
+                  {/* 我的收藏 */}
                   <div className="glass-bento lobby-card">
-                    <div className="lobby-card-head">
-                      <h2 className="lobby-card-title">
-                        <Ban size={16} className="lobby-card-title-icon" aria-hidden="true" />
-                        <span>全局屏蔽名单</span>
-                        <span className="pill pill-neutral mono">{blockedPeers.length}</span>
-                      </h2>
+                    <div className="lobby-card-head lobby-discover-head">
+                      <div className="lobby-card-title-col">
+                        <h2 className="lobby-card-title">
+                          <Bookmark size={16} className="lobby-card-title-icon" aria-hidden="true" />
+                          <span>我的收藏</span>
+                          <span className="pill pill-neutral mono">{favorites.length}</span>
+                        </h2>
+                      </div>
+                      <div className="lobby-discover-actions">
+                        {favorites.length > 0 && (
+                          <div className="input-group lobby-inline-search">
+                            <span className="input-prefix-icon">
+                              <Search size={14} aria-hidden="true" />
+                            </span>
+                            <input
+                              className="field-input with-prefix lobby-inline-search-input"
+                              value={favSearch}
+                              onChange={(e) => setFavSearch(e.target.value)}
+                              placeholder="搜索收藏内容..."
+                              aria-label="搜索收藏"
+                            />
+                          </div>
+                        )}
+                        {favorites.length > 0 && (
+                          <button
+                            type="button"
+                            className="btn btn-ghost btn-sm lobby-clear-recent-btn"
+                            onClick={onClearFavorites}
+                          >
+                            清空收藏
+                          </button>
+                        )}
+                      </div>
                     </div>
-                    {blockedPeers.length === 0 ? (
-                      <div className="lobby-empty-card">
-                        <div className="lobby-empty-desc">暂无被永久屏蔽的对端成员。</div>
+
+                    {filteredFavorites.length === 0 ? (
+                      <div className="lobby-empty-card centered">
+                        <div className="lobby-empty-title">
+                          <Bookmark size={16} className="lobby-card-title-icon" aria-hidden="true" />
+                          <span>{favSearch ? '未找到匹配收藏项' : '暂无收藏内容'}</span>
+                        </div>
+                        <div className="lobby-empty-desc">
+                          在聊天消息栏点击书签图标，即可把关键链接、文件记录与笔记永久保存于此。
+                        </div>
                       </div>
                     ) : (
                       <div className="lobby-room-list">
-                        {blockedPeers.map((b) => (
-                          <div key={b.clientId} className="lobby-room-item">
+                        {filteredFavorites.map((fav) => (
+                          <div key={fav.id} className="lobby-room-item">
                             <div className="lobby-room-meta">
-                              <div className="lobby-room-code">{b.name}</div>
-                              <div className="lobby-room-sub mono">{formatRelativeTime(b.blockedAt)} 屏蔽</div>
+                              <div className="lobby-room-code">
+                                <span className="pill pill-neutral">#{fav.roomCode}</span>
+                                <span className="workspace-file-title">{fav.fileName || fav.text?.slice(0, 64) || '媒体收藏'}</span>
+                              </div>
+                              <div className="lobby-room-sub">
+                                来自 {fav.senderName} · {formatRelativeTime(fav.createdAt)}
+                                {fav.fileSize ? ` · ${formatBytes(fav.fileSize)}` : ''}
+                              </div>
                             </div>
-                            <button
-                              type="button"
-                              className="btn btn-soft btn-sm lobby-touch-pill"
-                              onClick={() => onUnblockPeer(b.clientId)}
-                            >
-                              解除屏蔽
-                            </button>
+                            <div className="lobby-card-actions">
+                              {(fav.text || fav.fileName) && (
+                                <button
+                                  type="button"
+                                  className="btn btn-ghost btn-icon lobby-touch-icon"
+                                  title="复制内容"
+                                  aria-label="复制收藏内容"
+                                  onClick={async () => {
+                                    if (await copyTextToClipboard(fav.text || fav.fileName || '')) {
+                                      onToast('已复制到剪贴板');
+                                    }
+                                  }}
+                                >
+                                  <Copy size={14} aria-hidden="true" />
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                className="btn btn-ghost btn-icon lobby-touch-icon"
+                                title="取消收藏"
+                                aria-label="删除该条收藏"
+                                onClick={() => onRemoveFavorite(fav.id)}
+                              >
+                                <Trash2 size={14} aria-hidden="true" />
+                              </button>
+                            </div>
                           </div>
                         ))}
                       </div>
                     )}
                   </div>
 
-                  <div className="glass-bento lobby-card">
-                    <div className="lobby-card-head">
-                      <h2 className="lobby-card-title">
-                        <Database size={16} className="lobby-card-title-icon" aria-hidden="true" />
-                        <span>本地缓存与数据管理</span>
-                      </h2>
-                      <span className="pill pill-neutral mono">{formatBytes(storageBytes)}</span>
+                  {/* 已屏蔽成员 + 本地数据空间 */}
+                  <div className="lobby-right-stack">
+                    <div className="glass-bento lobby-card">
+                      <div className="lobby-card-head">
+                        <h2 className="lobby-card-title">
+                          <Ban size={16} className="lobby-card-title-icon" aria-hidden="true" />
+                          <span>全局屏蔽名单</span>
+                          <span className="pill pill-neutral mono">{blockedPeers.length}</span>
+                        </h2>
+                      </div>
+                      {blockedPeers.length === 0 ? (
+                        <div className="lobby-empty-card centered">
+                          <div className="lobby-empty-desc">暂无被永久屏蔽的对端成员。</div>
+                        </div>
+                      ) : (
+                        <div className="lobby-room-list">
+                          {blockedPeers.map((b) => (
+                            <div key={b.clientId} className="lobby-room-item">
+                              <div className="lobby-room-meta">
+                                <div className="lobby-room-code">{b.name}</div>
+                                <div className="lobby-room-sub mono">{formatRelativeTime(b.blockedAt)} 屏蔽</div>
+                              </div>
+                              <button
+                                type="button"
+                                className="btn btn-soft btn-sm lobby-touch-pill"
+                                onClick={() => onUnblockPeer(b.clientId)}
+                              >
+                                解除屏蔽
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
-                    <p className="lobby-empty-desc">
-                      浏览器 localStorage 中保存了最近房间、取件码凭证、历史传输记录与收藏。清理操作不会重置你的本机身份卡片。
-                    </p>
-                    <button
-                      type="button"
-                      className="btn btn-danger-soft lobby-touch-pill"
-                      onClick={() => setConfirmClearLocalOpen(true)}
-                    >
-                      <Trash2 size={14} aria-hidden="true" /> 一键清理本地历史与缓存
-                    </button>
+
+                    <div className="glass-bento lobby-card">
+                      <div className="lobby-card-head">
+                        <h2 className="lobby-card-title">
+                          <Database size={16} className="lobby-card-title-icon" aria-hidden="true" />
+                          <span>本地缓存与数据管理</span>
+                        </h2>
+                        <span className="pill pill-neutral mono">{formatBytes(storageBytes)}</span>
+                      </div>
+                      <p className="lobby-empty-desc">
+                        浏览器 localStorage 中保存了最近房间、取件码凭证、历史传输记录与收藏。清理操作不会重置你的本机身份卡片。
+                      </p>
+                      <button
+                        type="button"
+                        className="btn btn-danger-soft lobby-touch-pill"
+                        onClick={() => setConfirmClearLocalOpen(true)}
+                      >
+                        <Trash2 size={14} aria-hidden="true" /> 一键清理本地历史与缓存
+                      </button>
+                    </div>
                   </div>
                 </section>
               </div>

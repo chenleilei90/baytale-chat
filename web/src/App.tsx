@@ -4,6 +4,7 @@ import type {
   BlockedPeer,
   ChatItem,
   FavoriteItem,
+  MinimizedTransferState,
   MyPickupRecord,
   PendingNearbyInvite,
   RecentRoom,
@@ -109,6 +110,10 @@ export const App: React.FC = () => {
   const [pendingNearbyInvite, setPendingNearbyInvite] = useState<PendingNearbyInvite | null>(null);
   const [roomMinimized, setRoomMinimized] = useState(false);
   const [minimizedStatus, setMinimizedStatus] = useState('后台运行中');
+  const [minimizedTransferState, setMinimizedTransferState] = useState<MinimizedTransferState>({
+    status: 'idle',
+    percent: 0,
+  });
   const [minimizedUnreadCount, setMinimizedUnreadCount] = useState(0);
   const [initialJoinCode, setInitialJoinCode] = useState<string>('');
   const [lobbyNotice, setLobbyNotice] = useState<string>('');
@@ -565,6 +570,7 @@ export const App: React.FC = () => {
             onMinimizeRoom={handleMinimizeRoom}
             onRestoreFromNotification={handleRestoreRoom}
             onStatusSummary={setMinimizedStatus}
+            onTransferStateChange={setMinimizedTransferState}
             onUnreadChange={setMinimizedUnreadCount}
             onToggleMuteRoom={handleToggleMuteRoom}
             onRecordTransfer={handleRecordTransfer}
@@ -615,55 +621,92 @@ export const App: React.FC = () => {
         />
       )}
 
-      {/* 后台挂起房间悬浮胶囊条（含实时未读角标） */}
-      {activeRoom && roomMinimized && (
-        <div className="minimized-room-dock" onClick={handleRestoreRoom}>
-          <span className="status-dot emerald" />
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div className="mono" style={{ fontSize: 13.5, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 6 }}>
-              <span>房间 #{activeRoom.code} 后台运行中</span>
-              {minimizedUnreadCount > 0 && (
-                <span className="unread-dock-badge" aria-label={`${minimizedUnreadCount} 条未读消息`}>
-                  {minimizedUnreadCount > 99 ? '99+' : minimizedUnreadCount}
-                </span>
+      {/* 后台挂起房间悬浮胶囊条（含单条变色动效下载状态线与百分比） */}
+      {activeRoom && roomMinimized && (() => {
+        const trState = minimizedTransferState;
+        const hasTransferLine = trState.status !== 'idle';
+        const linePercent =
+          trState.status === 'completed'
+            ? 100
+            : trState.status === 'error'
+              ? Math.max(18, trState.percent)
+              : Math.max(4, Math.min(100, trState.percent));
+        const statusLabel =
+          trState.status === 'downloading'
+            ? `正在下载 ${trState.percent}%`
+            : trState.status === 'paused'
+              ? `下载暂停 ${trState.percent}%`
+              : trState.status === 'error'
+                ? '下载失败'
+                : trState.status === 'completed'
+                  ? '已完成 100%'
+                  : '';
+        return (
+          <div className="minimized-room-dock" onClick={handleRestoreRoom}>
+            <span className="status-dot emerald" />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div className="mono" style={{ fontSize: 13.5, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                <span>房间 #{activeRoom.code}</span>
+                {hasTransferLine && (
+                  <span className={`dock-status-pill ${trState.status}`}>
+                    {statusLabel}
+                  </span>
+                )}
+                {minimizedUnreadCount > 0 && (
+                  <span className="unread-dock-badge" aria-label={`${minimizedUnreadCount} 条未读消息`}>
+                    {minimizedUnreadCount > 99 ? '99+' : minimizedUnreadCount}
+                  </span>
+                )}
+              </div>
+              {!hasTransferLine && (
+                <div
+                  style={{
+                    fontSize: 11.5,
+                    color: 'var(--text-secondary)',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {minimizedStatus}
+                </div>
               )}
             </div>
-            <div
-              style={{
-                fontSize: 11.5,
-                color: 'var(--text-secondary)',
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
+            <button
+              type="button"
+              className="btn btn-jelly btn-sm"
+              onClick={(e) => {
+                e.stopPropagation();
+                handleRestoreRoom();
               }}
             >
-              {minimizedStatus}
-            </div>
+              回到房间
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              style={{ padding: '0 8px' }}
+              title="彻底断开该房间"
+              onClick={(e) => {
+                e.stopPropagation();
+                handleExitToLobby('已断开后台挂起的房间');
+              }}
+            >
+              断开
+            </button>
+            {hasTransferLine && (
+              <div className="dock-status-track" aria-hidden="true">
+                <div
+                  className={`dock-status-fill ${trState.status}`}
+                  style={{ width: `${linePercent}%` }}
+                >
+                  {trState.status === 'downloading' && <span className="dock-status-runner" />}
+                </div>
+              </div>
+            )}
           </div>
-          <button
-            type="button"
-            className="btn btn-jelly btn-sm"
-            onClick={(e) => {
-              e.stopPropagation();
-              handleRestoreRoom();
-            }}
-          >
-            回到房间
-          </button>
-          <button
-            type="button"
-            className="btn btn-ghost btn-sm"
-            style={{ padding: '0 8px' }}
-            title="彻底断开该房间"
-            onClick={(e) => {
-              e.stopPropagation();
-              handleExitToLobby('已断开后台挂起的房间');
-            }}
-          >
-            断开
-          </button>
-        </div>
-      )}
+        );
+      })()}
 
       {profileModalOpen && (
         <ProfileModal

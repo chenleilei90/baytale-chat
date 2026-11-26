@@ -358,11 +358,24 @@
   align-items: center;
 }
 
+/* 通用工作台 Bento 卡片（确保标题、内联搜索、网格与空态严格分隔留白） */
+.lobby-card {
+  padding: 20px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.lobby-card .lobby-card-head {
+  margin-bottom: 0;
+}
+
 .lobby-card-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 12px;
   margin-bottom: 12px;
   flex-wrap: wrap;
 }
@@ -490,13 +503,20 @@
 
 /* 无描边空态卡片 */
 .lobby-empty-card {
-  padding: 16px 14px;
+  padding: 18px 16px;
   border-radius: var(--r-md);
   background: var(--fill);
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   gap: 6px;
+}
+
+.lobby-empty-card.centered {
+  padding: 36px 24px;
+  align-items: center;
+  text-align: center;
+  gap: 8px;
 }
 
 .lobby-empty-title {
@@ -1068,8 +1088,8 @@
 
 .lobby-planes-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 14px;
 }
 
 .plane-skeleton-card {
@@ -1632,7 +1652,7 @@
    ========================================================================== */
 @media (max-width: 960px) {
   .lobby-planes-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
   }
 }
 
@@ -1776,7 +1796,7 @@
 }
 
 /* ==========================================================================
-   BayChat Web 3.0 数据存储优先 4-Tab 工作台布局（220px 桌面左轨 + <=880px 底部导航）
+   BayChat Web 3.1 自适应工作台布局（390px 移动 ~ 1920px+ 宽屏桌面）
    ========================================================================== */
 .workspace-shell {
   width: 100%;
@@ -1787,14 +1807,15 @@
 }
 
 .workspace-rail {
-  width: 220px;
+  width: 248px;
   flex-shrink: 0;
   background: var(--surface);
   display: flex;
   flex-direction: column;
-  padding: 16px 12px;
-  gap: 16px;
+  padding: 18px 14px;
+  gap: 14px;
   border-right: 0.5px solid var(--separator);
+  overflow-y: auto;
 }
 
 .workspace-rail-brand {
@@ -1804,18 +1825,24 @@
   padding: 4px 6px;
 }
 
+.workspace-rail-cta {
+  width: 100%;
+  justify-content: center;
+  height: 40px;
+  font-size: var(--fs-callout);
+}
+
 .workspace-rail-nav {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  flex: 1;
+  gap: 4px;
 }
 
 .workspace-rail-item {
   border: none;
   background: transparent;
   border-radius: var(--r-sm);
-  height: 44px;
+  height: 42px;
   padding: 0 12px;
   display: flex;
   align-items: center;
@@ -1854,6 +1881,64 @@
   height: 20px;
   font-size: 11px;
   padding: 0 7px;
+}
+
+.workspace-rail-rooms {
+  flex: 1;
+  min-height: 0;
+  padding-top: 10px;
+  border-top: 0.5px solid var(--separator);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow-y: auto;
+}
+
+.workspace-rail-section-label {
+  font-size: var(--fs-caption);
+  font-weight: 700;
+  color: var(--text-muted);
+  padding: 0 8px;
+}
+
+.workspace-rail-rooms-empty {
+  font-size: var(--fs-footnote);
+  color: var(--text-muted);
+  padding: 6px 8px;
+}
+
+.workspace-rail-room-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.workspace-rail-room-btn {
+  border: none;
+  background: transparent;
+  border-radius: var(--r-xs);
+  height: 34px;
+  padding: 0 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: var(--fs-footnote);
+  cursor: pointer;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+
+.workspace-rail-room-btn:hover {
+  background: var(--fill);
+  color: var(--text-primary);
+}
+
+.workspace-rail-room-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
 }
 
 .workspace-rail-footer {
@@ -1905,6 +1990,52 @@
   overflow: hidden;
 }
 
+.workspace-desktop-topbar {
+  height: 60px;
+  flex-shrink: 0;
+  background: var(--surface);
+  border-bottom: 0.5px solid var(--separator);
+  padding: 0 clamp(16px, 2.4vw, 36px);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.workspace-desktop-topbar-left {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  min-width: 0;
+}
+
+.workspace-desktop-title {
+  margin: 0;
+  font-size: var(--fs-headline);
+  font-weight: 700;
+  color: var(--text-primary);
+  flex-shrink: 0;
+}
+
+.workspace-desktop-sub {
+  font-size: var(--fs-footnote);
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-desktop-topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.workspace-settings-anchor {
+  position: relative;
+}
+
 .workspace-mobile-topbar {
   display: none;
 }
@@ -1913,26 +2044,91 @@
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 24px 24px 48px;
+  padding: clamp(16px, 2vw, 28px) clamp(16px, 2.4vw, 36px) 52px;
 }
 
 .workspace-canvas {
   width: 100%;
-  max-width: 1040px;
+  max-width: 1520px;
   margin: 0 auto;
 }
 
 .workspace-tab-stack {
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 20px;
 }
 
 .workspace-hero-card {
-  padding: 24px;
+  padding: 24px 28px;
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+
+.workspace-hero-card .lobby-hero-header {
+  max-width: none;
+  text-align: left;
+}
+
+.workspace-hero-card .lobby-hero-bar {
+  max-width: none;
+  padding: 0;
+  background: transparent;
+}
+
+/* Tab 1 快传下方双栏工作台（左：最近与常驻房间，右：取件码 + 附近设备） */
+.lobby-quick-dashboard {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+
+/* Tab 3 / Tab 4 通用自适应双栏 */
+.lobby-split-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+  gap: 20px;
+  align-items: start;
+}
+
+/* Tab 3 传输概览 3-KPI 条 */
+.lobby-kpi-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.lobby-kpi-card {
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.lobby-kpi-label {
+  font-size: var(--fs-footnote);
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.lobby-kpi-value {
+  font-size: var(--fs-title);
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+/* 头部内联搜索条（不再独占整行导致黏连） */
+.lobby-inline-search {
+  width: 240px;
+  flex-shrink: 0;
+}
+
+.lobby-inline-search-input {
+  height: 34px;
+  font-size: var(--fs-subhead);
+  border-radius: var(--r-sm);
 }
 
 .workspace-file-title {
@@ -1944,7 +2140,7 @@
 
 .lobby-discover-head {
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 12px;
 }
 
 .lobby-discover-actions {
@@ -1997,9 +2193,35 @@
   display: none;
 }
 
+@media (max-width: 1080px) {
+  .lobby-quick-dashboard {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 @media (max-width: 880px) {
-  .workspace-rail {
+  .workspace-rail,
+  .workspace-desktop-topbar {
     display: none;
+  }
+
+  .lobby-card {
+    padding: 16px;
+    gap: 14px;
+  }
+
+  .lobby-split-grid,
+  .lobby-kpi-strip {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .lobby-discover-actions {
+    width: 100%;
+  }
+
+  .lobby-inline-search {
+    width: 100%;
+    flex: 1 1 100%;
   }
 
   .workspace-mobile-topbar {

@@ -50,6 +50,7 @@ import type {
   ChatItem,
   FileTransferInfo,
   HistoryMeta,
+  MinimizedTransferState,
   PeerLinkStatus,
   PeerMediaState,
   PeerProfile,
@@ -153,6 +154,7 @@ interface ChatRoomProps {
   onMinimizeRoom: () => void;
   onRestoreFromNotification?: () => void;
   onStatusSummary?: (summary: string) => void;
+  onTransferStateChange?: (state: MinimizedTransferState) => void;
   onUnreadChange?: (count: number) => void;
   onToggleMuteRoom?: (code: string) => void;
   onRecordTransfer?: (record: TransferRecord) => void;
@@ -245,6 +247,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   onMinimizeRoom,
   onRestoreFromNotification,
   onStatusSummary,
+  onTransferStateChange,
   onUnreadChange,
   onToggleMuteRoom,
   onRecordTransfer,
@@ -2826,20 +2829,44 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   const inviteUrl = `${window.location.origin}/?room=${encodeURIComponent(roomCode)}`;
   const canManageRoom = !roomInfo?.hasOwner || isOwner;
 
-  // 向外同步挂起胶囊条展示的实时状态（传输进度优先，其次展示在线连线状态）
+  // 向外同步挂起胶囊条展示的实时状态与单条动效状态线（正在下载 / 暂停 / 失败 / 已完成）
   useEffect(() => {
-    if (!onStatusSummary) return;
     const activeTr = [...messages]
       .reverse()
       .find((m) => m.transfer?.status === 'transferring')?.transfer;
+    const pausedTr = !activeTr
+      ? [...messages]
+          .reverse()
+          .find((m) => m.transfer?.status === 'waiting_accept' || m.transfer?.status === 'offering')?.transfer
+      : undefined;
+    const errorTr = !activeTr && !pausedTr
+      ? [...messages].reverse().find((m) => m.transfer?.status === 'error')?.transfer
+      : undefined;
+
     if (activeTr && activeTr.fileSize > 0) {
-      const pct = Math.min(100, (activeTr.transferredBytes / activeTr.fileSize) * 100);
-      onStatusSummary(`传输中 ${pct.toFixed(1)}% · ${activeTr.fileName}`);
+      const pct = Math.min(100, Math.max(0, Math.round((activeTr.transferredBytes / activeTr.fileSize) * 100)));
+      onStatusSummary?.(`正在下载 ${pct}%`);
+      onTransferStateChange?.({ status: 'downloading', percent: pct });
+    } else if (pausedTr) {
+      const pct =
+        pausedTr.fileSize > 0
+          ? Math.min(100, Math.max(0, Math.round((pausedTr.transferredBytes / pausedTr.fileSize) * 100)))
+          : 0;
+      onStatusSummary?.(`下载暂停 ${pct}%`);
+      onTransferStateChange?.({ status: 'paused', percent: pct });
+    } else if (errorTr) {
+      const pct =
+        errorTr.fileSize > 0
+          ? Math.min(100, Math.max(0, Math.round((errorTr.transferredBytes / errorTr.fileSize) * 100)))
+          : 0;
+      onStatusSummary?.(`下载失败`);
+      onTransferStateChange?.({ status: 'error', percent: pct });
     } else {
       const count = Object.keys(peers).length + 1;
-      onStatusSummary(`${linkStatusPill.text} · ${count}人`);
+      onStatusSummary?.(`${linkStatusPill.text} · ${count}人`);
+      onTransferStateChange?.({ status: 'idle', percent: 0 });
     }
-  }, [messages, peers, linkStatusPill.text, onStatusSummary]);
+  }, [messages, peers, linkStatusPill.text, onStatusSummary, onTransferStateChange]);
 
   // 组装当前所有活跃的屏幕共享画面（自己 + 远端伙伴）
   const activeScreenFeeds: ScreenFeedItem[] = useMemo(() => {

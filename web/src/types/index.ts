@@ -426,3 +426,9 @@ export interface FavoriteItem {
   imageUrl?: string;
   createdAt: number;
 }
+
+// 后台挂起房间下载/传输状态（驱动单条变色动效状态线与百分比显示）
+export interface MinimizedTransferState {
+  status: 'idle' | 'downloading' | 'paused' | 'error' | 'completed';
+  percent: number;
+}

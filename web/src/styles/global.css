@@ -1789,8 +1789,8 @@ button:not(:disabled):active,
   right: 20px;
   bottom: calc(18px + env(safe-area-inset-bottom, 0px));
   z-index: 140;
-  width: min(390px, calc(100vw - 24px));
-  padding: 10px 14px;
+  width: min(400px, calc(100vw - 24px));
+  padding: 10px 14px 13px;
   border-radius: var(--r-lg);
   background: var(--surface-elevated);
   box-shadow: var(--shadow-floating);
@@ -1798,7 +1798,106 @@ button:not(:disabled):active,
   align-items: center;
   gap: 10px;
   cursor: pointer;
+  overflow: hidden;
   animation: popIn 0.2s cubic-bezier(0.2, 0, 0, 1);
+}
+
+.dock-status-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: var(--r-full);
+  font-size: 11px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.dock-status-pill.downloading {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.dock-status-pill.paused {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.dock-status-pill.error {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.dock-status-pill.completed {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.dock-status-track {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 3.5px;
+  background: var(--fill);
+  overflow: hidden;
+}
+
+.dock-status-fill {
+  position: relative;
+  height: 100%;
+  border-radius: 0 var(--r-full) var(--r-full) 0;
+  transition: width 240ms ease, background-color 200ms ease;
+  overflow: hidden;
+}
+
+.dock-status-fill.downloading {
+  background: var(--accent);
+}
+
+.dock-status-fill.paused {
+  background: var(--warning);
+  animation: dockBreath 1.4s ease-in-out infinite;
+}
+
+.dock-status-fill.error {
+  background: var(--danger);
+}
+
+.dock-status-fill.completed {
+  background: var(--success);
+}
+
+.dock-status-runner {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 32%;
+  min-width: 28px;
+  background: var(--on-accent);
+  opacity: 0.48;
+  border-radius: var(--r-full);
+  animation: dockSweep 1.15s linear infinite;
+}
+
+@keyframes dockSweep {
+  0% {
+    transform: translateX(-110%);
+  }
+  100% {
+    transform: translateX(360%);
+  }
+}
+
+@keyframes dockBreath {
+  0%,
+  100% {
+    opacity: 0.48;
+  }
+  50% {
+    opacity: 1;
+  }
 }
 
 @media (max-width: 880px) {
@@ -1806,7 +1905,7 @@ button:not(:disabled):active,
     left: 12px;
     right: 12px;
     width: auto;
-    bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+    bottom: calc(68px + env(safe-area-inset-bottom, 0px));
   }
 }
 
