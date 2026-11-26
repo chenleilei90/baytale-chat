@@ -15,7 +15,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.activity.viewModels
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -29,6 +28,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.core.app.ActivityCompat
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.baytale.baychat.service.AppUpdateService
 import com.baytale.baychat.service.IncomingNotificationHelper
@@ -58,7 +58,10 @@ import kotlinx.coroutines.delay
  * 湾聊（BayChat）主 Activity：负责沉浸式深浅系统栏同步、深链进房、系统分享、扫码、悬浮球与房间路由。
  */
 class MainActivity : ComponentActivity() {
-    private val viewModel: BayChatViewModel by viewModels()
+    // 复用 Application 进程级 ViewModel，切后台时即使 Activity 被回收也不断开 WebSocket/P2P 与保活服务
+    private val viewModel: BayChatViewModel by lazy {
+        (application as BayChatApp).sharedViewModel
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -82,6 +85,7 @@ class MainActivity : ComponentActivity() {
             val uiState by viewModel.uiState.collectAsState()
             var showLeaveConfirm by remember { mutableStateOf(false) }
             var permissionGuide by remember { mutableStateOf<Pair<String, String>?>(null) }
+            var notifGuideShownInSession by rememberSaveable { mutableStateOf(false) }
 
             // UX-16：悬浮球归一化停靠位置，跨旋转与回房重挂稳定保持
             var orbDockedRight by rememberSaveable { mutableStateOf(true) }
@@ -168,20 +172,39 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            // B24：仅在尚未询问过通知权限时按需引导一次
+            // B24：进房或主动下载时确保通知权限真正可用；系统通知被关闭时主动提示开启
             LaunchedEffect(uiState.activeRoom?.roomCode, uiState.otaState.status, uiState.prefs.notificationAsked) {
                 val needNotify = uiState.activeRoom != null ||
                     (uiState.otaState.status == OtaUpdateStatus.DOWNLOADING && !uiState.otaState.isSilentBackground)
-                if (needNotify && !uiState.prefs.notificationAsked && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                if (!needNotify) return@LaunchedEffect
+
+                val sysEnabled = NotificationManagerCompat.from(this@MainActivity).areNotificationsEnabled()
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     val granted = ContextCompat.checkSelfPermission(
                         this@MainActivity,
                         Manifest.permission.POST_NOTIFICATIONS
                     ) == PackageManager.PERMISSION_GRANTED
-                    if (!granted) {
+                    if (!granted && !uiState.prefs.notificationAsked) {
                         notificationPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                    } else {
+                    } else if ((!granted || !sysEnabled) && !notifGuideShownInSession) {
+                        notifGuideShownInSession = true
+                        if (!granted && ActivityCompat.shouldShowRequestPermissionRationale(
+                                this@MainActivity,
+                                Manifest.permission.POST_NOTIFICATIONS,
+                            )
+                        ) {
+                            notificationPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        } else {
+                            permissionGuide = "通知权限未开启" to "新消息与后台文件传输需要开启通知权限，否则切出应用后无法弹出消息提醒，请前往系统设置开启。"
+                        }
+                    } else if (!uiState.prefs.notificationAsked && granted && sysEnabled) {
                         viewModel.markNotificationAsked()
                     }
+                } else if (!sysEnabled && !notifGuideShownInSession) {
+                    notifGuideShownInSession = true
+                    permissionGuide = "通知权限未开启" to "系统通知已被关闭，切出应用后将无法收到新消息与传输提醒，请前往系统设置开启。"
+                } else if (!uiState.prefs.notificationAsked) {
+                    viewModel.markNotificationAsked()
                 }
             }
 

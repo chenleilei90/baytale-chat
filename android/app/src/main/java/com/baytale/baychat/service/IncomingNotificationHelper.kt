@@ -6,15 +6,19 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.media.AudioAttributes
+import android.media.RingtoneManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.Person
 import com.baytale.baychat.MainActivity
 import com.baytale.baychat.R
 import com.baytale.baychat.core.util.FormatUtils
 
-// 后台高优先级来件与消息提醒通知管理器（渠道：baychat_incoming）
+// 后台高优先级来件与消息提醒通知管理器（渠道：baychat_incoming_v2）
 object IncomingNotificationHelper {
-    const val CHANNEL_ID = "baychat_incoming"
+    const val CHANNEL_ID = "baychat_incoming_v2"
+    private const val LEGACY_CHANNEL_ID = "baychat_incoming"
+    private val VIBRATION_PATTERN = longArrayOf(0L, 220L, 120L, 220L)
     const val ACTION_RESTORE_ACTIVE_ROOM = "com.baytale.baychat.ACTION_RESTORE_ACTIVE_ROOM"
     const val EXTRA_ROOM_CODE = "extra_room_code"
     private const val NOTIFICATION_ID_MESSAGES = 10110
@@ -34,16 +38,25 @@ object IncomingNotificationHelper {
 
     fun ensureChannel(context: Context) {
         val nm = context.applicationContext.getSystemService(NotificationManager::class.java) ?: return
+        // 清理旧版未显式声明铃声与震动的渠道，防止 ROM 缓存为静音折叠
+        runCatching { nm.deleteNotificationChannel(LEGACY_CHANNEL_ID) }
         if (nm.getNotificationChannel(CHANNEL_ID) == null) {
+            val audioAttr = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_NOTIFICATION_COMMUNICATION_INSTANT)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                .build()
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 "新消息与文件提醒",
                 NotificationManager.IMPORTANCE_HIGH,
             ).apply {
-                description = "切到后台或挂起时提醒新消息、@提及与待确认文件"
+                description = "切到后台或挂起时响铃震动提醒新消息、@提及与待确认文件"
                 lockscreenVisibility = Notification.VISIBILITY_PUBLIC
                 setShowBadge(true)
                 enableVibration(true)
+                vibrationPattern = VIBRATION_PATTERN
+                enableLights(true)
+                setSound(RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION), audioAttr)
             }
             nm.createNotificationChannel(channel)
         }
@@ -108,13 +121,16 @@ object IncomingNotificationHelper {
             .setContentTitle(title)
             .setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setDefaults(NotificationCompat.DEFAULT_ALL)
+            .setSound(RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION))
+            .setVibrate(VIBRATION_PATTERN)
             .setWhen(System.currentTimeMillis())
             .setShowWhen(true)
             .setAutoCancel(true)
+            .setOnlyAlertOnce(false)
             .setContentIntent(openPi)
             .addAction(0, "接收", acceptPi)
             .addAction(0, "拒绝", rejectPi)
@@ -189,10 +205,12 @@ object IncomingNotificationHelper {
             .setContentText(previewText)
             .setStyle(style)
             .setNumber(unreadCount.coerceAtLeast(1))
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setDefaults(NotificationCompat.DEFAULT_ALL)
+            .setSound(RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION))
+            .setVibrate(VIBRATION_PATTERN)
             .setWhen(System.currentTimeMillis())
             .setShowWhen(true)
             .setAutoCancel(true)

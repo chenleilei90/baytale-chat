@@ -299,7 +299,7 @@ fun UpdateBannerCard(
                             }
                             OtaUpdateStatus.PAUSED -> {
                                 BayButton(
-                                    text = "继续",
+                                    text = "继续下载",
                                     onClick = onStartOrResume,
                                     style = BayButtonStyle.Primary,
                                     size = BayButtonSize.Small,
@@ -323,6 +323,26 @@ fun UpdateBannerCard(
                             }
                             else -> Unit
                         }
+                    }
+
+                    // 补充传输大小与速率详情
+                    if (ota.status == OtaUpdateStatus.DOWNLOADING || ota.status == OtaUpdateStatus.PAUSED) {
+                        val sizeTotal = ota.totalBytes.coerceAtLeast(release.sizeBytes)
+                        val detail = buildString {
+                            if (ota.status == OtaUpdateStatus.PAUSED) append("已保留断点 ")
+                            append(FormatUtils.formatBytes(ota.downloadedBytes))
+                            if (sizeTotal > 0L) append(" / ${FormatUtils.formatBytes(sizeTotal)}")
+                            if (ota.status == OtaUpdateStatus.DOWNLOADING && ota.speedBytesPerSec > 0L) {
+                                append(" · ${FormatUtils.formatBytes(ota.speedBytesPerSec)}/s")
+                            }
+                        }
+                        Text(
+                            text = detail,
+                            style = BayType.caption,
+                            color = colors.textSecondary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                     }
 
                     // 单条变色动效状态线
@@ -375,7 +395,7 @@ fun UpdateAvailableDialog(
 
     val dismissLabel: String? = when (ota.status) {
         OtaUpdateStatus.AVAILABLE -> if (!ota.isForceUpdate) "忽略" else null
-        OtaUpdateStatus.DOWNLOADING -> if (!ota.isForceUpdate) "暂停" else null
+        OtaUpdateStatus.DOWNLOADING -> if (!ota.isForceUpdate) "暂停下载" else null
         OtaUpdateStatus.PAUSED,
         OtaUpdateStatus.READY_TO_INSTALL,
         OtaUpdateStatus.ERROR -> if (!ota.isForceUpdate) "稍后" else null
@@ -459,6 +479,12 @@ fun UpdateAvailableDialog(
                 }
 
                 OtaUpdateStatus.DOWNLOADING -> {
+                    val dlTotal = ota.totalBytes.coerceAtLeast(release.sizeBytes)
+                    val dlMeta = buildString {
+                        append(FormatUtils.formatBytes(ota.downloadedBytes))
+                        if (dlTotal > 0L) append(" / ${FormatUtils.formatBytes(dlTotal)}")
+                        if (ota.speedBytesPerSec > 0L) append(" · ${FormatUtils.formatBytes(ota.speedBytesPerSec)}/s")
+                    }
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -479,17 +505,27 @@ fun UpdateAvailableDialog(
                             status = ota.status,
                             progress = ota.progressFraction,
                         )
+                        Text(
+                            text = dlMeta,
+                            style = BayType.caption,
+                            color = colors.textSecondary,
+                        )
                     }
                 }
 
                 OtaUpdateStatus.PAUSED -> {
+                    val pausedTotal = ota.totalBytes.coerceAtLeast(release.sizeBytes)
+                    val pausedMeta = buildString {
+                        append("已保留断点 ${FormatUtils.formatBytes(ota.downloadedBytes)}")
+                        if (pausedTotal > 0L) append(" / ${FormatUtils.formatBytes(pausedTotal)}")
+                    }
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
                         ) {
                             Text(
-                                text = "下载暂停",
+                                text = "下载已暂停",
                                 style = BayType.caption.copy(fontWeight = FontWeight.SemiBold),
                                 color = colors.textPrimary,
                             )
@@ -502,6 +538,11 @@ fun UpdateAvailableDialog(
                         BayAnimatedStatusLine(
                             status = ota.status,
                             progress = ota.progressFraction,
+                        )
+                        Text(
+                            text = pausedMeta,
+                            style = BayType.caption,
+                            color = colors.textSecondary,
                         )
                     }
                 }

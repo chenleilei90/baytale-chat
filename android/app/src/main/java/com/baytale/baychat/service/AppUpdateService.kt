@@ -443,8 +443,28 @@ class AppUpdateService : Service() {
         val pauseGen = runGeneration.incrementAndGet()
         pauseRequested.set(true)
         val activeJob = downloadJob
-        // 先触发取消并等待旧下载协程彻底退出、关闭 .part 文件流；绝不提前把 downloadJob 置空或同步 stopSelf()
+        // 先触发取消并立即将 UI 与通知切换为暂停态（不阻塞等待旧流退出）
         activeJob?.cancel()
+        val immediateSnap = AppUpdateCenter.state.value
+        val immediateRelease = immediateSnap.release
+        if (immediateRelease != null) {
+            AppUpdateCenter.updateState {
+                it.copy(
+                    status = OtaUpdateStatus.PAUSED,
+                    release = immediateRelease,
+                    speedBytesPerSec = 0L,
+                    errorMessage = null,
+                )
+            }
+            notifySafely(
+                NOTIFICATION_ID_PROGRESS,
+                buildPausedNotification(
+                    release = immediateRelease,
+                    downloadedBytes = immediateSnap.downloadedBytes,
+                    totalBytes = immediateSnap.totalBytes.coerceAtLeast(immediateRelease.sizeBytes),
+                ),
+            )
+        }
         serviceScope.launch {
             if (activeJob != null) {
                 runCatching { activeJob.join() }
@@ -497,7 +517,8 @@ class AppUpdateService : Service() {
     ) {
         if (expectedGen != null && runGeneration.get() != expectedGen) return
         releaseLocks()
-        stopForeground(STOP_FOREGROUND_REMOVE)
+        // 使用 STOP_FOREGROUND_DETACH 脱离前台锁定而非删除通知，避免抹掉随后刷新的「继续」按钮通知
+        runCatching { stopForeground(STOP_FOREGROUND_DETACH) }
         AppUpdateCenter.updateState {
             it.copy(
                 status = OtaUpdateStatus.PAUSED,

@@ -1786,6 +1786,17 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun pauseAppUpdate() {
+        val current = AppUpdateCenter.state.value
+        if (current.status == OtaUpdateStatus.DOWNLOADING && current.release != null) {
+            // 立即乐观更新 UI 为暂停态，保证卡片与弹窗按钮 0ms 瞬切为「继续下载」
+            AppUpdateCenter.updateState {
+                it.copy(
+                    status = OtaUpdateStatus.PAUSED,
+                    speedBytesPerSec = 0L,
+                    errorMessage = null,
+                )
+            }
+        }
         AppUpdateService.pauseDownload(appContext)
         showToast("已暂停更新，本地断点已安全保留")
     }
@@ -2820,9 +2831,6 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                     val wasReconnected = hasJoinedRoomOnce && hadRoomWsDisconnect
                     hasJoinedRoomOnce = true
                     hadRoomWsDisconnect = false
-                    if (wasReconnected) {
-                        showToast("网络已恢复，已重新连接")
-                    }
                     if (joinSoundPlayed.compareAndSet(false, true)) {
                         playSoundIfEnabled { playRoomJoin() }
                     }
@@ -2845,8 +2853,8 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                     // 进房同步历史消息改为单次原子批量合并，并递增 historySyncNonce 驱动聊天列表精准定位最新底部
                     val newlyMerged = mergeCachedMessagesBatch(env.messages.orEmpty(), fromCache = true)
                     updateRoom { r -> r.copy(historySyncNonce = r.historySyncNonce + 1) }
-                    // 若后台短暂断线重连后同步到对方新消息，立刻补发后台高优先级通知，绝不漏推
-                    if (!isInitialSync && wasReconnected && isAppInBackgroundNow() && newlyMerged.isNotEmpty()) {
+                    // 若断线重连后同步到他人离线/挂起期间发来的新消息，立刻补发后台或大厅提醒，绝不漏推
+                    if (!isInitialSync && (isAppInBackgroundNow() || _uiState.value.roomMinimized) && newlyMerged.isNotEmpty()) {
                         newlyMerged
                             .filter { !it.isSelf && it.kind != ChatKind.SYSTEM }
                             .forEach { item ->
@@ -3139,8 +3147,13 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                 previewText = previewText,
                 mentionedMe = item.mentionedMe,
             )
-        } else if (!bgNow && _uiState.value.roomMinimized && item.mentionedMe && roomCode.isNotBlank()) {
-            showToast("${item.senderName} 在 #${roomCode} @了你：${previewText.take(24)}")
+        } else if (!bgNow && _uiState.value.roomMinimized && allowNotify && roomCode.isNotBlank()) {
+            val msgToast = if (item.mentionedMe) {
+                "[有人@我] ${item.senderName}：${previewText.take(24)}"
+            } else {
+                "${item.senderName}：${previewText.take(28)}"
+            }
+            showToast(msgToast)
         }
     }
 

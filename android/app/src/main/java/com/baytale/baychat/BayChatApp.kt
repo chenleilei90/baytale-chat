@@ -3,9 +3,13 @@ package com.baytale.baychat
 import android.app.Activity
 import android.app.Application
 import android.os.Bundle
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.ViewModelStore
+import androidx.lifecycle.ViewModelStoreOwner
 import com.baytale.baychat.service.AppUpdateService
 import com.baytale.baychat.service.IncomingNotificationHelper
 import com.baytale.baychat.service.TransferForegroundService
+import com.baytale.baychat.ui.BayChatViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -47,8 +51,17 @@ object AppForegroundTracker : Application.ActivityLifecycleCallbacks {
     override fun onActivityDestroyed(activity: Activity) {}
 }
 
-// BayChat 应用入口：仅初始化本地通知渠道与前后台追踪，严格在用户同意隐私政策前不发起任何网络请求
-class BayChatApp : Application() {
+// BayChat 应用入口：持有进程级 ViewModelStore 确保 Activity 切后台被回收时仍不断连，并严格在隐私同意前不发起网络请求
+class BayChatApp : Application(), ViewModelStoreOwner {
+    override val viewModelStore: ViewModelStore = ViewModelStore()
+
+    val sharedViewModel: BayChatViewModel by lazy {
+        ViewModelProvider(
+            this,
+            ViewModelProvider.AndroidViewModelFactory.getInstance(this),
+        )[BayChatViewModel::class.java]
+    }
+
     override fun onCreate() {
         super.onCreate()
         registerActivityLifecycleCallbacks(AppForegroundTracker)
