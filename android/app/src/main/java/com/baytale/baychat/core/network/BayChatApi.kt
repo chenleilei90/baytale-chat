@@ -396,6 +396,20 @@ class BayChatApi(
         root["text"]?.jsonPrimitive?.content?.trim().orEmpty()
     }
 
+    // 调用服务端 AI 纠错接口优化语音识别错别字与标点断句
+    suspend fun correctAsrText(text: String): String = withContext(Dispatchers.IO) {
+        val payload = buildJsonObject {
+            put("text", text)
+        }.toString().toRequestBody(jsonMediaType)
+        val req = Request.Builder()
+            .url("${baseUrl()}/api/asr/correct")
+            .post(payload)
+            .build()
+        val raw = executeRaw(req)
+        val root = json.parseToJsonElement(raw).jsonObject
+        root["text"]?.jsonPrimitive?.content?.trim().orEmpty()
+    }
+
     fun buildInviteUrl(code: String): String = "${baseUrl()}/?room=${encodePath(code)}"
 
     fun buildWebSocketUrl(): String {

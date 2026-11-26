@@ -245,6 +245,10 @@ fun MessageBubble(
                 horizontalArrangement = if (item.isSelf) Arrangement.End else Arrangement.Start,
                 verticalAlignment = Alignment.Top,
             ) {
+                // 自己消息左侧固定留出 54dp 对称安全区（40dp 对方头像 + 6dp 间距 + 8dp 留白），绝不超过对面头像位置
+                if (item.isSelf) {
+                    Spacer(modifier = Modifier.width(54.dp))
+                }
                 // 他人消息左侧头像列（每条均与微信一致展示 40dp 方形微圆角头像；支持单击操作、双击拍一拍、长按@提及）
                 if (!item.isSelf) {
                     MessageSenderAvatar(
@@ -304,7 +308,6 @@ fun MessageBubble(
                 val textBody = item.text.orEmpty()
                 Box(
                     modifier = Modifier
-                        .widthIn(max = 304.dp)
                         .onGloballyPositioned { coords -> bubbleBounds = coords.boundsInWindow() }
                         .combinedClickable(
                             interactionSource = longPressInteraction,
@@ -581,6 +584,9 @@ fun MessageBubble(
                         onDoubleClick = { onAvatarDoubleTap(item.senderId, item.senderName) },
                         onLongClick = null,
                     )
+                } else {
+                    // 他人消息右侧同样留出 54dp 对称安全区，气泡宽度与微信一致绝不跨越到自己头像侧
+                    Spacer(modifier = Modifier.width(54.dp))
                 }
             }
         }

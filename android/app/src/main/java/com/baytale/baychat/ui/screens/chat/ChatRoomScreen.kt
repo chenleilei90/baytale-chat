@@ -1304,14 +1304,16 @@ fun ChatRoomScreen(
             liveTranscribeText = state.voiceTranscribeText,
         )
 
-        // 8b. 新版微信同款全屏转文字确认浮层（透明内联编辑绿气泡 + 取消 / 发原语音 / 发送文字）
+        // 8b. 新版微信同款全屏转文字确认浮层（透明内联编辑绿气泡 + AI 纠错 + 取消 / 发原语音 / 发送文字）
         if (state.showVoiceTranscribePanel) {
             VoiceTranscribeOverlay(
                 text = state.voiceTranscribeText,
                 draftDurationMs = state.voiceDraftDurationMs,
                 hasDraftAudio = !state.voiceDraftAudioPath.isNullOrBlank(),
                 isTranscribing = state.isTranscribingDraft,
+                isCorrecting = state.isCorrectingVoiceText,
                 onTextChange = { vm.updateVoiceTranscribeText(it) },
+                onAiCorrect = { vm.aiCorrectVoiceTranscribeText() },
                 onRetryTranscribe = { vm.retryTranscribeDraftAudio() },
                 onSendAudio = { vm.sendVoiceDraftAudio() },
                 onSendText = { vm.sendVoiceTranscribeText() },
@@ -2070,7 +2072,9 @@ private fun VoiceTranscribeOverlay(
     draftDurationMs: Long,
     hasDraftAudio: Boolean,
     isTranscribing: Boolean,
+    isCorrecting: Boolean,
     onTextChange: (String) -> Unit,
+    onAiCorrect: () -> Unit,
     onRetryTranscribe: () -> Unit,
     onSendAudio: () -> Unit,
     onSendText: () -> Unit,
@@ -2132,31 +2136,59 @@ private fun VoiceTranscribeOverlay(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
-                        text = if (isTranscribing) "收尾识别中..." else "点上方文字可直接修改",
+                        text = when {
+                            isTranscribing -> "收尾识别中..."
+                            isCorrecting -> "AI 纠错中..."
+                            else -> "点上方文字可直接修改"
+                        },
                         style = BayType.caption,
                         color = colors.wechatSelfText.copy(alpha = 0.68f),
                     )
-                    if (!isTranscribing && hasDraftAudio) {
-                        Row(
-                            modifier = Modifier
-                                .clip(BayShapes.fullShape)
-                                .background(colors.wechatSelfText.copy(alpha = 0.10f))
-                                .bayClickable { onRetryTranscribe() }
-                                .padding(horizontal = 8.dp, vertical = 3.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Refresh,
-                                contentDescription = "重新识别",
-                                tint = colors.wechatSelfText,
-                                modifier = Modifier.size(13.dp),
-                            )
-                            Text(
-                                text = "重新识别",
-                                style = BayType.caption,
-                                color = colors.wechatSelfText,
-                            )
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        if (!isTranscribing && text.isNotBlank()) {
+                            Box(
+                                modifier = Modifier
+                                    .clip(BayShapes.fullShape)
+                                    .background(colors.wechatSelfText.copy(alpha = 0.10f))
+                                    .bayClickable(enabled = !isCorrecting) { onAiCorrect() }
+                                    .padding(horizontal = 8.dp, vertical = 3.dp),
+                            ) {
+                                Text(
+                                    text = if (isCorrecting) "AI 纠错中..." else "AI 纠错",
+                                    style = BayType.caption,
+                                    color = if (isCorrecting) {
+                                        colors.wechatSelfText.copy(alpha = 0.6f)
+                                    } else {
+                                        colors.wechatSelfText
+                                    },
+                                )
+                            }
+                        }
+                        if (!isTranscribing && hasDraftAudio) {
+                            Row(
+                                modifier = Modifier
+                                    .clip(BayShapes.fullShape)
+                                    .background(colors.wechatSelfText.copy(alpha = 0.10f))
+                                    .bayClickable(enabled = !isCorrecting) { onRetryTranscribe() }
+                                    .padding(horizontal = 8.dp, vertical = 3.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Refresh,
+                                    contentDescription = "重新识别",
+                                    tint = colors.wechatSelfText,
+                                    modifier = Modifier.size(13.dp),
+                                )
+                                Text(
+                                    text = "重新识别",
+                                    style = BayType.caption,
+                                    color = colors.wechatSelfText,
+                                )
+                            }
                         }
                     }
                 }

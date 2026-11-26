@@ -322,6 +322,8 @@ data class BayChatUiState(
     val creatingPlane: Boolean = false,
     // 顶部进出房间漂浮提示文案（定时自动消隐，不污染聊天记录）
     val roomPresenceNotice: String? = null,
+    // 语音转文字 AI 智能纠错加载态
+    val isCorrectingVoiceText: Boolean = false,
 ) {
     // B12：供 Activity 与导航判断当前是否保有活跃或后台挂起的房间会话
     val hasActiveRoom: Boolean
@@ -4446,6 +4448,33 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         _uiState.update { it.copy(voiceTranscribeText = text) }
     }
 
+    // 对当前语音转写文稿执行服务端 AI 智能纠错与标点润色
+    fun aiCorrectVoiceTranscribeText() {
+        val current = _uiState.value.voiceTranscribeText.trim()
+        if (current.isEmpty() || _uiState.value.isCorrectingVoiceText) return
+        _uiState.update { it.copy(isCorrectingVoiceText = true) }
+        viewModelScope.launch(Dispatchers.IO) {
+            val res = runCatching { api.correctAsrText(current) }
+            withContext(Dispatchers.Main) {
+                _uiState.update { st ->
+                    val nextText = res.getOrNull()?.takeIf { it.isNotBlank() } ?: st.voiceTranscribeText
+                    st.copy(
+                        isCorrectingVoiceText = false,
+                        voiceTranscribeText = nextText,
+                    )
+                }
+                res.onSuccess { corrected ->
+                    showToast(
+                        if (corrected.isNotBlank() && corrected != current) "AI 纠错已完成"
+                        else "内容已很准确",
+                    )
+                }.onFailure { err ->
+                    showToast(err.message ?: "AI 纠错失败，请稍后重试")
+                }
+            }
+        }
+    }
+
     fun sendVoiceDraftAudio() {
         val path = _uiState.value.voiceDraftAudioPath
         val durationSec = ((_uiState.value.voiceDraftDurationMs + 500L) / 1000L).coerceIn(1L, 60L)
@@ -4475,6 +4504,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                 voiceDraftDurationMs = 0L,
                 voiceTranscribeText = "",
                 isTranscribingDraft = false,
+                isCorrectingVoiceText = false,
                 showVoiceTranscribePanel = false,
             )
         }
@@ -4494,6 +4524,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                 voiceDraftDurationMs = 0L,
                 voiceTranscribeText = "",
                 isTranscribingDraft = false,
+                isCorrectingVoiceText = false,
                 showVoiceTranscribePanel = false,
             )
         }
