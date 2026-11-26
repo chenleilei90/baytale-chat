@@ -31,6 +31,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
+import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okio.BufferedSink
 import okio.source
@@ -376,6 +377,23 @@ class BayChatApi(
             }
             downloaded
         }
+    }
+
+    // 调用自托管中文语音识别服务将录音转写为文字
+    suspend fun transcribeAudio(audioFile: File): String = withContext(Dispatchers.IO) {
+        val mime = when (audioFile.extension.lowercase()) {
+            "wav" -> "audio/wav"
+            "ogg" -> "audio/ogg"
+            "mp3" -> "audio/mpeg"
+            else -> "audio/mp4"
+        }
+        val req = Request.Builder()
+            .url("${baseUrl()}/api/asr")
+            .post(audioFile.asRequestBody(mime.toMediaType()))
+            .build()
+        val raw = executeRaw(req)
+        val root = json.parseToJsonElement(raw).jsonObject
+        root["text"]?.jsonPrimitive?.content?.trim().orEmpty()
     }
 
     fun buildInviteUrl(code: String): String = "${baseUrl()}/?room=${encodePath(code)}"

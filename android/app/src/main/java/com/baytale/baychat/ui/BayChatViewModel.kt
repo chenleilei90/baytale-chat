@@ -3,7 +3,6 @@ package com.baytale.baychat.ui
 import android.Manifest
 import android.app.Application
 import android.content.Context
-import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
@@ -14,11 +13,7 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.Uri
 import android.os.Build
-import android.os.Bundle
 import android.provider.DocumentsContract
-import android.speech.RecognitionListener
-import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.lifecycle.AndroidViewModel
@@ -279,12 +274,14 @@ data class BayChatUiState(
     val isRecordingVoice: Boolean = false,
     val voiceRecordDurationMs: Long = 0L,
     val voiceAmplitude: Float = 0f,
-    // 新版微信式语音转文字暂存与实时听写状态
+    // 新版微信式服务端语音转文字暂存与消息识别结果
     val voiceDraftAudioPath: String? = null,
     val voiceDraftDurationMs: Long = 0L,
     val voiceTranscribeText: String = "",
-    val isSpeechRecognizing: Boolean = false,
+    val isTranscribingDraft: Boolean = false,
     val showVoiceTranscribePanel: Boolean = false,
+    val voiceTranscripts: Map<String, String> = emptyMap(),
+    val transcribingMessageIds: Set<String> = emptySet(),
     val voicePlayback: VoicePlaybackState = VoicePlaybackState(),
     val playedVoiceIds: Set<String> = emptySet(),
     val storageStats: StorageStats = StorageStats(),
@@ -397,9 +394,6 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     private var voiceOutputFile: File? = null
     private var voiceRecordStartAt: Long = 0L
     private var voiceRecordTickerJob: Job? = null
-    private var speechRecognizer: SpeechRecognizer? = null
-    @Volatile
-    private var isVoiceLiveTranscribeMode: Boolean = false
     private var lastVoiceTypingSentAt: Long = 0L
     private var mediaPlayer: MediaPlayer? = null
     private var voicePlaybackTickerJob: Job? = null
@@ -4115,7 +4109,6 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         stopVoicePlayback()
         if (_uiState.value.isRecordingVoice) return false
 
-        isVoiceLiveTranscribeMode = false
         return runCatching {
             val dir = File(appContext.cacheDir, "voice_rec").apply { mkdirs() }
             val outFile = File(dir, "voice_${System.currentTimeMillis()}.m4a")
@@ -4153,7 +4146,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                     voiceRecordDurationMs = 0L,
                     voiceAmplitude = 0f,
                     voiceTranscribeText = "",
-                    isSpeechRecognizing = false,
+                    isTranscribingDraft = false,
                 )
             }
             startVoiceTickerLoop()
@@ -4172,19 +4165,15 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
             while (isActive && _uiState.value.isRecordingVoice) {
                 val now = System.currentTimeMillis()
                 val elapsed = now - voiceRecordStartAt
-                if (!isVoiceLiveTranscribeMode) {
-                    val rawAmp = runCatching { mediaRecorder?.maxAmplitude ?: 0 }.getOrDefault(0)
-                    val amp = (rawAmp / 32767f).coerceIn(0f, 1f)
-                    val prevAmp = _uiState.value.voiceAmplitude
-                    val smooth = (prevAmp * 0.6f + amp * 0.4f).coerceIn(0f, 1f)
-                    _uiState.update {
-                        it.copy(
-                            voiceRecordDurationMs = elapsed,
-                            voiceAmplitude = smooth,
-                        )
-                    }
-                } else {
-                    _uiState.update { it.copy(voiceRecordDurationMs = elapsed) }
+                val rawAmp = runCatching { mediaRecorder?.maxAmplitude ?: 0 }.getOrDefault(0)
+                val amp = (rawAmp / 32767f).coerceIn(0f, 1f)
+                val prevAmp = _uiState.value.voiceAmplitude
+                val smooth = (prevAmp * 0.6f + amp * 0.4f).coerceIn(0f, 1f)
+                _uiState.update {
+                    it.copy(
+                        voiceRecordDurationMs = elapsed,
+                        voiceAmplitude = smooth,
+                    )
                 }
                 // 每 3.5 秒续发一次语音输入状态心跳，防止对方 6 秒超时熄灭
                 if (now - lastVoiceTypingSentAt >= 3_500L) {
@@ -4192,11 +4181,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                     mesh?.broadcastTyping(true, "voice")
                 }
                 if (elapsed >= MAX_VOICE_DURATION_MS) {
-                    if (isVoiceLiveTranscribeMode) {
-                        finishVoiceGestureToTranscribe()
-                    } else {
-                        stopVoiceRecording(send = true)
-                    }
+                    stopVoiceRecording(send = true)
                     break
                 }
                 delay(100L)
@@ -4204,57 +4189,12 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    // 判断当前是否刚按下语音且适合无缝切入「边说边转文字」模式（< 1.8 秒）
-    fun isVoiceRecordingWithinEarlySwitchWindow(): Boolean {
-        return _uiState.value.isRecordingVoice &&
-            !isVoiceLiveTranscribeMode &&
-            (System.currentTimeMillis() - voiceRecordStartAt) < 1_800L
-    }
-
-    // 滑入右侧「文 转文字」区：若尚在起始阶段则关闭录音，改用系统语音识别器边说边出字
-    fun switchRecordingToLiveTranscribe() {
-        if (!_uiState.value.isRecordingVoice || isVoiceLiveTranscribeMode) return
-        if (!SpeechRecognizer.isRecognitionAvailable(appContext)) {
-            showToast("当前系统未内置语音识别服务，松手后可手动编辑")
-            return
-        }
-        val oldFile = voiceOutputFile
-        runCatching { mediaRecorder?.stop() }
-        releaseVoiceRecorder()
-        runCatching { oldFile?.delete() }
-        isVoiceLiveTranscribeMode = true
-        _uiState.update {
-            it.copy(
-                voiceTranscribeText = "",
-                isSpeechRecognizing = true,
-                voiceAmplitude = 0.25f,
-            )
-        }
-        startSystemSpeechRecognizer(appendMode = false)
-    }
-
-    // 在右侧「文 转文字」区松手：若正在边说边转文字则停止并展示确认框；若为录音文件则暂存音频打开转文字确认面板
+    // 在右侧「文 转文字」区松手：结束录音保留原语音文件，立即弹出新版微信转文字浮层并提交服务端中文 ASR 识别
     fun finishVoiceGestureToTranscribe() {
         if (!_uiState.value.isRecordingVoice) return
         voiceRecordTickerJob?.cancel()
         voiceRecordTickerJob = null
         mesh?.broadcastTyping(false, "voice")
-
-        if (isVoiceLiveTranscribeMode) {
-            isVoiceLiveTranscribeMode = false
-            stopSystemSpeechRecognizer()
-            _uiState.update {
-                it.copy(
-                    isRecordingVoice = false,
-                    voiceRecordDurationMs = 0L,
-                    voiceAmplitude = 0f,
-                    voiceDraftAudioPath = null,
-                    voiceDraftDurationMs = 0L,
-                    showVoiceTranscribePanel = true,
-                )
-            }
-            return
-        }
 
         val elapsedMs = (System.currentTimeMillis() - voiceRecordStartAt).coerceAtLeast(0L)
         val file = voiceOutputFile
@@ -4275,28 +4215,107 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                 voiceDraftAudioPath = file.absolutePath,
                 voiceDraftDurationMs = durationSec * 1000L,
                 voiceTranscribeText = "",
-                isSpeechRecognizing = false,
+                isTranscribingDraft = true,
                 showVoiceTranscribePanel = true,
             )
         }
+        transcribeDraftFileAsync(file)
     }
 
-    fun startSpeechDictationInPanel() {
-        val granted = ContextCompat.checkSelfPermission(appContext, Manifest.permission.RECORD_AUDIO) ==
-            PackageManager.PERMISSION_GRANTED
-        if (!granted) {
-            showToast("请先授予麦克风权限")
-            return
+    private fun transcribeDraftFileAsync(file: File) {
+        viewModelScope.launch {
+            runCatching {
+                api.transcribeAudio(file)
+            }.onSuccess { text ->
+                if (_uiState.value.voiceDraftAudioPath == file.absolutePath) {
+                    _uiState.update {
+                        it.copy(
+                            voiceTranscribeText = text,
+                            isTranscribingDraft = false,
+                        )
+                    }
+                    if (text.isBlank()) {
+                        showToast("未识别到清晰语音，可直接发原语音或手动编辑")
+                    }
+                }
+            }.onFailure { err ->
+                if (_uiState.value.voiceDraftAudioPath == file.absolutePath) {
+                    _uiState.update { it.copy(isTranscribingDraft = false) }
+                    showToast(err.message ?: "语音转文字失败，可直接发送原语音或重试")
+                }
+            }
         }
-        if (!SpeechRecognizer.isRecognitionAvailable(appContext)) {
-            showToast("当前系统未内置语音识别服务，请直接输入或编辑文字")
-            return
-        }
-        startSystemSpeechRecognizer(appendMode = _uiState.value.voiceTranscribeText.isNotBlank())
     }
 
-    fun stopSpeechDictationInPanel() {
-        stopSystemSpeechRecognizer()
+    fun retryTranscribeDraftAudio() {
+        val path = _uiState.value.voiceDraftAudioPath ?: return
+        val file = File(path)
+        if (!file.exists() || file.length() == 0L) {
+            showToast("原语音文件已不存在")
+            return
+        }
+        _uiState.update { it.copy(isTranscribingDraft = true) }
+        transcribeDraftFileAsync(file)
+    }
+
+    // 对聊天流中任意语音消息（收到或已发出）执行服务端转文字并在气泡下方展示
+    fun transcribeVoiceMessage(item: ChatItem) {
+        if (item.kind != ChatKind.AUDIO) return
+        if (item.id in _uiState.value.transcribingMessageIds) return
+        val room = _uiState.value.activeRoom
+        val roomPwd = room?.password.orEmpty()
+        val localSource = item.localFilePath?.takeIf { File(it).exists() }
+            ?: item.transfer?.localPath?.takeIf { File(it).exists() }
+        val contentUriStr = item.transfer?.contentUri
+        val remoteUrl = item.mediaId?.takeIf { it.isNotBlank() }?.let { mid ->
+            room?.let { api.buildCachedMediaUrl(it.roomCode, mid) }
+        } ?: item.transfer?.cachedDownloadUrl
+
+        _uiState.update { it.copy(transcribingMessageIds = it.transcribingMessageIds + item.id) }
+        viewModelScope.launch(Dispatchers.IO) {
+            var tempToClean: File? = null
+            val outcome = runCatching {
+                val targetFile = when {
+                    localSource != null -> File(localSource)
+                    !contentUriStr.isNullOrBlank() -> {
+                        val dir = File(appContext.cacheDir, "asr_tmp").apply { mkdirs() }
+                        val tmp = File(dir, "asr_${item.id}.m4a")
+                        tempToClean = tmp
+                        appContext.contentResolver.openInputStream(Uri.parse(contentUriStr))?.use { input ->
+                            FileOutputStream(tmp).use { out -> input.copyTo(out) }
+                        } ?: throw IllegalStateException("无法读取语音文件")
+                        tmp
+                    }
+                    !remoteUrl.isNullOrBlank() -> {
+                        val dir = File(appContext.cacheDir, "asr_tmp").apply { mkdirs() }
+                        val tmp = File(dir, "asr_${item.id}.m4a")
+                        tempToClean = tmp
+                        api.downloadCachedFileToTemp(remoteUrl, tmp, password = roomPwd) { _, _ -> }
+                        tmp
+                    }
+                    else -> throw IllegalStateException("该语音文件尚在传输或已过期")
+                }
+                api.transcribeAudio(targetFile)
+            }
+            runCatching { tempToClean?.delete() }
+            withContext(Dispatchers.Main) {
+                outcome.onSuccess { text ->
+                    _uiState.update {
+                        it.copy(
+                            transcribingMessageIds = it.transcribingMessageIds - item.id,
+                            voiceTranscripts = it.voiceTranscripts + (item.id to text),
+                        )
+                    }
+                }.onFailure { err ->
+                    _uiState.update { it.copy(transcribingMessageIds = it.transcribingMessageIds - item.id) }
+                    showToast(err.message ?: "语音转文字失败")
+                }
+            }
+        }
+    }
+
+    fun collapseVoiceTranscript(messageId: String) {
+        _uiState.update { it.copy(voiceTranscripts = it.voiceTranscripts - messageId) }
     }
 
     fun updateVoiceTranscribeText(text: String) {
@@ -4306,13 +4325,12 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     fun sendVoiceDraftAudio() {
         val path = _uiState.value.voiceDraftAudioPath
         val durationSec = ((_uiState.value.voiceDraftDurationMs + 500L) / 1000L).coerceIn(1L, 60L)
-        stopSystemSpeechRecognizer()
         _uiState.update {
             it.copy(
                 voiceDraftAudioPath = null,
                 voiceDraftDurationMs = 0L,
                 voiceTranscribeText = "",
-                isSpeechRecognizing = false,
+                isTranscribingDraft = false,
                 showVoiceTranscribePanel = false,
             )
         }
@@ -4327,13 +4345,12 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     fun sendVoiceTranscribeText() {
         val text = _uiState.value.voiceTranscribeText.trim()
         val oldPath = _uiState.value.voiceDraftAudioPath
-        stopSystemSpeechRecognizer()
         _uiState.update {
             it.copy(
                 voiceDraftAudioPath = null,
                 voiceDraftDurationMs = 0L,
                 voiceTranscribeText = "",
-                isSpeechRecognizing = false,
+                isTranscribingDraft = false,
                 showVoiceTranscribePanel = false,
             )
         }
@@ -4347,13 +4364,12 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
 
     fun dismissVoiceTranscribePanel() {
         val oldPath = _uiState.value.voiceDraftAudioPath
-        stopSystemSpeechRecognizer()
         _uiState.update {
             it.copy(
                 voiceDraftAudioPath = null,
                 voiceDraftDurationMs = 0L,
                 voiceTranscribeText = "",
-                isSpeechRecognizing = false,
+                isTranscribingDraft = false,
                 showVoiceTranscribePanel = false,
             )
         }
@@ -4362,98 +4378,11 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    private fun startSystemSpeechRecognizer(appendMode: Boolean) {
-        val basePrefix = if (appendMode) _uiState.value.voiceTranscribeText.trim() else ""
-        viewModelScope.launch(Dispatchers.Main.immediate) {
-            runCatching { speechRecognizer?.destroy() }
-            val recognizer = runCatching { SpeechRecognizer.createSpeechRecognizer(appContext) }.getOrNull()
-            if (recognizer == null) {
-                _uiState.update { it.copy(isSpeechRecognizing = false) }
-                showToast("初始化系统语音识别失败")
-                return@launch
-            }
-            speechRecognizer = recognizer
-            recognizer.setRecognitionListener(object : RecognitionListener {
-                override fun onReadyForSpeech(params: Bundle?) {
-                    _uiState.update { it.copy(isSpeechRecognizing = true) }
-                }
-                override fun onBeginningOfSpeech() {}
-                override fun onRmsChanged(rmsdB: Float) {
-                    if (isVoiceLiveTranscribeMode) {
-                        val norm = ((rmsdB + 2f) / 12f).coerceIn(0.12f, 1f)
-                        _uiState.update { it.copy(voiceAmplitude = norm) }
-                    }
-                }
-                override fun onBufferReceived(buffer: ByteArray?) {}
-                override fun onEndOfSpeech() {}
-                override fun onError(error: Int) {
-                    _uiState.update { it.copy(isSpeechRecognizing = false) }
-                }
-                override fun onResults(results: Bundle?) {
-                    val spoken = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                        ?.firstOrNull()?.trim().orEmpty()
-                    if (spoken.isNotEmpty()) {
-                        val combined = if (basePrefix.isNotEmpty()) "$basePrefix $spoken" else spoken
-                        _uiState.update { it.copy(voiceTranscribeText = combined, isSpeechRecognizing = false) }
-                    } else {
-                        _uiState.update { it.copy(isSpeechRecognizing = false) }
-                    }
-                }
-                override fun onPartialResults(partialResults: Bundle?) {
-                    val partial = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                        ?.firstOrNull()?.trim().orEmpty()
-                    if (partial.isNotEmpty()) {
-                        val combined = if (basePrefix.isNotEmpty()) "$basePrefix $partial" else partial
-                        _uiState.update { it.copy(voiceTranscribeText = combined) }
-                    }
-                }
-                override fun onEvent(eventType: Int, params: Bundle?) {}
-            })
-            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-CN")
-                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-            }
-            _uiState.update { it.copy(isSpeechRecognizing = true) }
-            runCatching { recognizer.startListening(intent) }.onFailure {
-                _uiState.update { st -> st.copy(isSpeechRecognizing = false) }
-            }
-        }
-    }
-
-    private fun stopSystemSpeechRecognizer() {
-        _uiState.update { it.copy(isSpeechRecognizing = false) }
-        viewModelScope.launch(Dispatchers.Main.immediate) {
-            runCatching { speechRecognizer?.stopListening() }
-            runCatching { speechRecognizer?.destroy() }
-            speechRecognizer = null
-        }
-    }
-
     fun stopVoiceRecording(send: Boolean = true) {
         if (!_uiState.value.isRecordingVoice) return
         voiceRecordTickerJob?.cancel()
         voiceRecordTickerJob = null
         mesh?.broadcastTyping(false, "voice")
-
-        if (isVoiceLiveTranscribeMode) {
-            isVoiceLiveTranscribeMode = false
-            stopSystemSpeechRecognizer()
-            val liveText = _uiState.value.voiceTranscribeText.trim()
-            _uiState.update {
-                it.copy(
-                    isRecordingVoice = false,
-                    voiceRecordDurationMs = 0L,
-                    voiceAmplitude = 0f,
-                    voiceTranscribeText = "",
-                )
-            }
-            if (send && liveText.isNotEmpty()) {
-                sendTextMessage(liveText)
-            }
-            return
-        }
 
         val elapsedMs = (System.currentTimeMillis() - voiceRecordStartAt).coerceAtLeast(0L)
         val file = voiceOutputFile

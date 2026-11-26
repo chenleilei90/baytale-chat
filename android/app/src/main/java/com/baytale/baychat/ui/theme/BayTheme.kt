@@ -68,6 +68,12 @@ data class BayColors(
     val toastBg: Color,
     val popupSurface: Color,
     val popupContent: Color,
+    // 新版微信聊天专属配色 Token
+    val chatBg: Color,
+    val wechatSelfBubble: Color,
+    val wechatSelfText: Color,
+    val wechatPeerBubble: Color,
+    val wechatComposerBg: Color,
     val isDark: Boolean,
     val fileTypeColors: BayFileTypeColors,
 ) {
@@ -131,6 +137,11 @@ fun bayColorsFor(accentMode: AppThemeMode, isDark: Boolean): BayColors {
             toastBg = Color(0xFF3A3A3C),
             popupSurface = Color(0xFF3A3A3C),
             popupContent = Color(0xFFFFFFFF),
+            chatBg = Color(0xFF111111),
+            wechatSelfBubble = Color(0xFF2AAE67),
+            wechatSelfText = Color(0xFFFFFFFF),
+            wechatPeerBubble = Color(0xFF2C2C2C),
+            wechatComposerBg = Color(0xFF1E1E1E),
             isDark = true,
             fileTypeColors = DarkFileTypeColors,
         )
@@ -154,6 +165,11 @@ fun bayColorsFor(accentMode: AppThemeMode, isDark: Boolean): BayColors {
             toastBg = Color(0xEB1C1C1E),
             popupSurface = Color(0xFF4C4C4C),
             popupContent = Color(0xFFFFFFFF),
+            chatBg = Color(0xFFEDEDED),
+            wechatSelfBubble = Color(0xFF95EC69),
+            wechatSelfText = Color(0xFF191919),
+            wechatPeerBubble = Color(0xFFFFFFFF),
+            wechatComposerBg = Color(0xFFF7F7F7),
             isDark = false,
             fileTypeColors = LightFileTypeColors,
         )

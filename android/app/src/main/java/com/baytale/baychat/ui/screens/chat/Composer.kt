@@ -288,7 +288,7 @@ fun Composer(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .background(colors.surface),
+            .background(colors.wechatComposerBg),
     ) {
         // 顶部分隔发丝线
         Box(
@@ -482,7 +482,6 @@ fun Composer(
                                     return@awaitEachGesture
                                 }
 
-                                var switchedToLive = false
                                 try {
                                     while (true) {
                                         val event = awaitPointerEvent()
@@ -525,13 +524,6 @@ fun Composer(
                                             voiceZone = nextZone
                                             latestOnZoneChanged(nextZone)
                                             BayHaptic.tap(haptic, latestHapticEnabled)
-                                            if (nextZone == VoiceGestureZone.CONVERT_TEXT &&
-                                                !switchedToLive &&
-                                                vm.isVoiceRecordingWithinEarlySwitchWindow()
-                                            ) {
-                                                switchedToLive = true
-                                                vm.switchRecordingToLiveTranscribe()
-                                            }
                                         }
                                         change.consume()
                                     }

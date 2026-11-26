@@ -23,7 +23,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -37,6 +39,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.boundsInWindow
@@ -46,11 +49,13 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.baytale.baychat.core.model.ChatItem
 import com.baytale.baychat.core.model.TransferStatus
 import com.baytale.baychat.core.util.BayHaptic
 import com.baytale.baychat.ui.VoicePlaybackState
+import com.baytale.baychat.ui.design.bayClickable
 import com.baytale.baychat.ui.theme.BayShapes
 import com.baytale.baychat.ui.theme.BaySpacing
 import com.baytale.baychat.ui.theme.BayTheme
@@ -70,6 +75,9 @@ fun VoiceMessageRow(
     voicePlayback: VoicePlaybackState,
     isUnread: Boolean,
     hapticEnabled: Boolean,
+    transcriptText: String? = null,
+    isTranscribing: Boolean = false,
+    onCollapseTranscript: () -> Unit = {},
     onTogglePlayback: () -> Unit,
     onLongPress: (Rect) -> Unit,
     modifier: Modifier = Modifier,
@@ -101,14 +109,13 @@ fun VoiceMessageRow(
     }
 
     val bubbleBg = if (item.isSelf) {
-        colors.accent
-    } else if (colors.isDark) {
-        colors.surfaceElevated
+        colors.wechatSelfBubble
     } else {
-        colors.surface
+        colors.wechatPeerBubble
     }
-    val primaryTint = if (item.isSelf) colors.onAccent else colors.textPrimary
-    val mutedTint = if (item.isSelf) colors.onAccent.copy(alpha = 0.28f) else colors.textTertiary
+    val primaryTint = if (item.isSelf) colors.wechatSelfText else colors.textPrimary
+    val mutedTint = primaryTint.copy(alpha = 0.28f)
+    val wechatCornerShape = RoundedCornerShape(6.dp)
 
     // 播放中逐段点亮 3 段声波弧（若系统已关闭动画则静止展示完整声波弧）
     val activeWaveCount = if (isPlaying && animationsEnabled) {
@@ -148,83 +155,157 @@ fun VoiceMessageRow(
         val fraction = ((durationSec - 1).coerceIn(0, 59)) / 59f
         val bubbleWidth = 72.dp + (targetMaxWidth - 72.dp) * fraction
 
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(BaySpacing.sm),
+        Column(
+            horizontalAlignment = if (item.isSelf) Alignment.End else Alignment.Start,
+            verticalArrangement = Arrangement.spacedBy(5.dp),
         ) {
-            Column(
-                modifier = Modifier
-                    .width(bubbleWidth)
-                    .onGloballyPositioned { coords -> bubbleBounds = coords.boundsInWindow() }
-                    .clip(BayShapes.mdShape)
-                    .background(bubbleBg)
-                    .combinedClickable(
-                        interactionSource = clickInteraction,
-                        indication = null,
-                        onClick = {
-                            BayHaptic.tap(haptic, hapticEnabled)
-                            onTogglePlayback()
-                        },
-                        onLongClick = {
-                            BayHaptic.heavy(haptic, hapticEnabled)
-                            onLongPress(bubbleBounds)
-                        },
-                    )
-                    .padding(horizontal = BaySpacing.md, vertical = 10.dp),
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(BaySpacing.sm),
             ) {
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.Top,
                 ) {
+                    if (!item.isSelf) {
+                        Canvas(
+                            modifier = Modifier
+                                .padding(top = 13.dp)
+                                .size(width = 6.dp, height = 10.dp),
+                        ) {
+                            val path = Path().apply {
+                                moveTo(size.width, 0f)
+                                lineTo(0f, size.height / 2f)
+                                lineTo(size.width, size.height)
+                                close()
+                            }
+                            drawPath(path = path, color = bubbleBg)
+                        }
+                    }
+
+                    Column(
+                        modifier = Modifier
+                            .width(bubbleWidth)
+                            .onGloballyPositioned { coords -> bubbleBounds = coords.boundsInWindow() }
+                            .clip(wechatCornerShape)
+                            .background(bubbleBg)
+                            .combinedClickable(
+                                interactionSource = clickInteraction,
+                                indication = null,
+                                onClick = {
+                                    BayHaptic.tap(haptic, hapticEnabled)
+                                    onTogglePlayback()
+                                },
+                                onLongClick = {
+                                    BayHaptic.heavy(haptic, hapticEnabled)
+                                    onLongPress(bubbleBounds)
+                                },
+                            )
+                            .padding(horizontal = BaySpacing.md, vertical = 10.dp),
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            if (item.isSelf) {
+                                Text(
+                                    text = "${durationSec}″",
+                                    style = BayType.callout.copy(fontFamily = FontFamily.Monospace),
+                                    color = primaryTint,
+                                    maxLines = 1,
+                                )
+                                VoiceWaveArcs(
+                                    pointLeft = true,
+                                    activeCount = activeWaveCount,
+                                    activeColor = primaryTint,
+                                    inactiveColor = mutedTint,
+                                )
+                            } else {
+                                VoiceWaveArcs(
+                                    pointLeft = false,
+                                    activeCount = activeWaveCount,
+                                    activeColor = primaryTint,
+                                    inactiveColor = mutedTint,
+                                )
+                                Text(
+                                    text = "${durationSec}″",
+                                    style = BayType.callout.copy(fontFamily = FontFamily.Monospace),
+                                    color = primaryTint,
+                                    maxLines = 1,
+                                )
+                            }
+                        }
+
+                        val tr = item.transfer
+                        if (tr != null && tr.status == TransferStatus.TRANSFERRING) {
+                            Spacer(modifier = Modifier.height(BaySpacing.xs))
+                            Text(
+                                text = "接收中",
+                                style = BayType.caption,
+                                color = primaryTint.copy(alpha = 0.8f),
+                            )
+                        }
+                    }
+
                     if (item.isSelf) {
-                        Text(
-                            text = "${durationSec}″",
-                            style = BayType.callout.copy(fontFamily = FontFamily.Monospace),
-                            color = primaryTint,
-                            maxLines = 1,
-                        )
-                        VoiceWaveArcs(
-                            pointLeft = true,
-                            activeCount = activeWaveCount,
-                            activeColor = primaryTint,
-                            inactiveColor = mutedTint,
-                        )
-                    } else {
-                        VoiceWaveArcs(
-                            pointLeft = false,
-                            activeCount = activeWaveCount,
-                            activeColor = primaryTint,
-                            inactiveColor = mutedTint,
-                        )
-                        Text(
-                            text = "${durationSec}″",
-                            style = BayType.callout.copy(fontFamily = FontFamily.Monospace),
-                            color = primaryTint,
-                            maxLines = 1,
-                        )
+                        Canvas(
+                            modifier = Modifier
+                                .padding(top = 13.dp)
+                                .size(width = 6.dp, height = 10.dp),
+                        ) {
+                            val path = Path().apply {
+                                moveTo(0f, 0f)
+                                lineTo(size.width, size.height / 2f)
+                                lineTo(0f, size.height)
+                                close()
+                            }
+                            drawPath(path = path, color = bubbleBg)
+                        }
                     }
                 }
 
-                val tr = item.transfer
-                if (tr != null && tr.status == TransferStatus.TRANSFERRING) {
-                    Spacer(modifier = Modifier.height(BaySpacing.xs))
-                    Text(
-                        text = "接收中",
-                        style = BayType.caption,
-                        color = primaryTint.copy(alpha = 0.8f),
+                // 对方未读语音外侧纯圆红点（零描边）
+                if (!item.isSelf && isUnread) {
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(colors.danger),
                     )
                 }
             }
 
-            // 对方未读语音外侧纯圆红点（零描边）
-            if (!item.isSelf && isUnread) {
-                Box(
+            // 微信同款气泡下方转文字结果白底卡片
+            if (isTranscribing || transcriptText != null) {
+                Column(
                     modifier = Modifier
-                        .size(8.dp)
-                        .clip(CircleShape)
-                        .background(colors.danger),
-                )
+                        .widthIn(min = 120.dp, max = 264.dp)
+                        .clip(wechatCornerShape)
+                        .background(colors.wechatPeerBubble)
+                        .padding(horizontal = BaySpacing.md, vertical = BaySpacing.sm),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text(
+                        text = if (isTranscribing) {
+                            "正在转换为文字..."
+                        } else {
+                            transcriptText?.takeIf { it.isNotBlank() } ?: "未识别到清晰语音"
+                        },
+                        style = BayType.footnote,
+                        color = if (isTranscribing) colors.textSecondary else colors.textPrimary,
+                    )
+                    if (!isTranscribing) {
+                        Text(
+                            text = "收起",
+                            style = BayType.caption.copy(fontWeight = FontWeight.Medium),
+                            color = colors.textTertiary,
+                            modifier = Modifier
+                                .align(Alignment.End)
+                                .bayClickable { onCollapseTranscript() }
+                                .padding(horizontal = 2.dp),
+                        )
+                    }
+                }
             }
         }
     }

@@ -38,6 +38,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
@@ -157,6 +158,7 @@ fun BayAvatar(
     size: Dp = 40.dp,
     modifier: Modifier = Modifier,
     contentDescription: String? = null,
+    shape: Shape = CircleShape,
 ) {
     val colors = BayTheme.colors
     val glyph = FormatUtils.presetEmoji(emojiId)
@@ -170,7 +172,7 @@ fun BayAvatar(
                 }
             }
             .size(size)
-            .clip(CircleShape)
+            .clip(shape)
             .background(colors.accentSoft),
         contentAlignment = Alignment.Center,
     ) {

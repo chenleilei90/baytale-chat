@@ -3,6 +3,7 @@ package com.baytale.baychat.ui.screens.chat
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -43,6 +44,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedback
 import androidx.compose.ui.layout.boundsInWindow
@@ -115,6 +117,9 @@ fun MessageBubble(
     onRequestResend: () -> Unit,
     onRetryCloudUpload: () -> Unit,
     onToggleVoice: () -> Unit,
+    voiceTranscriptText: String? = null,
+    isVoiceTranscribing: Boolean = false,
+    onCollapseVoiceTranscript: () -> Unit = {},
     onCopiedClip: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -161,12 +166,8 @@ fun MessageBubble(
         return
     }
 
-    val bubbleShape = RoundedCornerShape(
-        topStart = if (!item.isSelf && !isFirstInGroup) 8.dp else 18.dp,
-        topEnd = if (item.isSelf && !isFirstInGroup) 8.dp else 18.dp,
-        bottomStart = if (!item.isSelf && isLastInGroup) 6.dp else 18.dp,
-        bottomEnd = if (item.isSelf && isLastInGroup) 6.dp else 18.dp,
-    )
+    // 新版微信同款 6dp 微圆角气泡
+    val bubbleShape = RoundedCornerShape(6.dp)
 
     val topGap = if (isFirstInGroup) BaySpacing.sm else 2.dp
     val selectable = !item.isSelfRecall
@@ -333,23 +334,46 @@ fun MessageBubble(
                 ) {
                     when (item.kind) {
                         ChatKind.TEXT -> {
-                            val basePeerBg = if (colors.isDark) colors.surfaceElevated else colors.surface
-                            val textColor = if (item.isSelf) colors.onAccent else colors.textPrimary
+                            val bubbleFillColor = when {
+                                item.isSelf -> colors.wechatSelfBubble
+                                item.mentionedMe -> colors.wechatPeerBubble
+                                else -> colors.wechatPeerBubble
+                            }
+                            val textColor = if (item.isSelf) colors.wechatSelfText else colors.textPrimary
                             val bubbleBgModifier = when {
-                                item.isSelf -> Modifier.background(colors.accent)
+                                item.isSelf -> Modifier.background(colors.wechatSelfBubble)
                                 item.mentionedMe -> Modifier
-                                    .background(basePeerBg)
+                                    .background(colors.wechatPeerBubble)
                                     .background(colors.accentSoft)
-                                else -> Modifier.background(basePeerBg)
+                                else -> Modifier.background(colors.wechatPeerBubble)
                             }
 
-                            Column(
-                                modifier = Modifier
-                                    .clip(bubbleShape)
-                                    .then(bubbleBgModifier)
-                                    .padding(horizontal = BaySpacing.md + 2.dp, vertical = 10.dp),
-                                verticalArrangement = Arrangement.spacedBy(6.dp),
-                            ) {
+                            Row(verticalAlignment = Alignment.Top) {
+                                if (!item.isSelf && isFirstInGroup) {
+                                    Canvas(
+                                        modifier = Modifier
+                                            .padding(top = 13.dp)
+                                            .size(width = 6.dp, height = 10.dp),
+                                    ) {
+                                        val path = Path().apply {
+                                            moveTo(size.width, 0f)
+                                            lineTo(0f, size.height / 2f)
+                                            lineTo(size.width, size.height)
+                                            close()
+                                        }
+                                        drawPath(path = path, color = bubbleFillColor)
+                                    }
+                                } else if (!item.isSelf) {
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                }
+
+                                Column(
+                                    modifier = Modifier
+                                        .clip(bubbleShape)
+                                        .then(bubbleBgModifier)
+                                        .padding(horizontal = BaySpacing.md, vertical = 10.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
                                 if (!item.isSelf && item.mentionedMe) {
                                     Text(
                                         text = "@我",
@@ -415,6 +439,25 @@ fun MessageBubble(
                                     style = BayType.callout,
                                     color = textColor,
                                 )
+                                }
+
+                                if (item.isSelf && isFirstInGroup) {
+                                    Canvas(
+                                        modifier = Modifier
+                                            .padding(top = 13.dp)
+                                            .size(width = 6.dp, height = 10.dp),
+                                    ) {
+                                        val path = Path().apply {
+                                            moveTo(0f, 0f)
+                                            lineTo(size.width, size.height / 2f)
+                                            lineTo(0f, size.height)
+                                            close()
+                                        }
+                                        drawPath(path = path, color = bubbleFillColor)
+                                    }
+                                } else if (item.isSelf) {
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                }
                             }
                         }
 
@@ -461,6 +504,9 @@ fun MessageBubble(
                                 voicePlayback = voicePlayback,
                                 isUnread = !item.isSelf && item.id !in playedVoiceIds,
                                 hapticEnabled = hapticEnabled,
+                                transcriptText = voiceTranscriptText,
+                                isTranscribing = isVoiceTranscribing,
+                                onCollapseTranscript = onCollapseVoiceTranscript,
                                 onTogglePlayback = onToggleVoice,
                                 onLongPress = onLongPress,
                             )
@@ -640,7 +686,8 @@ private fun MessageSenderAvatar(
     ) {
         BayAvatar(
             emojiId = avatarId,
-            size = 34.dp,
+            size = 40.dp,
+            shape = RoundedCornerShape(6.dp),
             modifier = Modifier.graphicsLayer {
                 rotationZ = shakeDeg.value
             },

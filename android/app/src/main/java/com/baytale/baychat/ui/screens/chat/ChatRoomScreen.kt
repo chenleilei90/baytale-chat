@@ -14,6 +14,7 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -53,6 +54,7 @@ import androidx.compose.material.icons.automirrored.rounded.Forward
 import androidx.compose.material.icons.rounded.Block
 import androidx.compose.material.icons.rounded.BookmarkBorder
 import androidx.compose.material.icons.rounded.Casino
+import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.DeleteOutline
@@ -65,13 +67,13 @@ import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.InsertDriveFile
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Mic
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.SearchOff
 import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material.icons.rounded.Undo
 import androidx.compose.material.icons.rounded.WifiOff
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -94,6 +96,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
@@ -117,7 +120,6 @@ import com.baytale.baychat.ui.BayChatUiState
 import com.baytale.baychat.ui.BayChatViewModel
 import com.baytale.baychat.ui.ForwardPayload
 import com.baytale.baychat.ui.design.BayActionSheet
-import com.baytale.baychat.ui.design.BayBottomSheet
 import com.baytale.baychat.ui.design.BayButton
 import com.baytale.baychat.ui.design.BayButtonSize
 import com.baytale.baychat.ui.design.BayButtonStyle
@@ -419,7 +421,7 @@ fun ChatRoomScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .background(colors.bg)
+                .background(colors.chatBg)
                 .statusBarsPadding()
                 .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars)),
         ) {
@@ -991,6 +993,9 @@ fun ChatRoomScreen(
                                         onRequestResend = { vm.requestResend(item.id) },
                                         onRetryCloudUpload = { vm.retryCloudUpload(item.id) },
                                         onToggleVoice = { vm.toggleVoicePlayback(item) },
+                                        voiceTranscriptText = state.voiceTranscripts[item.id],
+                                        isVoiceTranscribing = item.id in state.transcribingMessageIds,
+                                        onCollapseVoiceTranscript = { vm.collapseVoiceTranscript(item.id) },
                                         onCopiedClip = { vm.showToast("已复制到剪贴板") },
                                     )
                                 }
@@ -1259,26 +1264,22 @@ fun ChatRoomScreen(
             }
         }
 
-        // 8. 新版微信式录音与转文字全屏浮层（纯视觉遮罩穿透指针事件，绝不阻断底层手势）
+        // 8. 新版微信 8.0+ 全屏按住说话与大弧形发送浮层（纯视觉遮罩穿透指针事件）
         VoiceRecordingOverlay(
             visible = state.isRecordingVoice,
             zone = voiceGestureZone,
             durationMs = state.voiceRecordDurationMs,
             amplitude = state.voiceAmplitude,
-            transcribePreview = state.voiceTranscribeText,
-            isSpeechRecognizing = state.isSpeechRecognizing,
         )
 
-        // 8b. 语音转文字确认与编辑面板（支持发送文字、发送原语音或再次语音听写）
+        // 8b. 新版微信同款全屏转文字确认浮层（绿气泡编辑 + 取消 / 发原语音 / 发送文字）
         if (state.showVoiceTranscribePanel) {
-            VoiceTranscribeConfirmSheet(
+            VoiceTranscribeOverlay(
                 text = state.voiceTranscribeText,
                 hasDraftAudio = !state.voiceDraftAudioPath.isNullOrBlank(),
-                isRecognizing = state.isSpeechRecognizing,
+                isTranscribing = state.isTranscribingDraft,
                 onTextChange = { vm.updateVoiceTranscribeText(it) },
-                onToggleDictation = {
-                    if (state.isSpeechRecognizing) vm.stopSpeechDictationInPanel() else vm.startSpeechDictationInPanel()
-                },
+                onRetryTranscribe = { vm.retryTranscribeDraftAudio() },
                 onSendAudio = { vm.sendVoiceDraftAudio() },
                 onSendText = { vm.sendVoiceTranscribeText() },
                 onDismiss = { vm.dismissVoiceTranscribePanel() },
@@ -1355,6 +1356,9 @@ fun ChatRoomScreen(
                     }
                     MessageMenuAction.SHARE -> {
                         vm.shareChatItem(targetMsg)
+                    }
+                    MessageMenuAction.TRANSCRIBE -> {
+                        vm.transcribeVoiceMessage(targetMsg)
                     }
                     MessageMenuAction.REPORT -> {
                         vm.reportPeer(targetMsg.senderId, targetMsg.senderName, targetMsg.id)
@@ -1716,8 +1720,10 @@ private fun EmptyRoomOverview(
 private val RECORD_METER_FACTORS = listOf(0.36f, 0.54f, 0.74f, 0.90f, 1.0f, 0.90f, 0.74f, 0.54f, 0.36f)
 
 /**
- * 新版微信同款全屏按住说话浮层：
- * 居中呈现声波气泡 / 实时转文字预览，底部双圆形按钮区分「左取消 / 右转文字」，最底端呈宽弧形发送区。
+ * 新版微信 8.0+ 全屏按住说话浮层：
+ * - 居中绿色/红色圆角语音气泡（带底部小尖角 + 密集动态声波柱）；
+ * - 中下部左右倾斜圆形按钮：左「✕ 取消」 / 右「文 转文字」（命中侧放大亮白高亮）；
+ * - 最底部绘制新版微信标志性宽大圆弧发送托盘。
  */
 @Composable
 private fun VoiceRecordingOverlay(
@@ -1725,14 +1731,15 @@ private fun VoiceRecordingOverlay(
     zone: VoiceGestureZone,
     durationMs: Long,
     amplitude: Float,
-    transcribePreview: String,
-    isSpeechRecognizing: Boolean,
 ) {
     val colors = BayTheme.colors
     val isCountingDown = durationMs >= 50_000L
     val remSec = ((60_000L - durationMs + 999L) / 1000L).coerceIn(1L, 10L)
     val isCancel = zone == VoiceGestureZone.CANCEL
     val isConvert = zone == VoiceGestureZone.CONVERT_TEXT
+    val waveBarWeights = remember {
+        listOf(0.28f, 0.45f, 0.72f, 0.56f, 0.88f, 1.0f, 0.78f, 0.96f, 0.68f, 0.86f, 0.54f, 0.74f, 0.42f, 0.26f)
+    }
 
     AnimatedVisibility(
         visible = visible,
@@ -1742,26 +1749,23 @@ private fun VoiceRecordingOverlay(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color.Black.copy(alpha = 0.56f))
+                .background(Color.Black.copy(alpha = 0.62f))
                 .navigationBarsPadding(),
         ) {
-            // 中部状态气泡：松开发送显示声波，左滑变红，右滑「文 转文字」实时预览识别文案
-            Box(
+            // 1. 中央微信风格气泡（绿色常规声波 / 红色撤回 / 绿色高亮转文字预告）
+            Column(
                 modifier = Modifier
                     .align(Alignment.Center)
-                    .padding(bottom = 84.dp)
+                    .padding(bottom = 112.dp)
                     .padding(horizontal = BaySpacing.xl),
+                horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                val bubbleBg = when {
-                    isCancel -> colors.danger
-                    isConvert -> colors.surfaceElevated
-                    else -> colors.accent
-                }
-                val bubbleTextColor = if (isConvert) colors.textPrimary else colors.onAccent
+                val bubbleBg = if (isCancel) colors.danger else colors.wechatSelfBubble
+                val bubbleContentColor = if (isCancel) Color.White else colors.wechatSelfText
 
                 Column(
                     modifier = Modifier
-                        .width(if (isConvert) 264.dp else 210.dp)
+                        .width(if (isConvert) 248.dp else 196.dp)
                         .clip(BayShapes.lgShape)
                         .background(bubbleBg)
                         .padding(horizontal = BaySpacing.xl, vertical = BaySpacing.lg),
@@ -1772,66 +1776,55 @@ private fun VoiceRecordingOverlay(
                         isCancel -> {
                             Icon(
                                 imageVector = Icons.Rounded.Undo,
-                                contentDescription = "松开取消发送",
-                                tint = bubbleTextColor,
+                                contentDescription = "取消发送",
+                                tint = bubbleContentColor,
                                 modifier = Modifier.size(30.dp),
                             )
                             Text(
                                 text = "松开手指，取消发送",
                                 style = BayType.subhead.copy(fontWeight = FontWeight.SemiBold),
-                                color = bubbleTextColor,
+                                color = bubbleContentColor,
                             )
                         }
 
                         isConvert -> {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Mic,
-                                    contentDescription = null,
-                                    tint = colors.accent,
-                                    modifier = Modifier.size(16.dp),
-                                )
-                                Text(
-                                    text = if (isSpeechRecognizing) "正在识别说话内容..." else "松开转为文字并编辑",
-                                    style = BayType.caption.copy(fontWeight = FontWeight.SemiBold),
-                                    color = colors.accent,
-                                )
-                            }
+                            Icon(
+                                imageVector = Icons.Rounded.Mic,
+                                contentDescription = "松开转为文字",
+                                tint = bubbleContentColor,
+                                modifier = Modifier.size(26.dp),
+                            )
                             Text(
-                                text = transcribePreview.ifBlank {
-                                    if (isSpeechRecognizing) "请直接说出你想发送的文字..." else "松手进入语音转文字确认面板"
-                                },
-                                style = BayType.body,
-                                color = if (transcribePreview.isNotBlank()) colors.textPrimary else colors.textSecondary,
-                                textAlign = TextAlign.Start,
-                                maxLines = 4,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.fillMaxWidth(),
+                                text = "松开 转为文字",
+                                style = BayType.headline.copy(fontWeight = FontWeight.SemiBold),
+                                color = bubbleContentColor,
+                            )
+                            Text(
+                                text = "已录制 ${formatDurationMs(durationMs)} · 松手立即识别",
+                                style = BayType.caption,
+                                color = bubbleContentColor.copy(alpha = 0.78f),
                             )
                         }
 
                         else -> {
                             Row(
-                                modifier = Modifier.height(34.dp),
+                                modifier = Modifier.height(38.dp),
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
                             ) {
                                 val normAmp = amplitude.coerceIn(0f, 1f)
-                                RECORD_METER_FACTORS.forEachIndexed { idx, factor ->
+                                waveBarWeights.forEachIndexed { idx, factor ->
                                     val targetHeight by animateDpAsState(
-                                        targetValue = 6.dp + 26.dp * maxOf(0.16f, normAmp) * factor,
-                                        animationSpec = tween(durationMillis = 90),
-                                        label = "voiceMeterBar_$idx",
+                                        targetValue = 5.dp + 30.dp * maxOf(0.16f, normAmp) * factor,
+                                        animationSpec = tween(durationMillis = 85),
+                                        label = "wxWaveBar_$idx",
                                     )
                                     Box(
                                         modifier = Modifier
-                                            .width(4.dp)
+                                            .width(3.dp)
                                             .height(targetHeight)
                                             .clip(BayShapes.fullShape)
-                                            .background(colors.onAccent),
+                                            .background(bubbleContentColor),
                                     )
                                 }
                             }
@@ -1841,118 +1834,151 @@ private fun VoiceRecordingOverlay(
                                 } else {
                                     formatDurationMs(durationMs)
                                 },
-                                style = BayType.footnote.copy(
+                                style = BayType.caption.copy(
                                     fontFamily = FontFamily.Monospace,
                                     fontWeight = FontWeight.SemiBold,
                                 ),
-                                color = colors.onAccent,
+                                color = bubbleContentColor.copy(alpha = 0.88f),
                             )
                         }
                     }
                 }
+
+                // 气泡底部居中指示小三角
+                Canvas(modifier = Modifier.size(width = 16.dp, height = 8.dp)) {
+                    val path = Path().apply {
+                        moveTo(0f, 0f)
+                        lineTo(size.width, 0f)
+                        lineTo(size.width / 2f, size.height)
+                        close()
+                    }
+                    drawPath(path = path, color = bubbleBg)
+                }
             }
 
-            // 底部交互分区指示：左圆形「取消」+ 右圆形「文 转文字」+ 最底端发送提示条
+            // 2. 底部新版微信操作区：左「✕ 取消」+ 右「文 转文字」+ 最底端弧形发送托盘
             Column(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .padding(bottom = BaySpacing.lg),
+                    .fillMaxWidth(),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(BaySpacing.lg),
             ) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 42.dp),
+                        .padding(horizontal = 44.dp)
+                        .padding(bottom = 26.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    // 左侧：取消区域
                     val cancelScale by animateFloatAsState(
-                        targetValue = if (isCancel) 1.18f else 1.0f,
+                        targetValue = if (isCancel) 1.22f else 1.0f,
                         animationSpec = tween(120),
-                        label = "cancelScale",
+                        label = "wxCancelScale",
                     )
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         Box(
                             modifier = Modifier
-                                .size(60.dp)
+                                .size(64.dp)
                                 .scale(cancelScale)
                                 .clip(CircleShape)
-                                .background(if (isCancel) colors.danger else colors.surfaceElevated.copy(alpha = 0.90f)),
+                                .background(
+                                    if (isCancel) Color.White else colors.surfaceElevated.copy(alpha = 0.82f),
+                                ),
                             contentAlignment = Alignment.Center,
                         ) {
                             Icon(
                                 imageVector = Icons.Rounded.Close,
                                 contentDescription = "取消",
-                                tint = if (isCancel) Color.White else colors.textPrimary,
-                                modifier = Modifier.size(26.dp),
+                                tint = if (isCancel) colors.danger else colors.textPrimary,
+                                modifier = Modifier.size(28.dp),
                             )
                         }
                         Text(
                             text = if (isCancel) "松开取消" else "取消",
                             style = BayType.caption.copy(fontWeight = FontWeight.Medium),
-                            color = if (isCancel) colors.danger else Color.White.copy(alpha = 0.85f),
+                            color = Color.White.copy(alpha = if (isCancel) 1f else 0.72f),
                         )
                     }
 
-                    // 右侧：转文字区域
                     val convertScale by animateFloatAsState(
-                        targetValue = if (isConvert) 1.18f else 1.0f,
+                        targetValue = if (isConvert) 1.22f else 1.0f,
                         animationSpec = tween(120),
-                        label = "convertScale",
+                        label = "wxConvertScale",
                     )
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         Box(
                             modifier = Modifier
-                                .size(60.dp)
+                                .size(64.dp)
                                 .scale(convertScale)
                                 .clip(CircleShape)
-                                .background(if (isConvert) colors.accent else colors.surfaceElevated.copy(alpha = 0.90f)),
+                                .background(
+                                    if (isConvert) Color.White else colors.surfaceElevated.copy(alpha = 0.82f),
+                                ),
                             contentAlignment = Alignment.Center,
                         ) {
                             Text(
                                 text = "文",
-                                style = BayType.headline.copy(fontWeight = FontWeight.Bold),
-                                color = if (isConvert) colors.onAccent else colors.textPrimary,
+                                style = BayType.title2.copy(fontWeight = FontWeight.Bold),
+                                color = if (isConvert) colors.wechatSelfText else colors.textPrimary,
                             )
                         }
                         Text(
-                            text = if (isConvert) "松开转文字" else "转文字",
+                            text = if (isConvert) "转文字" else "转文字",
                             style = BayType.caption.copy(fontWeight = FontWeight.Medium),
-                            color = if (isConvert) colors.accent else Color.White.copy(alpha = 0.85f),
+                            color = Color.White.copy(alpha = if (isConvert) 1f else 0.72f),
                         )
                     }
                 }
 
-                // 底部发送托盘指示条
+                // 新版微信标志性底部宽弧形说话托盘
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = BaySpacing.lg)
-                        .height(54.dp)
-                        .clip(BayShapes.lgShape)
-                        .background(
-                            if (zone == VoiceGestureZone.SEND) colors.surfaceElevated else colors.surfaceElevated.copy(alpha = 0.55f),
-                        ),
+                        .height(104.dp),
                     contentAlignment = Alignment.Center,
                 ) {
-                    Text(
-                        text = when (zone) {
-                            VoiceGestureZone.SEND -> "松开 发送 · 上滑左取消 / 右转文字"
-                            VoiceGestureZone.CANCEL -> "松开取消发送"
-                            VoiceGestureZone.CONVERT_TEXT -> "松开进入文字发送确认"
-                        },
-                        style = BayType.subhead.copy(fontWeight = FontWeight.Medium),
-                        color = if (zone == VoiceGestureZone.SEND) colors.textPrimary else colors.textSecondary,
-                    )
+                    val trayColor = if (zone == VoiceGestureZone.SEND) {
+                        colors.surfaceElevated
+                    } else {
+                        colors.surfaceElevated.copy(alpha = 0.42f)
+                    }
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        drawOval(
+                            color = trayColor,
+                            topLeft = Offset(x = -size.width * 0.22f, y = 0f),
+                            size = androidx.compose.ui.geometry.Size(
+                                width = size.width * 1.44f,
+                                height = size.height * 2.5f,
+                            ),
+                        )
+                    }
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Mic,
+                            contentDescription = null,
+                            tint = if (zone == VoiceGestureZone.SEND) colors.textPrimary else colors.textSecondary,
+                            modifier = Modifier.size(22.dp),
+                        )
+                        Text(
+                            text = when (zone) {
+                                VoiceGestureZone.SEND -> "松开 发送"
+                                VoiceGestureZone.CANCEL -> "松开 取消"
+                                VoiceGestureZone.CONVERT_TEXT -> "松开 转文字"
+                            },
+                            style = BayType.subhead.copy(fontWeight = FontWeight.SemiBold),
+                            color = if (zone == VoiceGestureZone.SEND) colors.textPrimary else colors.textSecondary,
+                        )
+                    }
                 }
             }
         }
@@ -1960,86 +1986,183 @@ private fun VoiceRecordingOverlay(
 }
 
 /**
- * 语音转文字确认抽屉：支持语音听写、手动修改及选择「发送文字」或「发送原语音」。
+ * 新版微信同款语音转文字全屏确认浮层：
+ * 居中微信绿识别结果气泡（支持直接编辑修正文字），底部「取消 / 发原语音 / 发送文字」三钮直达。
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun VoiceTranscribeConfirmSheet(
+private fun VoiceTranscribeOverlay(
     text: String,
     hasDraftAudio: Boolean,
-    isRecognizing: Boolean,
+    isTranscribing: Boolean,
     onTextChange: (String) -> Unit,
-    onToggleDictation: () -> Unit,
+    onRetryTranscribe: () -> Unit,
     onSendAudio: () -> Unit,
     onSendText: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     val colors = BayTheme.colors
-    BayBottomSheet(
-        onDismiss = onDismiss,
-        title = "语音转文字",
+    val blankClick = remember { MutableInteractionSource() }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.66f))
+            .clickable(interactionSource = blankClick, indication = null, onClick = {})
+            .navigationBarsPadding(),
     ) {
+        // 中央大号微信绿转文字气泡（可点击文字区直接编辑）
         Column(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .align(Alignment.Center)
+                .fillMaxWidth()
+                .padding(horizontal = BaySpacing.xxl)
+                .padding(bottom = 96.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(BaySpacing.md),
         ) {
-            BayTextField(
-                value = text,
-                onValueChange = onTextChange,
-                placeholder = if (isRecognizing) "正在识别语音..." else "可点击下方「语音听写」识别内容，或直接修改后发送",
-                singleLine = false,
-                maxLines = 5,
-                modifier = Modifier.fillMaxWidth(),
-            )
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(BayShapes.lgShape)
+                    .background(colors.wechatSelfBubble)
+                    .padding(BaySpacing.lg),
+                verticalArrangement = Arrangement.spacedBy(BaySpacing.sm),
             ) {
-                BayButton(
-                    text = if (isRecognizing) "正在聆听，点此完成" else "点击语音听写",
-                    onClick = onToggleDictation,
-                    style = if (isRecognizing) BayButtonStyle.Primary else BayButtonStyle.Secondary,
-                    size = BayButtonSize.Small,
-                    leadingIcon = Icons.Rounded.Mic,
-                )
-                if (hasDraftAudio) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     Text(
-                        text = "已保留刚刚录制的原语音",
+                        text = if (isTranscribing) "正在转换为文字..." else "语音识别结果（可点击编辑）",
+                        style = BayType.caption.copy(fontWeight = FontWeight.SemiBold),
+                        color = colors.wechatSelfText.copy(alpha = 0.72f),
+                    )
+                    if (!isTranscribing && hasDraftAudio) {
+                        Row(
+                            modifier = Modifier
+                                .clip(BayShapes.fullShape)
+                                .background(colors.wechatSelfText.copy(alpha = 0.10f))
+                                .bayClickable { onRetryTranscribe() }
+                                .padding(horizontal = 8.dp, vertical = 3.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Refresh,
+                                contentDescription = "重新识别",
+                                tint = colors.wechatSelfText,
+                                modifier = Modifier.size(13.dp),
+                            )
+                            Text(
+                                text = "重新识别",
+                                style = BayType.caption,
+                                color = colors.wechatSelfText,
+                            )
+                        }
+                    }
+                }
+
+                BayTextField(
+                    value = text,
+                    onValueChange = onTextChange,
+                    placeholder = if (isTranscribing) "正在上传并识别语音内容，请稍候..." else "未识别到内容时可直接输入修改后发送",
+                    singleLine = false,
+                    maxLines = 6,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+
+        // 底部微信式三段动作区：取消 / 发原语音 / 发送文字
+        Row(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .padding(horizontal = 32.dp, vertical = 34.dp),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(56.dp)
+                        .clip(CircleShape)
+                        .background(colors.surfaceElevated)
+                        .bayClickable { onDismiss() },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Close,
+                        contentDescription = "取消",
+                        tint = colors.textPrimary,
+                        modifier = Modifier.size(24.dp),
+                    )
+                }
+                Text(
+                    text = "取消",
+                    style = BayType.caption,
+                    color = Color.White.copy(alpha = 0.82f),
+                )
+            }
+
+            if (hasDraftAudio) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(56.dp)
+                            .clip(CircleShape)
+                            .background(colors.surfaceElevated)
+                            .bayClickable { onSendAudio() },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Mic,
+                            contentDescription = "发原语音",
+                            tint = colors.textPrimary,
+                            modifier = Modifier.size(24.dp),
+                        )
+                    }
+                    Text(
+                        text = "发原语音",
                         style = BayType.caption,
-                        color = colors.textSecondary,
+                        color = Color.White.copy(alpha = 0.82f),
                     )
                 }
             }
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(BaySpacing.sm),
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                BayButton(
-                    text = "取消",
-                    onClick = onDismiss,
-                    style = BayButtonStyle.Neutral,
-                    size = BayButtonSize.Medium,
-                    modifier = Modifier.weight(1f),
-                )
-                if (hasDraftAudio) {
-                    BayButton(
-                        text = "发原语音",
-                        onClick = onSendAudio,
-                        style = BayButtonStyle.Secondary,
-                        size = BayButtonSize.Medium,
-                        modifier = Modifier.weight(1f),
+                val canSendText = text.isNotBlank() && !isTranscribing
+                Box(
+                    modifier = Modifier
+                        .size(64.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (canSendText) colors.wechatSelfBubble else colors.surfaceElevated.copy(alpha = 0.45f),
+                        )
+                        .bayClickable(enabled = canSendText) { onSendText() },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Check,
+                        contentDescription = "发送文字",
+                        tint = if (canSendText) colors.wechatSelfText else colors.textTertiary,
+                        modifier = Modifier.size(28.dp),
                     )
                 }
-                BayButton(
+                Text(
                     text = "发送文字",
-                    onClick = onSendText,
-                    style = BayButtonStyle.Primary,
-                    size = BayButtonSize.Medium,
-                    enabled = text.isNotBlank(),
-                    modifier = Modifier.weight(1f),
+                    style = BayType.caption.copy(fontWeight = FontWeight.SemiBold),
+                    color = Color.White.copy(alpha = if (canSendText) 1f else 0.45f),
                 )
             }
         }

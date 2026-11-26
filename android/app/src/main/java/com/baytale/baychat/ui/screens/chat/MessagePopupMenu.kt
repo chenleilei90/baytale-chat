@@ -30,6 +30,7 @@ import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Flag
 import androidx.compose.material.icons.rounded.Share
+import androidx.compose.material.icons.rounded.Translate
 import androidx.compose.material.icons.rounded.Undo
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -83,6 +84,7 @@ enum class MessageMenuAction {
     RECALL,
     SAVE_IMAGE,
     SHARE,
+    TRANSCRIBE,
     REPORT,
 }
 
@@ -156,6 +158,9 @@ fun MessagePopupMenu(
             }
             if (item.kind == ChatKind.IMAGE || item.kind == ChatKind.FILE || item.kind == ChatKind.AUDIO) {
                 add(PopupGridAction(MessageMenuAction.SHARE, "分享", Icons.Rounded.Share))
+            }
+            if (item.kind == ChatKind.AUDIO) {
+                add(PopupGridAction(MessageMenuAction.TRANSCRIBE, "转文字", Icons.Rounded.Translate))
             }
             if (!item.isSelf && item.kind != ChatKind.SYSTEM) {
                 add(PopupGridAction(MessageMenuAction.REPORT, "举报", Icons.Rounded.Flag))

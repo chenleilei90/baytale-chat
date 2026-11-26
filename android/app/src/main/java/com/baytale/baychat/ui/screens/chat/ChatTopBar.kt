@@ -65,7 +65,7 @@ fun ChatTopBar(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .background(colors.surface),
+            .background(colors.chatBg),
     ) {
         Row(
             modifier = Modifier
