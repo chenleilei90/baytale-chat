@@ -69,7 +69,15 @@ fun ChatTopBar(
             .fillMaxWidth()
             .background(colors.chatBg),
     ) {
-        // 顶部 P2PLink 守护服务运行与局域网保活状态条
+        // 顶部 P2PLink 守护服务运行与局域网保活状态条（实时联动当前信令状态，重连前夕柔和展示）
+        val statusBarDotColor = if (room.wsConnected) colors.success else colors.accent
+        val statusBarText = if (room.wsConnected) {
+            "BayChat 守护服务运行中 · 局域网直连就绪"
+        } else {
+            "BayChat 守护服务运行中 · 正在同步消息"
+        }
+        val statusBarBadge = if (room.wsConnected) "已保活" else "收取中"
+        val statusBarBadgeColor = if (room.wsConnected) colors.success else colors.accent
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -86,10 +94,10 @@ fun ChatTopBar(
                     modifier = Modifier
                         .size(7.dp)
                         .clip(CircleShape)
-                        .background(colors.success),
+                        .background(statusBarDotColor),
                 )
                 Text(
-                    text = "BayChat 守护服务运行中 · 局域网直连就绪",
+                    text = statusBarText,
                     style = BayType.caption.copy(fontWeight = FontWeight.SemiBold),
                     color = colors.accent,
                     maxLines = 1,
@@ -103,9 +111,9 @@ fun ChatTopBar(
                     .padding(horizontal = 7.dp, vertical = 2.dp),
             ) {
                 Text(
-                    text = "已保活",
+                    text = statusBarBadge,
                     style = BayType.caption.copy(fontWeight = FontWeight.SemiBold),
-                    color = colors.success,
+                    color = statusBarBadgeColor,
                 )
             }
         }
@@ -214,7 +222,7 @@ fun ChatTopBar(
             // 右侧工具动作组
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(BaySpacing.xs),
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
             ) {
                 // 一键发送相册 4K 原片快捷入口（对齐 P2PLink 原型）
                 Row(
@@ -222,7 +230,7 @@ fun ChatTopBar(
                         .clip(BayShapes.fullShape)
                         .background(colors.accentSoft)
                         .bayClickable(onClick = onQuickSendOriginalMedia)
-                        .padding(horizontal = 9.dp, vertical = 6.dp),
+                        .padding(horizontal = 8.dp, vertical = 5.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
@@ -243,21 +251,21 @@ fun ChatTopBar(
                     contentDescription = "搜索消息",
                     onClick = onToggleSearch,
                     style = if (searchActive) BayIconStyle.Accent else BayIconStyle.Plain,
-                    size = 36.dp,
+                    size = 34.dp,
                 )
                 BayIconButton(
                     icon = Icons.Rounded.QrCode2,
                     contentDescription = "邀请码",
                     onClick = onOpenInvite,
                     style = BayIconStyle.Accent,
-                    size = 36.dp,
+                    size = 34.dp,
                 )
                 BayIconButton(
                     icon = Icons.Rounded.MoreHoriz,
                     contentDescription = "聊天信息",
                     onClick = onOpenSettings,
                     style = BayIconStyle.Plain,
-                    size = 36.dp,
+                    size = 34.dp,
                 )
             }
         }

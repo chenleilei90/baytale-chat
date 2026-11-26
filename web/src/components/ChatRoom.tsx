@@ -3993,8 +3993,8 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
                 <Users size={12} aria-hidden="true" /> 房间成员 ({peerList.length + 1}/{roomInfo?.maxPeers || 6})
               </span>
-              <span style={{ color: wsConnected ? 'var(--success)' : 'var(--warning)' }}>
-                {wsConnected ? '在线' : '重连中'}
+              <span style={{ color: wsConnected ? 'var(--success)' : 'var(--accent)' }}>
+                {wsConnected ? '在线' : '收取中...'}
               </span>
             </div>
 

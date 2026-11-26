@@ -571,14 +571,27 @@ export class SignalingClient {
   private ws: WebSocket | null = null;
   private heartbeatTimer: number | null = null;
   private reconnectTimer: number | null = null;
+  private probeTimer: number | null = null;
   private reconnectAttempts = 0;
+  private lastServerActivityAt = 0;
   private closedManually = false;
+  private lifecycleBound = false;
 
   private roomCode: string;
   private password: string;
   private ownerToken?: string;
   private profile: PeerProfile;
   private handlers: SignalingHandlers;
+
+  private readonly handleVisibilityOrOnline = () => {
+    if (document.visibilityState === 'visible' && navigator.onLine !== false) {
+      this.notifyForegroundOrOnline();
+    }
+  };
+
+  private readonly handleOnline = () => {
+    this.notifyForegroundOrOnline();
+  };
 
   constructor(
     roomCode: string,
@@ -597,7 +610,44 @@ export class SignalingClient {
   connect(): void {
     this.closedManually = false;
     this.reconnectAttempts = 0;
+    if (!this.lifecycleBound && typeof document !== 'undefined' && typeof window !== 'undefined') {
+      document.addEventListener('visibilitychange', this.handleVisibilityOrOnline);
+      window.addEventListener('online', this.handleOnline);
+      this.lifecycleBound = true;
+    }
     this.openSocket();
+  }
+
+  /**
+   * 切回前台或网络恢复时立即探活：若断线或长休眠半开则秒级重建，在线则发 ping 校验 1.5s 内是否有回包
+   */
+  notifyForegroundOrOnline(): void {
+    if (this.closedManually) return;
+    this.reconnectAttempts = 0;
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      if (this.reconnectTimer !== null) {
+        clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = null;
+      }
+      this.openSocket();
+      return;
+    }
+    const now = Date.now();
+    if (now - this.lastServerActivityAt > 20000) {
+      this.openSocket();
+      return;
+    }
+    const probeSentAt = now;
+    this.send({ type: 'ping' });
+    if (this.probeTimer !== null) {
+      clearTimeout(this.probeTimer);
+    }
+    this.probeTimer = window.setTimeout(() => {
+      this.probeTimer = null;
+      if (!this.closedManually && this.lastServerActivityAt < probeSentAt) {
+        this.openSocket();
+      }
+    }, 1500);
   }
 
   private openSocket(): void {
@@ -611,6 +661,7 @@ export class SignalingClient {
 
     ws.onopen = () => {
       if (this.ws !== ws) return;
+      this.lastServerActivityAt = Date.now();
       this.reconnectAttempts = 0;
       this.handlers.onConnectionState(true);
       this.send({
@@ -626,6 +677,7 @@ export class SignalingClient {
 
     ws.onmessage = (event) => {
       if (this.ws !== ws) return;
+      this.lastServerActivityAt = Date.now();
       try {
         const env = JSON.parse(String(event.data)) as SignalEnvelope;
         switch (env.type) {
@@ -695,8 +747,8 @@ export class SignalingClient {
       this.stopHeartbeat();
       this.handlers.onConnectionState(false);
       if (!this.closedManually) {
-        // 指数退避自动重连（1s -> 2s -> 4s -> 8s，上限 10s）
-        const delayMs = Math.min(10000, 1000 * Math.pow(2, this.reconnectAttempts));
+        // 缩短指数退避（500ms 起步、上限 5s），实现亚秒级快速恢复
+        const delayMs = Math.min(5000, 500 * Math.pow(2, this.reconnectAttempts));
         this.reconnectAttempts = Math.min(this.reconnectAttempts + 1, 5);
         this.reconnectTimer = window.setTimeout(() => {
           if (!this.closedManually) {
@@ -771,8 +823,13 @@ export class SignalingClient {
   private startHeartbeat(): void {
     this.stopHeartbeat();
     this.heartbeatTimer = window.setInterval(() => {
+      // 超过 35s 无任何服务端回包则判定半开假死连接，立刻重连
+      if (this.lastServerActivityAt > 0 && Date.now() - this.lastServerActivityAt > 35000) {
+        this.openSocket();
+        return;
+      }
       this.send({ type: 'ping' });
-    }, 18000);
+    }, 15000);
   }
 
   private stopHeartbeat(): void {
@@ -783,6 +840,10 @@ export class SignalingClient {
     if (this.reconnectTimer !== null) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
+    }
+    if (this.probeTimer !== null) {
+      clearTimeout(this.probeTimer);
+      this.probeTimer = null;
     }
   }
 
@@ -803,6 +864,11 @@ export class SignalingClient {
   }
 
   private cleanup(): void {
+    if (this.lifecycleBound && typeof document !== 'undefined' && typeof window !== 'undefined') {
+      document.removeEventListener('visibilitychange', this.handleVisibilityOrOnline);
+      window.removeEventListener('online', this.handleOnline);
+      this.lifecycleBound = false;
+    }
     this.stopHeartbeat();
     this.cleanupSocketOnly();
   }

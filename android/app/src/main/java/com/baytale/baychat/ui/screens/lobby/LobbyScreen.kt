@@ -26,13 +26,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.baytale.baychat.core.model.NearbyInvite
 import com.baytale.baychat.core.model.TransferStatus
+import com.baytale.baychat.core.util.BayHaptic
 import com.baytale.baychat.service.OtaUpdateStatus
 import com.baytale.baychat.ui.AppShortcutAction
 import com.baytale.baychat.ui.BayChatUiState
@@ -47,6 +50,8 @@ import com.baytale.baychat.ui.sheets.PickupHubSheet
 import com.baytale.baychat.ui.theme.BaySpacing
 import com.baytale.baychat.ui.theme.BayTheme
 import com.baytale.baychat.ui.theme.BayType
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 
 private const val BACK_EXIT_WINDOW_MS = 2000L
@@ -63,11 +68,28 @@ fun LobbyScreen(
     modifier: Modifier = Modifier,
 ) {
     val colors = BayTheme.colors
+    val haptic = LocalHapticFeedback.current
     val pagerState = rememberPagerState(initialPage = 0, pageCount = { 4 })
     val scope = rememberCoroutineScope()
     val selectedTab = pagerState.currentPage
+    val scrollProgress = (pagerState.currentPage + pagerState.currentPageOffsetFraction).coerceIn(0f, 3f)
     var showPickupHub by rememberSaveable { mutableStateOf(false) }
     var lastBackPressAt by remember { mutableLongStateOf(0L) }
+
+    // 统一在页面滑落到新 Tab 时触发轻触感反馈（点击切换由 BayTabBar 先行跳过重复触发，避免双击感）
+    var skipNextSettledHaptic by remember { mutableStateOf(false) }
+    LaunchedEffect(pagerState) {
+        snapshotFlow { pagerState.settledPage }
+            .distinctUntilChanged()
+            .drop(1)
+            .collect {
+                if (skipNextSettledHaptic) {
+                    skipNextSettledHaptic = false
+                } else {
+                    BayHaptic.tap(haptic, enabled = state.prefs.hapticEnabled)
+                }
+            }
+    }
 
     val nav = remember(vm, onRequestQrScan, scope, pagerState) {
         object : LobbyNav {
@@ -214,10 +236,12 @@ fun LobbyScreen(
 
         BayTabBar(
             selectedTab = selectedTab,
+            scrollProgress = scrollProgress,
             activeTransferCount = activeTransferCount,
             mineHasBadge = mineHasBadge,
             hapticEnabled = state.prefs.hapticEnabled,
             onSelectTab = { target ->
+                skipNextSettledHaptic = true
                 scope.launch {
                     pagerState.animateScrollToPage(target.coerceIn(0, 3))
                 }

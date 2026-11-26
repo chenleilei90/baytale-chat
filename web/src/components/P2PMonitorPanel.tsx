@@ -70,6 +70,19 @@ export const P2PMonitorPanel: React.FC<P2PMonitorPanelProps> = ({
   const [selectedTransferId, setSelectedTransferId] = useState<string | null>(null);
   const [bandwidthSeries, setBandwidthSeries] = useState<number[]>(() => Array(28).fill(0));
   const [peakSpeedMBs, setPeakSpeedMBs] = useState<number>(0);
+  const [showSlowReconnect, setShowSlowReconnect] = useState<boolean>(false);
+
+  // 微信式静默缓冲：信令刚断开的前 5s 显示“收取中...”，超过 5s 仍未恢复再温和提示重连中
+  useEffect(() => {
+    if (wsConnected) {
+      setShowSlowReconnect(false);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setShowSlowReconnect(true);
+    }, 5000);
+    return () => window.clearTimeout(timer);
+  }, [wsConnected]);
 
   // 自动聚焦到正在传输的任务，若无进行中任务则聚焦最近一条任务
   const primaryTransfer = useMemo(() => {
@@ -342,8 +355,8 @@ export const P2PMonitorPanel: React.FC<P2PMonitorPanelProps> = ({
             </div>
             <div className="p2p-kv">
               <span>信令通道</span>
-              <strong style={{ color: wsConnected ? 'var(--success)' : 'var(--warning)' }}>
-                {wsConnected ? '已连接' : '重连中'}
+              <strong style={{ color: wsConnected ? 'var(--success)' : (showSlowReconnect ? 'var(--warning)' : 'var(--accent)') }}>
+                {wsConnected ? '已连接' : (showSlowReconnect ? '重连中' : '收取中...')}
               </strong>
             </div>
             <div className="p2p-kv">
@@ -363,10 +376,10 @@ export const P2PMonitorPanel: React.FC<P2PMonitorPanelProps> = ({
           <span>扫码配对 / 邀请设备</span>
         </button>
 
-        {!wsConnected && (
+        {!wsConnected && showSlowReconnect && (
           <div className="p2p-reconnect-hint">
             <RefreshCw size={11} aria-hidden="true" />
-            <span>正在自动恢复信令重连...</span>
+            <span>当前网络较慢，正在重连...</span>
           </div>
         )}
       </div>
