@@ -122,6 +122,7 @@ class SignalingClient(
             object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
                     if (this@SignalingClient.webSocket !== webSocket) return
+                    lastServerActivityAt = System.currentTimeMillis()
                     reconnectAttempts = 0
                     callbacks.onConnectionState(true)
                     sendRawImmediate(
@@ -195,7 +196,8 @@ class SignalingClient(
         stopTimers()
         callbacks.onConnectionState(false)
         if (!closedManually.get()) {
-            val delayMs = min(10_000L, (1000.0 * 2.0.pow(reconnectAttempts)).toLong())
+            // 缩短后台重连退避（500ms 起步、上限 5s），断线后亚秒级拉起信令收推消息
+            val delayMs = min(5_000L, (500.0 * 2.0.pow(reconnectAttempts)).toLong())
             reconnectAttempts = min(reconnectAttempts + 1, 5)
             reconnectJob?.cancel()
             reconnectJob = scope.launch {
@@ -307,7 +309,12 @@ class SignalingClient(
         heartbeatJob?.cancel()
         heartbeatJob = scope.launch {
             while (isActive && !closedManually.get()) {
-                delay(18_000L)
+                delay(12_000L)
+                // 超过 25 秒无任何服务端回包视为后台半开假死连接，立刻主动重连确保消息零漏推
+                if (System.currentTimeMillis() - lastServerActivityAt > 25_000L) {
+                    openSocket()
+                    break
+                }
                 webSocket?.let { sendRawImmediate(it, SignalEnvelope(type = "ping")) }
             }
         }

@@ -1,11 +1,9 @@
 package com.baytale.baychat.ui.screens.lobby
 
 import android.Manifest
-import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
-import android.os.PowerManager
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -37,7 +35,6 @@ import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.Radar
 import androidx.compose.material.icons.rounded.Storage
 import androidx.compose.material.icons.rounded.SystemUpdate
-import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material.icons.rounded.Vibration
 import androidx.compose.material.icons.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.Wifi
@@ -526,21 +523,13 @@ fun MineTab(
 
                     val context = LocalContext.current
                     val lifecycleOwner = LocalLifecycleOwner.current
-                    fun checkBatteryIgnored(): Boolean {
-                        val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
-                        return pm?.isIgnoringBatteryOptimizations(context.packageName) == true
-                    }
                     var notificationsEnabled by remember {
                         mutableStateOf(NotificationManagerCompat.from(context).areNotificationsEnabled())
-                    }
-                    var batteryIgnored by remember {
-                        mutableStateOf(checkBatteryIgnored())
                     }
                     DisposableEffect(lifecycleOwner) {
                         val observer = LifecycleEventObserver { _, event ->
                             if (event == Lifecycle.Event.ON_RESUME) {
                                 notificationsEnabled = NotificationManagerCompat.from(context).areNotificationsEnabled()
-                                batteryIgnored = checkBatteryIgnored()
                             }
                         }
                         lifecycleOwner.lifecycle.addObserver(observer)
@@ -581,45 +570,11 @@ fun MineTab(
                         },
                         value = if (notificationsEnabled) "已开启" else "去开启",
                         trailing = RowTrailing.Chevron,
-                        showDivider = true,
                         onClick = {
                             if (!notificationsEnabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                                 notifyLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                             } else {
                                 openAppNotificationSettings()
-                            }
-                        },
-                    )
-
-                    BayListRow(
-                        icon = Icons.Rounded.VerifiedUser,
-                        iconTint = if (batteryIgnored) colors.success else colors.warning,
-                        title = "后台保活（忽略电池优化）",
-                        subtitle = if (batteryIgnored) {
-                            "已加入系统电池白名单，切换应用时可稳定维持房间在线"
-                        } else {
-                            "防止切换应用后系统休眠断线，建议允许后台无限制运行"
-                        },
-                        value = if (batteryIgnored) "已开启" else "去设置",
-                        trailing = RowTrailing.Chevron,
-                        onClick = {
-                            val directRequest = Intent(
-                                Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                                Uri.parse("package:${context.packageName}"),
-                            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            val batteryList = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
-                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            val details = Intent(
-                                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                                Uri.fromParts("package", context.packageName, null),
-                            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            if (!batteryIgnored) {
-                                runCatching { context.startActivity(directRequest) }
-                                    .recoverCatching { context.startActivity(batteryList) }
-                                    .onFailure { runCatching { context.startActivity(details) } }
-                            } else {
-                                runCatching { context.startActivity(batteryList) }
-                                    .onFailure { runCatching { context.startActivity(details) } }
                             }
                         },
                     )

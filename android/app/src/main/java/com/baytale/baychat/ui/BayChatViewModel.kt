@@ -2826,9 +2826,29 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                             isOwner = joinedIsOwner,
                         )
                     }
+                    val isInitialSync = awaitingInitialHistorySync
                     awaitingInitialHistorySync = false
                     // 进房同步历史消息改为单次原子批量合并（不再把历史最早消息误标为未读导致列表滚回顶部）
-                    mergeCachedMessagesBatch(env.messages.orEmpty(), fromCache = true)
+                    val newlyMerged = mergeCachedMessagesBatch(env.messages.orEmpty(), fromCache = true)
+                    // 若后台短暂断线重连后同步到对方新消息，立刻补发后台高优先级通知，绝不漏推
+                    if (!isInitialSync && wasReconnected && isAppInBackgroundNow() && newlyMerged.isNotEmpty()) {
+                        newlyMerged
+                            .filter { !it.isSelf && it.kind != ChatKind.SYSTEM }
+                            .forEach { item ->
+                                val preview = when (item.kind) {
+                                    ChatKind.IMAGE -> "[图片]"
+                                    ChatKind.AUDIO -> "[语音消息]"
+                                    ChatKind.FILE -> "[文件] ${item.transfer?.fileName ?: "附件"}"
+                                    else -> item.text?.takeIf { it.isNotBlank() } ?: "[新消息]"
+                                }
+                                handleIncomingMessageArrived(
+                                    item = item,
+                                    fromCache = false,
+                                    roomCode = code,
+                                    previewText = preview,
+                                )
+                            }
+                    }
                     newMesh.syncPeers(peerMap.keys.toList())
                     refreshForegroundBanner()
                     maybeRecoverPendingCameraCapture(code)
@@ -5804,10 +5824,12 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    // 进房批量同步服务端历史记录：单次原子去重合并并按时间戳升序排列，保证最新消息始终在列表底部
-    private fun mergeCachedMessagesBatch(cachedList: List<CachedMessage>, fromCache: Boolean) {
-        if (cachedList.isEmpty()) return
+    // 进房批量同步服务端历史记录：单次原子去重合并并按时间戳升序排列，返回本次新增消息列表供重连补推通知
+    private fun mergeCachedMessagesBatch(cachedList: List<CachedMessage>, fromCache: Boolean): List<ChatItem> {
+        if (cachedList.isEmpty()) return emptyList()
+        val insertedItems = mutableListOf<ChatItem>()
         updateRoom { r ->
+            insertedItems.clear()
             val currentMessages = r.messages.toMutableList()
             val existingIds = currentMessages.mapTo(HashSet()) { it.id }
 
@@ -5836,10 +5858,12 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                 val built = buildChatItemFromCached(r.roomCode, cm, fromCache) ?: return@forEach
                 existingIds.add(built.id)
                 currentMessages.add(built)
+                insertedItems.add(built)
             }
 
             r.copy(messages = currentMessages.sortedBy { it.timestamp })
         }
+        return insertedItems
     }
 
     private fun mergeCachedMessage(cm: CachedMessage, fromCache: Boolean): ChatItem? {

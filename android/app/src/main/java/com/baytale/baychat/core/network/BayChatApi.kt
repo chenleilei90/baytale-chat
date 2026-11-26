@@ -421,7 +421,7 @@ class BayChatApi(
             .connectTimeout(12, TimeUnit.SECONDS)
             .readTimeout(25, TimeUnit.SECONDS)
             .writeTimeout(30, TimeUnit.SECONDS)
-            .pingInterval(20, TimeUnit.SECONDS)
+            .pingInterval(12, TimeUnit.SECONDS)
             .build()
     }
 }
