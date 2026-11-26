@@ -368,3 +368,31 @@ export interface BlockedPeer {
   name: string;
   blockedAt: number;
 }
+
+// 纸飞机文件类型与元信息（不上传文件本体）
+export type PlaneFileKind = 'image' | 'video' | 'audio' | 'archive' | 'doc' | 'apk' | 'file';
+
+export interface PlaneFileMeta {
+  name: string;
+  size: number;
+  kind: PlaneFileKind;
+}
+
+export interface PaperPlane {
+  id: string;
+  roomCode: string;
+  senderName: string;
+  senderAvatar: string;
+  message: string;
+  files: PlaneFileMeta[];
+  hasPassword: boolean;
+  allowEntry: boolean;
+  createdAt: number;
+  expiresAt: number;
+}
+
+export interface PlaneJoinResult {
+  roomCode: string;
+  hasPassword: boolean;
+  password?: string;
+}

@@ -3,9 +3,12 @@ import type {
   HistoryMeta,
   NearbyHeartbeatResponse,
   NearbyInviteResponse,
+  PaperPlane,
   PeerProfile,
   PickupCreateResponse,
   PickupInfo,
+  PlaneFileMeta,
+  PlaneJoinResult,
   RoomMode,
   RoomSummary,
   ServerConfig,
@@ -360,6 +363,54 @@ export function fetchNearbyInviteStatus(
 ): Promise<{ status: 'pending' | 'accepted' | 'declined' | 'expired' }> {
   return requestJSON<{ status: 'pending' | 'accepted' | 'declined' | 'expired' }>(
     `/api/nearby/invite/${encodeURIComponent(inviteId)}`
+  );
+}
+
+// ================= 纸飞机公开分享卡片接口 =================
+
+export function fetchPlanes(limit = 24): Promise<{ planes: PaperPlane[] }> {
+  return requestJSON<{ planes: PaperPlane[] }>(`/api/planes?limit=${limit}`);
+}
+
+export function fetchPlaneDetail(id: string): Promise<PaperPlane> {
+  return requestJSON<PaperPlane>(`/api/planes/${encodeURIComponent(id)}`);
+}
+
+export function createPlane(params: {
+  clientId: string;
+  roomCode: string;
+  senderName: string;
+  senderAvatar: string;
+  message: string;
+  files: PlaneFileMeta[];
+  allowEntry: boolean;
+  ownerToken?: string;
+  password?: string;
+}): Promise<PaperPlane> {
+  return requestJSON<PaperPlane>('/api/planes', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+}
+
+export function joinPlane(id: string): Promise<PlaneJoinResult> {
+  return requestJSON<PlaneJoinResult>(`/api/planes/${encodeURIComponent(id)}/join`, {
+    method: 'POST',
+  });
+}
+
+export function reportPlane(
+  id: string,
+  clientId: string
+): Promise<{ ok: boolean; deleted: boolean }> {
+  return requestJSON<{ ok: boolean; deleted: boolean }>(
+    `/api/planes/${encodeURIComponent(id)}/report`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clientId }),
+    }
   );
 }
 

@@ -1,9 +1,9 @@
 /* ==========================================================================
-   BayChat 2.0 大厅、取件页与辅助弹窗专属样式
+   BayChat 2.0 大厅、取件页与纸飞机组件专属样式
    遵循 Bay Design 2.0 红线：纯色层级阶差 · 零全局描边 · 零渐变 · 零毛玻璃
    ========================================================================== */
 
-/* 页面主画布容器（纯色背景，无装饰伪元素） */
+/* 页面主画布容器 */
 .lobby-shell {
   position: relative;
   width: 100%;
@@ -15,19 +15,23 @@
   background: var(--bg);
 }
 
-/* 顶部导航栏右侧控制区 */
+.lobby-top-nav {
+  width: calc(100% - 40px);
+  max-width: 1120px;
+  height: 60px;
+  margin: 12px auto 0;
+}
+
+.brand-text-wrap {
+  min-width: 0;
+}
+
 .lobby-nav-actions {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
   flex-shrink: 0;
-}
-
-.lobby-theme-controls {
-  display: flex;
-  align-items: center;
-  gap: 8px;
 }
 
 .lobby-user-name {
@@ -40,49 +44,221 @@
   color: var(--text-primary);
 }
 
-/* 大厅双栏对齐 */
-.lobby-stage-start {
-  align-items: start;
+.lobby-user-popover {
+  width: 240px;
+  gap: 10px;
 }
 
-/* 顶部状态概览区 */
-.lobby-hero-clickable {
-  cursor: pointer;
+.lobby-user-pop-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-bottom: 10px;
+  border-bottom: 0.5px solid var(--separator);
 }
 
-.lobby-hero-content {
+.lobby-menu-btn {
+  width: 100%;
+  justify-content: flex-start;
+}
+
+/* 设置浮层样式 */
+.settings-pop-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.settings-pop-title {
+  font-size: var(--fs-callout);
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.settings-pop-switches {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* 大厅滚动区与 1120px 居中画布 */
+.lobby-scroll {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 26px 20px 44px;
+}
+
+.lobby-canvas {
+  width: 100%;
+  max-width: 1120px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+/* 1. Hero 聚焦区（直接铺在背景上，存储核心路径突出） */
+.lobby-hero-section {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 18px;
+  padding: 6px 0 2px;
+}
+
+.lobby-hero-header {
+  max-width: 680px;
+}
+
+.lobby-hero-display {
+  margin: 0;
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  line-height: 1.25;
+  color: var(--text-primary);
+}
+
+.lobby-hero-sub {
+  margin: 8px 0 0;
+  font-size: 15px;
+  color: var(--text-secondary);
+  line-height: 1.55;
+}
+
+.lobby-hero-bar {
+  width: 100%;
+  max-width: 820px;
+  background: var(--surface);
+  border-radius: var(--r-lg);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  text-align: left;
+}
+
+.lobby-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.lobby-bar-input-wrap {
   flex: 1;
   min-width: 0;
 }
 
-.lobby-hero-title-row {
+.lobby-bar-actions {
   display: flex;
   align-items: center;
   gap: 8px;
-  flex-wrap: wrap;
+  flex-shrink: 0;
 }
 
-.lobby-hero-title {
-  font-size: 18px;
+.lobby-pwd-inline {
+  max-width: 420px;
+}
+
+/* 2. 四格快捷操作区 */
+.lobby-quick-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.lobby-quick-tile {
+  border: none;
+  background: var(--surface);
+  border-radius: var(--r-lg);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 150ms ease, transform 120ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.lobby-quick-tile:hover {
+  background: var(--fill-strong);
+}
+
+.lobby-quick-tile:active {
+  transform: scale(0.985);
+}
+
+.lobby-quick-tile.primary-tint {
+  background: var(--accent-soft);
+}
+
+.lobby-quick-tile.primary-tint:hover {
+  background: var(--fill-strong);
+}
+
+.lobby-quick-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--r-sm);
+  background: var(--fill);
+  color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.lobby-quick-icon.accent {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.lobby-quick-title {
+  font-size: var(--fs-callout);
   font-weight: 700;
-  letter-spacing: -0.02em;
   color: var(--text-primary);
 }
 
-.lobby-hero-desc {
+.lobby-quick-sub {
   font-size: var(--fs-footnote);
   color: var(--text-secondary);
-  margin-top: 4px;
-  line-height: 1.5;
+  line-height: 1.4;
 }
 
-/* 大厅主表单 */
-.lobby-form {
+/* 3. 下方两列主区：房间仓库 + 取件码主卡/附近设备 */
+.lobby-main-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.08fr) minmax(0, 0.92fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.lobby-right-stack {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 16px;
+  min-width: 0;
 }
 
+.lobby-rooms-card,
+.lobby-pickup-main-card,
+.lobby-nearby-main-card {
+  padding: 18px 20px;
+}
+
+.lobby-mini-seg {
+  height: 30px;
+}
+
+.lobby-mini-seg .seg-item {
+  height: 24px;
+  padding: 0 10px;
+  font-size: var(--fs-footnote);
+}
+
+/* 大厅主表单内部控制样式 */
 .lobby-field-group {
   display: flex;
   flex-direction: column;
@@ -101,7 +277,7 @@
 }
 
 .lobby-code-input {
-  height: 54px;
+  height: 56px;
   font-size: var(--fs-headline);
   font-weight: 700;
   letter-spacing: 0.02em;
@@ -119,15 +295,9 @@
   padding: 0 6px;
 }
 
-.lobby-cta-row {
-  display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
 .lobby-cta-primary {
   flex: 1;
-  min-width: 180px;
+  min-width: 170px;
 }
 
 .lobby-control-strip {
@@ -136,7 +306,6 @@
   justify-content: space-between;
   gap: 8px;
   flex-wrap: wrap;
-  padding-top: 2px;
 }
 
 .lobby-advanced-toggle {
@@ -189,32 +358,13 @@
   align-items: center;
 }
 
-/* 右侧副栏卡片 */
-.lobby-aside {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  min-width: 0;
-}
-
-.lobby-bento-card {
-  padding: 18px;
-}
-
-.lobby-bento-card-lg {
-  padding: 20px;
-}
-
 .lobby-card-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
   margin-bottom: 12px;
-}
-
-.lobby-card-head-lg {
-  margin-bottom: 14px;
+  flex-wrap: wrap;
 }
 
 .lobby-card-title {
@@ -866,14 +1016,507 @@
   }
 }
 
+/* 4. 次级区块：纸飞机公开文件分享与预览弹窗 */
+.lobby-planes-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-top: 2px;
+}
+
+.lobby-planes-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.lobby-planes-title-group {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.lobby-planes-title {
+  margin: 0;
+  font-size: var(--fs-headline);
+  font-weight: 700;
+  color: var(--text-primary);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.lobby-planes-sub {
+  font-size: var(--fs-footnote);
+  color: var(--text-muted);
+}
+
+.lobby-plane-light-note {
+  padding: 13px 16px;
+  border-radius: var(--r-md);
+  background: var(--surface);
+  font-size: var(--fs-footnote);
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.lobby-planes-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.plane-skeleton-card {
+  height: 136px;
+  border-radius: var(--r-lg);
+  background: var(--surface);
+}
+
+.lobby-plane-card {
+  border: none;
+  background: var(--surface);
+  border-radius: var(--r-lg);
+  padding: 15px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  text-align: left;
+  cursor: pointer;
+  min-width: 0;
+  transition: background-color 150ms ease, transform 120ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.lobby-plane-card:hover {
+  background: var(--fill-strong);
+}
+
+.lobby-plane-card:active {
+  transform: scale(0.985);
+}
+
+.plane-card-files {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.plane-card-file-row {
+  padding: 7px 10px;
+  border-radius: var(--r-sm);
+  background: var(--fill);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.plane-card-file-icon {
+  color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.plane-card-file-name {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-subhead);
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plane-card-file-size {
+  font-size: var(--fs-caption);
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.plane-card-file-more {
+  font-size: var(--fs-caption);
+  color: var(--accent);
+  font-weight: 600;
+  padding-left: 2px;
+}
+
+.plane-card-text-only {
+  padding: 7px 10px;
+  border-radius: var(--r-sm);
+  background: var(--fill);
+  font-size: var(--fs-footnote);
+  font-weight: 600;
+  color: var(--text-secondary);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.plane-card-message {
+  font-size: var(--fs-footnote);
+  color: var(--text-secondary);
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.plane-card-foot {
+  margin-top: auto;
+  padding-top: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.plane-card-sender {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
+
+.plane-card-sender-name {
+  font-size: var(--fs-footnote);
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plane-card-time {
+  font-size: var(--fs-caption);
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.plane-card-badge {
+  height: 22px;
+  padding: 0 8px;
+  font-size: var(--fs-caption);
+  flex-shrink: 0;
+}
+
+/* 纸飞机预览与放飞弹窗样式 */
+.plane-viewer-sheet,
+.plane-composer-sheet {
+  max-width: 500px;
+}
+
+.plane-viewer-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.plane-viewer-sender {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.plane-viewer-sender-meta {
+  min-width: 0;
+}
+
+.plane-viewer-sender-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.plane-viewer-sender-name {
+  font-size: var(--fs-body);
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.plane-code-pill {
+  height: 22px;
+  padding: 0 8px;
+  font-size: var(--fs-caption);
+}
+
+.plane-viewer-time {
+  font-size: var(--fs-caption);
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.plane-viewer-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.plane-session-box {
+  background: var(--fill);
+  border-radius: var(--r-md);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.plane-section-caption {
+  font-size: var(--fs-footnote);
+  font-weight: 700;
+  color: var(--text-secondary);
+}
+
+.plane-file-lock-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.plane-locked-file-row {
+  background: var(--surface-elevated);
+  border-radius: var(--r-sm);
+  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.plane-locked-file-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--r-xs);
+  background: var(--accent-soft);
+  color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.plane-locked-file-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.plane-locked-file-name {
+  font-size: var(--fs-subhead);
+  font-weight: 700;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plane-locked-file-sub {
+  font-size: var(--fs-caption);
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 2px;
+}
+
+.plane-locked-btn {
+  flex-shrink: 0;
+  opacity: 0.72;
+  cursor: not-allowed;
+}
+
+.plane-chat-preview-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.plane-chat-bubble {
+  background: var(--surface-elevated);
+  border-radius: var(--r-md);
+  padding: 9px 12px;
+  font-size: var(--fs-subhead);
+  color: var(--text-primary);
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.plane-system-hint {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: var(--r-full);
+  background: var(--surface-elevated);
+  color: var(--text-secondary);
+  font-size: var(--fs-footnote);
+  align-self: center;
+}
+
+.plane-viewer-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.plane-join-cta {
+  flex: 1;
+}
+
+.plane-composer-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.plane-composer-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.plane-composer-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: var(--fs-footnote);
+  font-weight: 700;
+  color: var(--text-secondary);
+}
+
+.plane-composer-count {
+  color: var(--accent);
+}
+
+.plane-empty-files-note {
+  padding: 12px;
+  border-radius: var(--r-sm);
+  background: var(--fill);
+  font-size: var(--fs-footnote);
+  color: var(--text-secondary);
+}
+
+.plane-pick-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.plane-pick-row {
+  border: none;
+  background: var(--fill);
+  border-radius: var(--r-sm);
+  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.plane-pick-row.selected {
+  background: var(--accent-soft);
+}
+
+.plane-check-box {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  background: var(--surface-elevated);
+  color: var(--on-accent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.plane-check-box.checked {
+  background: var(--accent);
+}
+
+.plane-pick-name {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-subhead);
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plane-pick-size {
+  font-size: var(--fs-caption);
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.plane-message-input {
+  padding: 10px 12px;
+  height: auto;
+  resize: vertical;
+  min-height: 64px;
+}
+
+.plane-composer-toggle-box {
+  padding: 12px;
+  border-radius: var(--r-md);
+  background: var(--fill);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.plane-owner-lock-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: var(--fs-footnote);
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.plane-bypass-tip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-caption);
+  color: var(--accent);
+  font-weight: 600;
+}
+
 /* ==========================================================================
    移动端响应式与最小 44px 触控热区规范（BM-09.02）
    ========================================================================== */
+@media (max-width: 960px) {
+  .lobby-planes-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 880px) {
   .lobby-top-nav {
+    width: calc(100vw - 20px);
     height: auto;
-    min-height: 52px;
+    min-height: 54px;
     padding: 8px 12px;
+    margin: 8px auto 0;
     flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
@@ -883,19 +1526,12 @@
     box-sizing: border-box;
   }
 
-  /* 移动端顶栏第一行：左侧品牌/返回按钮 + 右侧头像/取件码 */
   .lobby-top-nav .brand-pill {
-    order: 1;
     flex: 1;
     min-width: 0;
   }
 
-  .lobby-nav-actions {
-    display: contents;
-  }
-
   .lobby-top-nav .user-chip {
-    order: 2;
     flex-shrink: 0;
     min-width: 44px;
     min-height: 44px;
@@ -905,7 +1541,6 @@
     justify-content: center;
   }
 
-  /* 移动端顶栏第二行：外观分段切换器 + 强调色圆点独立成行，绝不横向溢出 */
   .lobby-theme-controls {
     order: 3;
     width: 100%;
@@ -922,6 +1557,37 @@
   .lobby-theme-controls .appearance-picker,
   .lobby-theme-controls .palette-bar {
     max-width: 100%;
+  }
+
+  .lobby-scroll {
+    padding: 14px 12px calc(28px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .lobby-hero-display {
+    font-size: 22px;
+  }
+
+  .lobby-hero-sub {
+    font-size: 13.5px;
+  }
+
+  .lobby-bar-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .lobby-bar-actions {
+    display: grid;
+    grid-template-columns: 1fr auto;
+  }
+
+  .lobby-quick-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .lobby-main-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .bento-scroll,
@@ -968,9 +1634,13 @@
   }
 }
 
-@media (max-width: 560px) {
+@media (max-width: 600px) {
   .lobby-theme-controls {
     justify-content: flex-start;
+  }
+
+  .lobby-planes-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .lobby-cta-primary {

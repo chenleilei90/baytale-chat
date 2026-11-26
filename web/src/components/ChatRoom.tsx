@@ -14,7 +14,6 @@ import {
   Clock,
   UploadCloud,
   X,
-  ChevronDown,
   Lock,
   Palette,
   Mic,
@@ -35,6 +34,7 @@ import {
   Settings2,
   ArrowRight,
   Users,
+  MoreHorizontal,
 } from 'lucide-react';
 import QRCode from 'qrcode';
 import type {
@@ -48,6 +48,7 @@ import type {
   PeerMediaState,
   PeerProfile,
   PendingNearbyInvite,
+  PlaneFileMeta,
   PomodoroMode,
   PomodoroState,
   RecentRoom,
@@ -93,6 +94,7 @@ import {
 } from '../lib/platform';
 import { decodeSecretText, launchScreenEffect } from '../lib/effects';
 import { EMOJI_LIST } from '../lib/emoji';
+import { classifyPlaneFileKind } from '../lib/planeKind';
 import { ambientEngine, playPomodoroChime, type AmbientSoundType } from '../lib/ambient';
 import {
   buildZipArchive,
@@ -107,7 +109,9 @@ import {
   type UserPrefs,
 } from '../lib/storage';
 import { Avatar } from './Avatar';
-import { AppearancePicker, PalettePicker, Switch } from './Controls';
+import { Switch } from './Controls';
+import { SettingsPopover } from './SettingsPopover';
+import { PlaneComposerModal } from './PlaneComposerModal';
 import { MessageList } from './MessageList';
 import { InviteModal } from './InviteModal';
 import { WhiteboardModal, type RemoteCursorState } from './WhiteboardModal';
@@ -281,6 +285,9 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [showInvite, setShowInvite] = useState(false);
   const [showWhiteboard, setShowWhiteboard] = useState(false);
+  const [moreMenuOpen, setMoreMenuOpen] = useState(false);
+  const [settingsPopoverOpen, setSettingsPopoverOpen] = useState(false);
+  const [planeComposerOpen, setPlaneComposerOpen] = useState(false);
 
   // 秘密基地成长统计与连续火花天数
   const [roomStats, setRoomStats] = useState<RoomStats>(DEFAULT_ROOM_STATS);
@@ -2689,6 +2696,52 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     return list;
   }, [localScreenStream, remoteScreenStreams, peers, profile.name, selfPeerId]);
 
+  // 提取房间内最近出现的文件列表，供「放飞纸飞机」默认勾选前 5 个元数据
+  const planeCandidateFiles = useMemo<PlaneFileMeta[]>(() => {
+    const out: PlaneFileMeta[] = [];
+    const seen = new Set<string>();
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m.kind !== 'file' && m.kind !== 'image' && m.kind !== 'audio') continue;
+      const name =
+        m.transfer?.fileName ||
+        m.caption ||
+        (m.kind === 'image' ? '图片附件.png' : m.kind === 'audio' ? '语音消息.webm' : '');
+      if (!name || seen.has(name)) continue;
+      seen.add(name);
+      const mime =
+        m.transfer?.mimeType ||
+        (m.kind === 'image' ? 'image/png' : m.kind === 'audio' ? 'audio/webm' : '');
+      out.push({
+        name,
+        size: m.transfer?.fileSize || 0,
+        kind: classifyPlaneFileKind(name, mime),
+      });
+      if (out.length >= 10) break;
+    }
+    return out;
+  }, [messages]);
+
+  useEffect(() => {
+    if (!moreMenuOpen && !settingsPopoverOpen) return;
+    const onDocClick = () => {
+      setMoreMenuOpen(false);
+      setSettingsPopoverOpen(false);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setMoreMenuOpen(false);
+        setSettingsPopoverOpen(false);
+      }
+    };
+    window.addEventListener('click', onDocClick);
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('click', onDocClick);
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [moreMenuOpen, settingsPopoverOpen]);
+
   return (
     <div
       className="chat-shell"
@@ -2743,8 +2796,8 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         </div>
 
         <div className="nav-right-group">
-          {/* 语音连麦 & 实时屏幕共享快捷按钮 */}
-          {micActive ? (
+          {/* 仅当连麦或投屏处于活跃状态时保留实时快捷控制，常态收纳进「更多」 */}
+          {micActive && (
             <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
               <button
                 type="button"
@@ -2767,28 +2820,19 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                 <PhoneOff size={13} aria-hidden="true" />
               </button>
             </div>
-          ) : (
-            <button
-              type="button"
-              className="btn btn-glass btn-sm"
-              onClick={() => void handleToggleVoiceCall()}
-              title="一键开启全房实时语音连麦（WebRTC 直连）"
-              aria-label="开启实时语音连麦"
-            >
-              <Headphones size={13} style={{ color: 'var(--accent)' }} aria-hidden="true" />
-              <span className="hide-mobile">连麦</span>
-            </button>
           )}
 
-          <button
-            type="button"
-            className={`btn btn-sm hide-mobile ${localScreenStream ? 'mic-live-btn' : 'btn-glass'}`}
-            onClick={() => void handleToggleScreenShare()}
-            title={localScreenStream ? '点击停止实时屏幕共享' : '一键开启实时屏幕共享投屏'}
-          >
-            <MonitorUp size={13} style={{ color: localScreenStream ? 'var(--on-accent)' : 'var(--accent)' }} aria-hidden="true" />
-            <span className="hide-mobile">{localScreenStream ? '投屏中' : '投屏'}</span>
-          </button>
+          {localScreenStream && (
+            <button
+              type="button"
+              className="btn btn-sm mic-live-btn hide-mobile"
+              onClick={() => void handleToggleScreenShare()}
+              title="点击停止实时屏幕共享"
+            >
+              <MonitorUp size={13} style={{ color: 'var(--on-accent)' }} aria-hidden="true" />
+              <span className="hide-mobile">投屏中</span>
+            </button>
+          )}
 
           <button
             type="button"
@@ -2800,23 +2844,170 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             <span className="hide-mobile">查找</span>
           </button>
 
-          {/* 附件大小上限 & 传输设置 Popover */}
-          <div className="popover-anchor">
+          <button
+            type="button"
+            className="btn btn-glass btn-sm"
+            onClick={() => setShowInvite(true)}
+            title="邀请二维码与链接"
+            aria-label="邀请成员"
+          >
+            <QrCode size={14} aria-hidden="true" />
+            <span className="hide-mobile">邀请</span>
+          </button>
+
+          <button
+            type="button"
+            className="btn btn-glass btn-sm"
+            onClick={onMinimizeRoom}
+            title="最小化挂起房间回大厅（保持 P2P 直连与文件传输不断线）"
+            aria-label="最小化挂起房间"
+          >
+            <Minimize2 size={13} aria-hidden="true" />
+            <span className="hide-mobile">挂起</span>
+          </button>
+
+          <button
+            type="button"
+            className="btn btn-glass btn-sm"
+            onClick={handleLeave}
+            title="离开并断开房间"
+            aria-label="离开房间"
+          >
+            <LogOut size={14} aria-hidden="true" />
+            <span className="hide-mobile">离开</span>
+          </button>
+
+          {/* 「更多」下拉菜单：收纳放飞纸飞机、连麦、投屏、白板、附件上限、保鲜期、销毁房间 */}
+          <div className="popover-anchor" onClick={(e) => e.stopPropagation()}>
             <button
               type="button"
-              className={`btn btn-sm hide-mobile ${attachmentPopoverOpen ? 'btn-jelly' : 'btn-glass'}`}
+              className={`btn btn-sm ${moreMenuOpen ? 'btn-jelly' : 'btn-glass'}`}
               onClick={() => {
-                setAttachmentPopoverOpen((v) => !v);
+                setMoreMenuOpen((v) => !v);
+                setAttachmentPopoverOpen(false);
                 setCachePopoverOpen(false);
               }}
-              title="动态调整房间附件大小上限、自动接收阈值与图片画质"
+              aria-expanded={moreMenuOpen}
+              aria-label="更多房间功能"
+              title="更多房间功能"
             >
-              <SlidersHorizontal size={13} style={{ color: attachmentPopoverOpen ? 'var(--on-accent)' : 'var(--accent)' }} aria-hidden="true" />
-              <span>
-                {effectiveMaxFileMB === 0 ? '附件不限' : `≤${formatLimitMB(effectiveMaxFileMB)}`}
-              </span>
-              <ChevronDown size={12} aria-hidden="true" />
+              <MoreHorizontal size={15} aria-hidden="true" />
             </button>
+
+            {moreMenuOpen && (
+              <div className="floating-popover more-menu-popover" role="menu">
+                <button
+                  type="button"
+                  className="more-menu-item"
+                  onClick={() => {
+                    setMoreMenuOpen(false);
+                    setPlaneComposerOpen(true);
+                  }}
+                >
+                  <span className="more-menu-item-left">
+                    <Send size={14} style={{ color: 'var(--accent)' }} aria-hidden="true" />
+                    <span>放飞纸飞机（分享房间文件）</span>
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  className="more-menu-item"
+                  onClick={() => {
+                    setMoreMenuOpen(false);
+                    void handleToggleVoiceCall();
+                  }}
+                >
+                  <span className="more-menu-item-left">
+                    <Headphones size={14} style={{ color: 'var(--accent)' }} aria-hidden="true" />
+                    <span>{micActive ? '挂断语音连麦' : '实时语音连麦'}</span>
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  className="more-menu-item"
+                  onClick={() => {
+                    setMoreMenuOpen(false);
+                    void handleToggleScreenShare();
+                  }}
+                >
+                  <span className="more-menu-item-left">
+                    <MonitorUp size={14} style={{ color: 'var(--accent)' }} aria-hidden="true" />
+                    <span>{localScreenStream ? '停止屏幕共享' : '屏幕共享投屏'}</span>
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  className="more-menu-item"
+                  onClick={() => {
+                    setMoreMenuOpen(false);
+                    handleOpenWhiteboard();
+                  }}
+                >
+                  <span className="more-menu-item-left">
+                    <Palette size={14} style={{ color: 'var(--accent)' }} aria-hidden="true" />
+                    <span>多人协作白板</span>
+                  </span>
+                </button>
+
+                <div className="more-menu-divider" />
+
+                <button
+                  type="button"
+                  className="more-menu-item"
+                  onClick={() => {
+                    setMoreMenuOpen(false);
+                    setCachePopoverOpen(false);
+                    setAttachmentPopoverOpen(true);
+                  }}
+                >
+                  <span className="more-menu-item-left">
+                    <SlidersHorizontal size={14} style={{ color: 'var(--accent)' }} aria-hidden="true" />
+                    <span>单附件上限</span>
+                  </span>
+                  <span className="mono more-menu-meta">
+                    {effectiveMaxFileMB === 0 ? '不限' : formatLimitMB(effectiveMaxFileMB)}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  className="more-menu-item"
+                  onClick={() => {
+                    setMoreMenuOpen(false);
+                    setAttachmentPopoverOpen(false);
+                    setCachePopoverOpen(true);
+                  }}
+                >
+                  <span className="more-menu-item-left">
+                    <Clock size={14} style={{ color: 'var(--accent)' }} aria-hidden="true" />
+                    <span>服务器保鲜期</span>
+                  </span>
+                  <span className="more-menu-meta">{cacheShortLabel}</span>
+                </button>
+
+                {canManageRoom && (
+                  <>
+                    <div className="more-menu-divider" />
+                    <button
+                      type="button"
+                      className="more-menu-item danger"
+                      onClick={() => {
+                        setMoreMenuOpen(false);
+                        setConfirmDestroyOpen(true);
+                      }}
+                    >
+                      <span className="more-menu-item-left">
+                        <Trash2 size={14} aria-hidden="true" />
+                        <span>销毁当前房间</span>
+                      </span>
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
 
             {attachmentPopoverOpen && (
               <div className="floating-popover" style={{ width: 344 }}>
@@ -2944,26 +3135,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                 </div>
               </div>
             )}
-          </div>
-
-          <div className="popover-anchor">
-            <button
-              type="button"
-              className="btn btn-glass btn-sm hide-mobile"
-              onClick={() => {
-                setCachePopoverOpen((v) => !v);
-                setAttachmentPopoverOpen(false);
-              }}
-            >
-              <Clock size={13} style={{ color: 'var(--accent)' }} aria-hidden="true" />
-              <span>{cacheShortLabel}</span>
-              {historyMeta.messageCount > 0 && (
-                <span className="mono" style={{ opacity: 0.7 }}>
-                  · {historyMeta.messageCount}
-                </span>
-              )}
-              <ChevronDown size={12} aria-hidden="true" />
-            </button>
 
             {cachePopoverOpen && (
               <div className="floating-popover">
@@ -3050,51 +3221,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
               </div>
             )}
           </div>
-
-          <button
-            type="button"
-            className="btn btn-glass btn-sm"
-            onClick={() => setShowInvite(true)}
-            title="邀请二维码与链接"
-            aria-label="邀请成员"
-          >
-            <QrCode size={14} aria-hidden="true" />
-            <span className="hide-mobile">邀请</span>
-          </button>
-
-          {canManageRoom && roomInfo?.mode === 'ephemeral' && (
-            <button
-              type="button"
-              className="btn btn-danger btn-sm hide-mobile"
-              onClick={() => setConfirmDestroyOpen(true)}
-              title="结束对话并立即销毁此房间口令"
-            >
-              <Flame size={13} aria-hidden="true" />
-              <span className="hide-mobile">销毁</span>
-            </button>
-          )}
-
-          <button
-            type="button"
-            className="btn btn-glass btn-sm"
-            onClick={onMinimizeRoom}
-            title="最小化挂起房间回大厅（保持 P2P 直连与文件传输不断线）"
-            aria-label="最小化挂起房间"
-          >
-            <Minimize2 size={13} aria-hidden="true" />
-            <span className="hide-mobile">挂起</span>
-          </button>
-
-          <button
-            type="button"
-            className="btn btn-glass btn-sm"
-            onClick={handleLeave}
-            title="离开并断开房间"
-            aria-label="离开房间"
-          >
-            <LogOut size={14} aria-hidden="true" />
-            <span className="hide-mobile">离开</span>
-          </button>
         </div>
       </header>
 
@@ -3140,6 +3266,17 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                 }}
               >
                 <Clock size={12} aria-hidden="true" /> {cacheShortLabel}
+              </button>
+              <button
+                type="button"
+                className="btn btn-soft btn-sm"
+                style={{ gridColumn: '1 / -1' }}
+                onClick={() => {
+                  setSidebarOpen(false);
+                  setPlaneComposerOpen(true);
+                }}
+              >
+                <Send size={12} aria-hidden="true" /> 放飞纸飞机（分享房间文件）
               </button>
               {canManageRoom && roomInfo?.mode === 'ephemeral' && (
                 <button
@@ -3409,38 +3546,53 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           )}
 
           <div className="sidebar-footer-section">
-            <div className="sidebar-appearance-block">
-              <span className="sidebar-setting-label">外观模式</span>
-              <AppearancePicker appearance={appearance} onSelect={onSelectAppearance} />
+            <div className="popover-anchor" onClick={(e) => e.stopPropagation()}>
+              <button
+                type="button"
+                className={`btn btn-sm sidebar-settings-trigger ${settingsPopoverOpen ? 'btn-jelly' : 'btn-glass'}`}
+                onClick={() => setSettingsPopoverOpen((v) => !v)}
+                aria-expanded={settingsPopoverOpen}
+              >
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                  <Settings2 size={14} aria-hidden="true" />
+                  <span>外观与设置</span>
+                </span>
+                <span className="mono" style={{ opacity: 0.75 }}>
+                  {formatLimitMB(effectiveMaxFileMB)}
+                </span>
+              </button>
+
+              {settingsPopoverOpen && (
+                <SettingsPopover
+                  appearance={appearance}
+                  theme={theme}
+                  prefs={prefs}
+                  onSelectAppearance={onSelectAppearance}
+                  onSelectTheme={onSelectTheme}
+                  onUpdatePrefs={onUpdatePrefs}
+                  onClose={() => setSettingsPopoverOpen(false)}
+                  placement="top-left"
+                  extraSection={
+                    <button
+                      type="button"
+                      className="btn btn-glass btn-sm"
+                      style={{ width: '100%', justifyContent: 'space-between' }}
+                      onClick={() => {
+                        setSettingsPopoverOpen(false);
+                        setSidebarOpen(false);
+                        setAttachmentPopoverOpen(true);
+                      }}
+                    >
+                      <span>调整单附件上限</span>
+                      <span className="mono" style={{ color: 'var(--accent)', fontWeight: 700 }}>
+                        {formatLimitMB(effectiveMaxFileMB)}
+                      </span>
+                    </button>
+                  }
+                />
+              )}
             </div>
-            <div className="sidebar-theme-row">
-              <span className="sidebar-setting-label">主题色</span>
-              <PalettePicker theme={theme} onSelect={onSelectTheme} />
-            </div>
-            <Switch
-              checked={prefs.autoAcceptSmallFiles}
-              onChange={(v) => onUpdatePrefs({ ...prefs, autoAcceptSmallFiles: v })}
-              label={`自动接收 ≤${prefs.autoAcceptMaxMB}MB 文件`}
-            />
-            <Switch
-              checked={prefs.soundEnabled}
-              onChange={(v) => onUpdatePrefs({ ...prefs, soundEnabled: v })}
-              label="清脆提示音效"
-            />
-            <button
-              type="button"
-              className="btn btn-glass btn-sm"
-              style={{ justifyContent: 'space-between' }}
-              onClick={() => {
-                setSidebarOpen(false);
-                setAttachmentPopoverOpen(true);
-              }}
-            >
-              <span>附件上限</span>
-              <span className="mono" style={{ color: 'var(--accent)', fontWeight: 700 }}>
-                {formatLimitMB(effectiveMaxFileMB)}
-              </span>
-            </button>
+
             {canManageRoom && roomInfo?.mode === 'fixed' && (
               <button
                 type="button"
@@ -4165,6 +4317,24 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             </form>
           </div>
         </div>
+      )}
+
+      {planeComposerOpen && (
+        <PlaneComposerModal
+          roomCode={roomCode}
+          hasPassword={Boolean(roomInfo?.hasPassword || password)}
+          isOwner={canManageRoom}
+          ownerToken={ownerToken}
+          roomPassword={password}
+          profile={profile}
+          recentFiles={planeCandidateFiles}
+          onClose={() => setPlaneComposerOpen(false)}
+          onSuccess={() => {
+            setPlaneComposerOpen(false);
+            onToast('纸飞机已放飞到大厅广场，24 小时内有效');
+          }}
+          onToast={onToast}
+        />
       )}
     </div>
   );
