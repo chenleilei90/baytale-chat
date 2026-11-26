@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Check, KeyRound, Send, ShieldCheck, X } from 'lucide-react';
 import type { PaperPlane, PlaneFileMeta, UserProfile } from '../types';
 import { createPlane } from '../lib/signaling';
@@ -39,6 +39,14 @@ export const PlaneComposerModal: React.FC<PlaneComposerModalProps> = ({
   const canToggleBypass = !hasPassword || isOwner;
   const [allowEntry, setAllowEntry] = useState<boolean>(canToggleBypass);
   const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !submitting) onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose, submitting]);
 
   const toggleIndex = (idx: number) => {
     setSelectedIndices((prev) => {

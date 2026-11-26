@@ -396,3 +396,33 @@ export interface PlaneJoinResult {
   hasPassword: boolean;
   password?: string;
 }
+
+// 本地持久化文件传输历史记录（与 Android TransferRecord 对齐）
+export interface TransferRecord {
+  id: string;
+  fileName: string;
+  fileSize: number;
+  mimeType: string;
+  direction: 'send' | 'receive';
+  roomCode: string;
+  peerName: string;
+  verified?: boolean;
+  recipientsDone?: number;
+  recipientsTotal?: number;
+  createdAt: number;
+}
+
+// 本地消息/链接/文件收藏条目
+export interface FavoriteItem {
+  id: string;
+  kind: 'text' | 'image' | 'file' | 'audio';
+  roomCode: string;
+  senderName: string;
+  text?: string;
+  fileName?: string;
+  fileSize?: number;
+  mimeType?: string;
+  cachedDownloadUrl?: string;
+  imageUrl?: string;
+  createdAt: number;
+}

@@ -48,6 +48,7 @@ interface PickupSendModalProps {
   onClose: () => void;
   onOpenCodePage: (code: string) => void;
   onToast: (msg: string) => void;
+  onPickupsChange?: (records: MyPickupRecord[]) => void;
 }
 
 // 取件码发送与管理弹窗：选文件 -> 配有效期/即焚/密码 -> 流式上传（支持断点重试） -> 生成取件码与二维码
@@ -56,6 +57,7 @@ export const PickupSendModal: React.FC<PickupSendModalProps> = ({
   onClose,
   onOpenCodePage,
   onToast,
+  onPickupsChange,
 }) => {
   const [files, setFiles] = useState<File[]>([]);
   const [expireHours, setExpireHours] = useState<1 | 24 | 72>(24);
@@ -64,6 +66,7 @@ export const PickupSendModal: React.FC<PickupSendModalProps> = ({
   const [uploading, setUploading] = useState(false);
   const [progressMap, setProgressMap] = useState<Record<number, number>>({});
   const [errorText, setErrorText] = useState('');
+  const [activeSession, setActiveSession] = useState<PickupCreateResponse | null>(null);
   const [result, setResult] = useState<PickupCreateResponse | null>(null);
   const [qrDataUrl, setQrDataUrl] = useState('');
   const [copiedType, setCopiedType] = useState<'code' | 'link' | null>(null);
@@ -112,6 +115,8 @@ export const PickupSendModal: React.FC<PickupSendModalProps> = ({
         next.push(f);
       }
     }
+    setActiveSession(null);
+    setProgressMap({});
     setFiles(next.slice(0, 50));
   };
 
@@ -128,16 +133,22 @@ export const PickupSendModal: React.FC<PickupSendModalProps> = ({
 
     setUploading(true);
     try {
-      const created = await createPickup({
-        files: files.map((f) => ({
-          name: f.name,
-          size: f.size,
-          mime: f.type || 'application/octet-stream',
-        })),
-        expireHours,
-        burnAfterRead,
-        password: password.trim() || undefined,
-      });
+      // 若之前上传中途失败，复用同一个取件码会话实现真正的服务端断点续传
+      const created =
+        activeSession ??
+        (await createPickup({
+          files: files.map((f) => ({
+            name: f.name,
+            size: f.size,
+            mime: f.type || 'application/octet-stream',
+          })),
+          expireHours,
+          burnAfterRead,
+          password: password.trim() || undefined,
+        }));
+      if (!activeSession) {
+        setActiveSession(created);
+      }
 
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
@@ -146,7 +157,10 @@ export const PickupSendModal: React.FC<PickupSendModalProps> = ({
         let offset = await headPickupFile(created.code, meta.fileId, created.ownerToken).catch(
           () => 0
         );
-        if (offset >= file.size) offset = 0;
+        if (offset >= file.size) {
+          setProgressMap((prev) => ({ ...prev, [i]: file.size }));
+          continue;
+        }
         await uploadPickupFile(
           created.code,
           meta.fileId,
@@ -170,10 +184,12 @@ export const PickupSendModal: React.FC<PickupSendModalProps> = ({
         createdAt: Date.now(),
       });
       setMyPickups(nextList);
+      onPickupsChange?.(nextList);
+      setActiveSession(null);
       setResult(created);
       onToast(`取件码 #${created.code} 已生成`);
     } catch (err) {
-      setErrorText(err instanceof Error ? err.message : '取件码上传失败');
+      setErrorText(err instanceof Error ? err.message : '取件码上传失败（保留进度，点击可断点续传）');
     } finally {
       setUploading(false);
     }
@@ -182,7 +198,9 @@ export const PickupSendModal: React.FC<PickupSendModalProps> = ({
   const handleRevoke = async (item: MyPickupRecord) => {
     try {
       await deletePickup(item.code, item.ownerToken);
-      setMyPickups(removeMyPickup(item.code));
+      const nextPickups = removeMyPickup(item.code);
+      setMyPickups(nextPickups);
+      onPickupsChange?.(nextPickups);
       if (result?.code === item.code) {
         setResult(null);
         setFiles([]);
@@ -361,7 +379,11 @@ export const PickupSendModal: React.FC<PickupSendModalProps> = ({
                               type="button"
                               className="btn btn-ghost btn-icon pickup-file-remove"
                               aria-label={`移除文件 ${f.name}`}
-                              onClick={() => setFiles((prev) => prev.filter((_, i) => i !== idx))}
+                              onClick={() => {
+                                setActiveSession(null);
+                                setProgressMap({});
+                                setFiles((prev) => prev.filter((_, i) => i !== idx));
+                              }}
                             >
                               <X size={12} aria-hidden="true" />
                             </button>
@@ -512,6 +534,14 @@ export const PickupLookupModal: React.FC<PickupLookupModalProps> = ({
 }) => {
   const [codeInput, setCodeInput] = useState('');
   const [err, setErr] = useState('');
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();

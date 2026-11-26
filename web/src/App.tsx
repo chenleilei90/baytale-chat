@@ -1,33 +1,55 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import type {
   AppearanceMode,
+  BlockedPeer,
+  ChatItem,
+  FavoriteItem,
+  MyPickupRecord,
   PendingNearbyInvite,
   RecentRoom,
   RoomMode,
   SavedFixedRoom,
   ServerConfig,
   ThemeMode,
+  TransferRecord,
   UserProfile,
 } from './types';
 import {
+  addFavorite,
+  addTransferRecord,
+  clearFavorites,
+  clearLocalCacheData,
   clearRecentRooms,
+  clearTransferRecords,
   loadAppearance,
+  loadBlockedPeers,
+  loadFavorites,
+  loadMutedRooms,
+  loadMyPickups,
   loadRecentRooms,
   loadSavedFixedRooms,
   loadTheme,
+  loadTransferRecords,
   loadUserPrefs,
   loadUserProfile,
+  removeBlockedPeer,
+  removeFavorite,
+  removeMyPickup,
   removeRecentRoom,
   removeSavedFixedRoom,
+  removeTransferRecord,
   saveAppearance,
   saveTheme,
   saveUserPrefs,
   saveUserProfile,
+  toggleMutedRoom,
+  updateSavedFixedRoomLabel,
   upsertRecentRoom,
   upsertSavedFixedRoom,
   type UserPrefs,
 } from './lib/storage';
-import { fetchRoomInfo, fetchServerConfig } from './lib/signaling';
+import { deletePickup, fetchRoomInfo, fetchServerConfig } from './lib/signaling';
+import { stopTitleFlash } from './lib/notifications';
 import { Lobby } from './components/Lobby';
 import { ChatRoom } from './components/ChatRoom';
 import { ProfileModal } from './components/ProfileModal';
@@ -57,7 +79,7 @@ const FALLBACK_CONFIG: ServerConfig = {
   iceServers: [{ urls: ['stun:stun.cloudflare.com:3478', 'stun:stun.l.google.com:19302'] }],
 };
 
-// BayChat 主入口：驱动 5 色强调色与浅/深外观切换、免账号身份、大厅与聊天室联动
+// BayChat 主入口：驱动 5 色强调色与浅/深外观切换、免账号身份、4-Tab 工作台与聊天室实时协同
 export const App: React.FC = () => {
   const [profile, setProfile] = useState<UserProfile>(() => loadUserProfile());
   const [theme, setTheme] = useState<ThemeMode>(() => loadTheme());
@@ -71,6 +93,13 @@ export const App: React.FC = () => {
     loadSavedFixedRooms()
   );
   const [recentRooms, setRecentRooms] = useState<RecentRoom[]>(() => loadRecentRooms());
+  const [transferRecords, setTransferRecords] = useState<TransferRecord[]>(() =>
+    loadTransferRecords()
+  );
+  const [favorites, setFavorites] = useState<FavoriteItem[]>(() => loadFavorites());
+  const [blockedPeers, setBlockedPeers] = useState<BlockedPeer[]>(() => loadBlockedPeers());
+  const [mutedRooms, setMutedRooms] = useState<string[]>(() => loadMutedRooms());
+  const [myPickups, setMyPickups] = useState<MyPickupRecord[]>(() => loadMyPickups());
 
   const [serverConfig, setServerConfig] = useState<ServerConfig>(FALLBACK_CONFIG);
   const [pickupRouteCode, setPickupRouteCode] = useState<string | null>(() =>
@@ -80,6 +109,7 @@ export const App: React.FC = () => {
   const [pendingNearbyInvite, setPendingNearbyInvite] = useState<PendingNearbyInvite | null>(null);
   const [roomMinimized, setRoomMinimized] = useState(false);
   const [minimizedStatus, setMinimizedStatus] = useState('后台运行中');
+  const [minimizedUnreadCount, setMinimizedUnreadCount] = useState(0);
   const [initialJoinCode, setInitialJoinCode] = useState<string>('');
   const [lobbyNotice, setLobbyNotice] = useState<string>('');
   const [profileModalOpen, setProfileModalOpen] = useState(false);
@@ -135,6 +165,16 @@ export const App: React.FC = () => {
     return () => window.removeEventListener('popstate', onPopState);
   }, []);
 
+  const syncUrlRoom = (code: string | null) => {
+    const url = new URL(window.location.href);
+    if (url.pathname.startsWith('/r/') || url.pathname.startsWith('/p/')) {
+      url.pathname = '/';
+    }
+    if (code) url.searchParams.set('room', code);
+    else url.searchParams.delete('room');
+    window.history.replaceState({}, '', url.toString());
+  };
+
   useEffect(() => {
     if (pickupRouteCode) return;
     const params = new URLSearchParams(window.location.search);
@@ -147,14 +187,20 @@ export const App: React.FC = () => {
 
     fetchRoomInfo(code)
       .then((info) => {
+        const saved = loadSavedFixedRooms().find((r) => r.code === info.code);
+        const recent = loadRecentRooms().find((r) => r.code === info.code);
+        // 刷新页面从 URL 恢复房间时，一并恢复本地持久化保存的房主令牌 ownerToken
+        const restoredOwnerToken = saved?.ownerToken || recent?.ownerToken;
+
         if (!info.hasPassword) {
-          setActiveRoom({ code: info.code, password: '' });
+          setActiveRoom({ code: info.code, password: '', ownerToken: restoredOwnerToken });
           syncUrlRoom(info.code);
           setRecentRooms(
             upsertRecentRoom({
               code: info.code,
               mode: info.mode,
               hasPassword: false,
+              ownerToken: restoredOwnerToken,
               lastVisitedAt: Date.now(),
             })
           );
@@ -162,24 +208,29 @@ export const App: React.FC = () => {
             setSavedFixedRooms(
               upsertSavedFixedRoom({
                 code: info.code,
+                label: saved?.label,
                 hasPassword: false,
+                ownerToken: restoredOwnerToken,
                 lastVisitedAt: Date.now(),
               })
             );
           }
         } else {
-          const saved =
-            loadSavedFixedRooms().find((r) => r.code === info.code) ||
-            loadRecentRooms().find((r) => r.code === info.code);
-          if (saved?.password) {
-            setActiveRoom({ code: info.code, password: saved.password });
+          const restoredPwd = saved?.password || recent?.password;
+          if (restoredPwd) {
+            setActiveRoom({
+              code: info.code,
+              password: restoredPwd,
+              ownerToken: restoredOwnerToken,
+            });
             syncUrlRoom(info.code);
             setRecentRooms(
               upsertRecentRoom({
                 code: info.code,
                 mode: info.mode,
                 hasPassword: true,
-                password: saved.password,
+                password: restoredPwd,
+                ownerToken: restoredOwnerToken,
                 lastVisitedAt: Date.now(),
               })
             );
@@ -193,16 +244,6 @@ export const App: React.FC = () => {
         setLobbyNotice(err instanceof Error ? err.message : '房间不存在或已失效');
       });
   }, []);
-
-  const syncUrlRoom = (code: string | null) => {
-    const url = new URL(window.location.href);
-    if (url.pathname.startsWith('/r/') || url.pathname.startsWith('/p/')) {
-      url.pathname = '/';
-    }
-    if (code) url.searchParams.set('room', code);
-    else url.searchParams.delete('room');
-    window.history.replaceState({}, '', url.toString());
-  };
 
   const handleOpenPickupPage = useCallback((code: string) => {
     const url = new URL(window.location.href);
@@ -229,15 +270,17 @@ export const App: React.FC = () => {
       ownerToken?: string,
       nearbyInvite?: PendingNearbyInvite
     ) => {
+      const existingSaved = loadSavedFixedRooms().find((r) => r.code === code);
       const resolvedOwnerToken =
         ownerToken ||
-        loadSavedFixedRooms().find((r) => r.code === code)?.ownerToken ||
+        existingSaved?.ownerToken ||
         loadRecentRooms().find((r) => r.code === code)?.ownerToken;
 
       setPickupRouteCode(null);
       setLobbyNotice('');
       setInitialJoinCode('');
       setRoomMinimized(false);
+      setMinimizedUnreadCount(0);
       setPendingNearbyInvite(nearbyInvite || null);
       setActiveRoom({ code, password, ownerToken: resolvedOwnerToken });
       syncUrlRoom(code);
@@ -257,6 +300,7 @@ export const App: React.FC = () => {
         setSavedFixedRooms(
           upsertSavedFixedRoom({
             code,
+            label: existingSaved?.label,
             hasPassword: Boolean(password),
             password: password || undefined,
             ownerToken: resolvedOwnerToken,
@@ -270,12 +314,14 @@ export const App: React.FC = () => {
 
   const handleSwitchRoom = useCallback(
     (newCode: string, password: string, mode: RoomMode = 'ephemeral', ownerToken?: string) => {
+      const existingSaved = loadSavedFixedRooms().find((r) => r.code === newCode);
       const resolvedOwnerToken =
         ownerToken ||
-        loadSavedFixedRooms().find((r) => r.code === newCode)?.ownerToken ||
+        existingSaved?.ownerToken ||
         loadRecentRooms().find((r) => r.code === newCode)?.ownerToken;
 
       setRoomMinimized(false);
+      setMinimizedUnreadCount(0);
       setPendingNearbyInvite(null);
       setActiveRoom({ code: newCode, password, ownerToken: resolvedOwnerToken });
       syncUrlRoom(newCode);
@@ -289,19 +335,50 @@ export const App: React.FC = () => {
           lastVisitedAt: Date.now(),
         })
       );
-      if (mode === 'fixed') {
-        const existingSaved = loadSavedFixedRooms().find((r) => r.code === newCode);
-        if (existingSaved) {
-          setSavedFixedRooms(
-            upsertSavedFixedRoom({
-              ...existingSaved,
-              hasPassword: Boolean(password),
-              password: password || undefined,
-              ownerToken: resolvedOwnerToken ?? existingSaved.ownerToken,
-              lastVisitedAt: Date.now(),
-            })
-          );
-        }
+      if (mode === 'fixed' && existingSaved) {
+        setSavedFixedRooms(
+          upsertSavedFixedRoom({
+            ...existingSaved,
+            hasPassword: Boolean(password),
+            password: password || undefined,
+            ownerToken: resolvedOwnerToken ?? existingSaved.ownerToken,
+            lastVisitedAt: Date.now(),
+          })
+        );
+      }
+    },
+    []
+  );
+
+  // 房主在线更改房间密码：原位更新房间会话配置与本地凭证，不断开 WebSocket 也不清空聊天区
+  const handlePasswordUpdatedInPlace = useCallback(
+    (code: string, nextPwd: string, mode: RoomMode, ownerToken?: string) => {
+      setActiveRoom((prev) =>
+        prev && prev.code === code
+          ? { ...prev, password: nextPwd, ownerToken: ownerToken || prev.ownerToken }
+          : prev
+      );
+      setRecentRooms(
+        upsertRecentRoom({
+          code,
+          mode,
+          hasPassword: Boolean(nextPwd),
+          password: nextPwd || undefined,
+          ownerToken,
+          lastVisitedAt: Date.now(),
+        })
+      );
+      const existingSaved = loadSavedFixedRooms().find((r) => r.code === code);
+      if (mode === 'fixed' && existingSaved) {
+        setSavedFixedRooms(
+          upsertSavedFixedRoom({
+            ...existingSaved,
+            hasPassword: Boolean(nextPwd),
+            password: nextPwd || undefined,
+            ownerToken: ownerToken ?? existingSaved.ownerToken,
+            lastVisitedAt: Date.now(),
+          })
+        );
       }
     },
     []
@@ -321,8 +398,10 @@ export const App: React.FC = () => {
       setActiveRoom(null);
       setPendingNearbyInvite(null);
       setRoomMinimized(false);
+      setMinimizedUnreadCount(0);
       setInitialJoinCode('');
       setLobbyNotice('');
+      stopTitleFlash('湾聊 · BayChat');
       syncUrlRoom(null);
       if (notice) pushToast(notice);
     },
@@ -333,6 +412,12 @@ export const App: React.FC = () => {
     setRoomMinimized(true);
     pushToast('房间已最小化挂起，连接与文件传输继续保持中');
   }, [pushToast]);
+
+  const handleRestoreRoom = useCallback(() => {
+    setRoomMinimized(false);
+    setMinimizedUnreadCount(0);
+    stopTitleFlash();
+  }, []);
 
   const handleSaveProfile = (next: UserProfile) => {
     saveUserProfile(next);
@@ -347,7 +432,92 @@ export const App: React.FC = () => {
 
   const handleRemoveSavedRoom = (code: string) => {
     setSavedFixedRooms(removeSavedFixedRoom(code));
-    pushToast(`已从秘密基地移除 #${code}`);
+    pushToast(`已从常驻收藏移除 #${code}`);
+  };
+
+  const handleRenameSavedRoom = (code: string, label: string) => {
+    setSavedFixedRooms(updateSavedFixedRoomLabel(code, label));
+    pushToast(label.trim() ? `已更新房间备注「${label.trim()}」` : '已恢复默认房间名');
+  };
+
+  const handleRecordTransfer = useCallback((record: TransferRecord) => {
+    setTransferRecords(addTransferRecord(record));
+  }, []);
+
+  const handleRemoveTransferRecord = (id: string) => {
+    setTransferRecords(removeTransferRecord(id));
+  };
+
+  const handleClearTransferRecords = () => {
+    setTransferRecords(clearTransferRecords());
+    pushToast('已清空传输历史记录');
+  };
+
+  const handleFavoriteMessage = useCallback(
+    (roomCode: string, item: ChatItem) => {
+      const kind: FavoriteItem['kind'] =
+        item.kind === 'image' || item.kind === 'file' || item.kind === 'audio' ? item.kind : 'text';
+      const next = addFavorite({
+        id: `fav_${item.id}`,
+        kind,
+        roomCode,
+        senderName: item.senderName,
+        text: item.text || item.caption,
+        fileName: item.transfer?.fileName,
+        fileSize: item.transfer?.fileSize,
+        mimeType: item.transfer?.mimeType,
+        cachedDownloadUrl: item.transfer?.cachedDownloadUrl,
+        imageUrl: item.imageUrl,
+        createdAt: Date.now(),
+      });
+      setFavorites(next);
+      pushToast('已收藏到本地「我的收藏」');
+    },
+    [pushToast]
+  );
+
+  const handleRemoveFavorite = (id: string) => {
+    setFavorites(removeFavorite(id));
+  };
+
+  const handleClearFavorites = () => {
+    setFavorites(clearFavorites());
+    pushToast('已清空本地收藏');
+  };
+
+  const handleUnblockPeer = (clientId: string) => {
+    setBlockedPeers(removeBlockedPeer(clientId));
+    pushToast('已解除屏蔽');
+  };
+
+  const handleToggleMuteRoom = useCallback(
+    (code: string) => {
+      const next = toggleMutedRoom(code);
+      setMutedRooms(next);
+      const isNowMuted = next.includes(code.trim().toLowerCase());
+      pushToast(isNowMuted ? `房间 #${code} 已开启消息免打扰` : `已恢复房间 #${code} 消息提醒`);
+    },
+    [pushToast]
+  );
+
+  const handleRevokePickup = async (item: MyPickupRecord) => {
+    try {
+      await deletePickup(item.code, item.ownerToken);
+      setMyPickups(removeMyPickup(item.code));
+      pushToast(`已撤销取件码 #${item.code}`);
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : '撤销取件码失败');
+    }
+  };
+
+  const handleClearLocalData = () => {
+    clearLocalCacheData();
+    setRecentRooms([]);
+    setMyPickups([]);
+    setMutedRooms([]);
+    setTransferRecords([]);
+    setFavorites([]);
+    pushToast('已清理本地历史记录、收藏与取件码缓存');
   };
 
   return (
@@ -382,15 +552,24 @@ export const App: React.FC = () => {
             serverConfig={serverConfig}
             savedFixedRooms={savedFixedRooms}
             recentRooms={recentRooms}
+            isMinimized={roomMinimized}
+            isMutedRoom={mutedRooms.includes(activeRoom.code.trim().toLowerCase())}
             onSelectTheme={setTheme}
             onSelectAppearance={setAppearance}
             onUpdatePrefs={handleUpdatePrefs}
             onEditProfile={() => setProfileModalOpen(true)}
             onSwitchRoom={handleSwitchRoom}
+            onPasswordUpdated={handlePasswordUpdatedInPlace}
             onClearPendingNearbyInvite={() => setPendingNearbyInvite(null)}
             onRemoveRecentRoom={handleRemoveRecentRoom}
             onMinimizeRoom={handleMinimizeRoom}
+            onRestoreFromNotification={handleRestoreRoom}
             onStatusSummary={setMinimizedStatus}
+            onUnreadChange={setMinimizedUnreadCount}
+            onToggleMuteRoom={handleToggleMuteRoom}
+            onRecordTransfer={handleRecordTransfer}
+            onFavoriteMessage={(item) => handleFavoriteMessage(activeRoom.code, item)}
+            onBlockedPeersChanged={() => setBlockedPeers(loadBlockedPeers())}
             onExitToLobby={handleExitToLobby}
             onToast={pushToast}
           />
@@ -407,6 +586,10 @@ export const App: React.FC = () => {
           serverConfig={serverConfig}
           savedFixedRooms={savedFixedRooms}
           recentRooms={recentRooms}
+          transferRecords={transferRecords}
+          favorites={favorites}
+          blockedPeers={blockedPeers}
+          myPickups={myPickups}
           initialJoinCode={initialJoinCode}
           initialNotice={lobbyNotice}
           onSelectTheme={setTheme}
@@ -416,20 +599,34 @@ export const App: React.FC = () => {
           onEditProfile={() => setProfileModalOpen(true)}
           onEnterRoom={handleEnterRoom}
           onOpenPickupPage={handleOpenPickupPage}
+          onPickupsChange={setMyPickups}
+          onRevokePickup={(item) => void handleRevokePickup(item)}
           onRemoveSavedRoom={handleRemoveSavedRoom}
+          onRenameSavedRoom={handleRenameSavedRoom}
           onRemoveRecentRoom={handleRemoveRecentRoom}
           onClearRecentRooms={handleClearRecentRooms}
+          onRemoveTransferRecord={handleRemoveTransferRecord}
+          onClearTransferRecords={handleClearTransferRecords}
+          onRemoveFavorite={handleRemoveFavorite}
+          onClearFavorites={handleClearFavorites}
+          onUnblockPeer={handleUnblockPeer}
+          onClearLocalData={handleClearLocalData}
           onToast={pushToast}
         />
       )}
 
-      {/* 后台挂起房间悬浮胶囊条 */}
+      {/* 后台挂起房间悬浮胶囊条（含实时未读角标） */}
       {activeRoom && roomMinimized && (
-        <div className="minimized-room-dock" onClick={() => setRoomMinimized(false)}>
+        <div className="minimized-room-dock" onClick={handleRestoreRoom}>
           <span className="status-dot emerald" />
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div className="mono" style={{ fontSize: 13.5, fontWeight: 700 }}>
-              房间 #{activeRoom.code} 后台运行中
+            <div className="mono" style={{ fontSize: 13.5, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span>房间 #{activeRoom.code} 后台运行中</span>
+              {minimizedUnreadCount > 0 && (
+                <span className="unread-dock-badge" aria-label={`${minimizedUnreadCount} 条未读消息`}>
+                  {minimizedUnreadCount > 99 ? '99+' : minimizedUnreadCount}
+                </span>
+              )}
             </div>
             <div
               style={{
@@ -448,7 +645,7 @@ export const App: React.FC = () => {
             className="btn btn-jelly btn-sm"
             onClick={(e) => {
               e.stopPropagation();
-              setRoomMinimized(false);
+              handleRestoreRoom();
             }}
           >
             回到房间

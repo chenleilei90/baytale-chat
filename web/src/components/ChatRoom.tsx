@@ -35,6 +35,12 @@ import {
   ArrowRight,
   Users,
   MoreHorizontal,
+  Bell,
+  BellOff,
+  CheckSquare,
+  Clipboard,
+  Forward,
+  Globe,
 } from 'lucide-react';
 import QRCode from 'qrcode';
 import type {
@@ -59,6 +65,7 @@ import type {
   SavedFixedRoom,
   ServerConfig,
   ThemeMode,
+  TransferRecord,
   UserProfile,
   WhiteboardBgStyle,
   WhiteboardEvent,
@@ -75,6 +82,7 @@ import {
   SignalingClient,
   submitReport,
   updateRoomProfile,
+  updateRoomSettingsApi,
   uploadCachedFile,
   uploadCachedMedia,
 } from '../lib/signaling';
@@ -93,6 +101,7 @@ import {
   triggerBlobDownload,
 } from '../lib/platform';
 import { decodeSecretText, launchScreenEffect } from '../lib/effects';
+import { showWebNotification, startTitleFlash, stopTitleFlash } from '../lib/notifications';
 import { EMOJI_LIST } from '../lib/emoji';
 import { classifyPlaneFileKind } from '../lib/planeKind';
 import { ambientEngine, playPomodoroChime, type AmbientSoundType } from '../lib/ambient';
@@ -131,20 +140,29 @@ interface ChatRoomProps {
   serverConfig: ServerConfig;
   savedFixedRooms: SavedFixedRoom[];
   recentRooms: RecentRoom[];
+  isMinimized?: boolean;
+  isMutedRoom?: boolean;
   onSelectTheme: (theme: ThemeMode) => void;
   onSelectAppearance: (mode: AppearanceMode) => void;
   onUpdatePrefs: (next: UserPrefs) => void;
   onEditProfile: () => void;
   onSwitchRoom: (newCode: string, password: string, mode?: RoomMode, ownerToken?: string) => void;
+  onPasswordUpdated?: (code: string, nextPwd: string, mode: RoomMode, ownerToken?: string) => void;
   onClearPendingNearbyInvite?: () => void;
   onRemoveRecentRoom: (code: string) => void;
   onMinimizeRoom: () => void;
+  onRestoreFromNotification?: () => void;
   onStatusSummary?: (summary: string) => void;
+  onUnreadChange?: (count: number) => void;
+  onToggleMuteRoom?: (code: string) => void;
+  onRecordTransfer?: (record: TransferRecord) => void;
+  onFavoriteMessage?: (item: ChatItem) => void;
+  onBlockedPeersChanged?: () => void;
   onExitToLobby: (notice?: string) => void;
   onToast: (msg: string) => void;
 }
 
-type MessageFilterTab = 'all' | 'image' | 'file' | 'audio';
+type MessageFilterTab = 'all' | 'image' | 'file' | 'audio' | 'link';
 
 const DEFAULT_DOC_TITLE = '湾聊 BayChat · 房间聊天';
 const RECALL_WINDOW_MS = 120_000;
@@ -218,11 +236,20 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   onSelectAppearance,
   onUpdatePrefs,
   onEditProfile,
+  isMinimized = false,
+  isMutedRoom = false,
   onSwitchRoom,
+  onPasswordUpdated,
   onClearPendingNearbyInvite,
   onRemoveRecentRoom,
   onMinimizeRoom,
+  onRestoreFromNotification,
   onStatusSummary,
+  onUnreadChange,
+  onToggleMuteRoom,
+  onRecordTransfer,
+  onFavoriteMessage,
+  onBlockedPeersChanged,
   onExitToLobby,
   onToast,
 }) => {
@@ -288,6 +315,11 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
   const [settingsPopoverOpen, setSettingsPopoverOpen] = useState(false);
   const [planeComposerOpen, setPlaneComposerOpen] = useState(false);
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedMsgIds, setSelectedMsgIds] = useState<Set<string>>(() => new Set());
+  const [forwardModalOpen, setForwardModalOpen] = useState(false);
+  const [unreadMentionIds, setUnreadMentionIds] = useState<string[]>([]);
+  const [updatingAllowRandom, setUpdatingAllowRandom] = useState(false);
 
   // 秘密基地成长统计与连续火花天数
   const [roomStats, setRoomStats] = useState<RoomStats>(DEFAULT_ROOM_STATS);
@@ -352,7 +384,22 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   const remoteTypingTimersRef = useRef<Record<string, number>>({});
   const blockedPeersRef = useRef<BlockedPeer[]>(blockedPeers);
   const ownerTokenRef = useRef<string | undefined>(ownerToken);
+  const passwordRef = useRef(password);
+  passwordRef.current = password;
+  const isMinimizedRef = useRef(isMinimized);
+  isMinimizedRef.current = isMinimized;
+  const isMutedRoomRef = useRef(isMutedRoom);
+  isMutedRoomRef.current = isMutedRoom;
   const onSwitchRoomRef = useRef(onSwitchRoom);
+  const onPasswordUpdatedRef = useRef(onPasswordUpdated);
+  onPasswordUpdatedRef.current = onPasswordUpdated;
+  const onUnreadChangeRef = useRef(onUnreadChange);
+  onUnreadChangeRef.current = onUnreadChange;
+  const onRestoreFromNotificationRef = useRef(onRestoreFromNotification);
+  onRestoreFromNotificationRef.current = onRestoreFromNotification;
+  const onRecordTransferRef = useRef(onRecordTransfer);
+  onRecordTransferRef.current = onRecordTransfer;
+  const recordedCompletedTransferIdsRef = useRef<Set<string>>(new Set());
   const dragDepthRef = useRef(0);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordChunksRef = useRef<Blob[]>([]);
@@ -577,27 +624,73 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     createdUrlsRef.current.clear();
   }, []);
 
-  // 后台标签页未读消息角标提醒
-  const bumpUnreadIfHidden = useCallback(() => {
-    if (typeof document !== 'undefined' && document.hidden) {
-      unreadCountRef.current += 1;
-      document.title = `(${unreadCountRef.current}) 新消息 · BayChat`;
-    }
+  const checkMentionMe = useCallback((text?: string): boolean => {
+    if (!text) return false;
+    const myName = profileRef.current.name.trim();
+    if (!myName) return false;
+    return text.toLowerCase().includes(`@${myName.toLowerCase()}`);
   }, []);
 
+  // 后台标签页与挂起态统一未读提醒、标签页标题闪烁与浏览器桌面通知
+  const notifyIncomingArrival = useCallback(
+    (params: {
+      itemId: string;
+      senderName: string;
+      previewText: string;
+      mentionedMe?: boolean;
+      isOffer?: boolean;
+    }) => {
+      const hiddenOrMinimized =
+        (typeof document !== 'undefined' && document.hidden) || isMinimizedRef.current;
+      if (params.mentionedMe) {
+        setUnreadMentionIds((prev) =>
+          prev.includes(params.itemId) ? prev : [...prev, params.itemId]
+        );
+      }
+      if (hiddenOrMinimized) {
+        unreadCountRef.current += 1;
+        onUnreadChangeRef.current?.(unreadCountRef.current);
+      }
+      const allowNotify = !isMutedRoomRef.current || Boolean(params.mentionedMe) || Boolean(params.isOffer);
+      if (!hiddenOrMinimized || !allowNotify) return;
+
+      if (typeof document !== 'undefined' && document.hidden) {
+        startTitleFlash(
+          DEFAULT_DOC_TITLE,
+          `(${unreadCountRef.current}) ${params.mentionedMe ? '[@我] ' : ''}${params.senderName}: ${params.previewText.slice(0, 18)}`
+        );
+      }
+      if (prefsRef.current.desktopNotifications) {
+        showWebNotification({
+          title: params.mentionedMe
+            ? `${params.senderName} 在 #${roomCode} @了你`
+            : `#${roomCode} · ${params.senderName}`,
+          body: params.previewText,
+          tag: `baychat-${roomCode}`,
+          onClick: () => {
+            onRestoreFromNotificationRef.current?.();
+          },
+        });
+      }
+    },
+    [roomCode]
+  );
+
   useEffect(() => {
-    const onVisibility = () => {
-      if (!document.hidden) {
+    const clearUnreadAndFlash = () => {
+      if (typeof document !== 'undefined' && !document.hidden && !isMinimized) {
         unreadCountRef.current = 0;
-        document.title = DEFAULT_DOC_TITLE;
+        onUnreadChangeRef.current?.(0);
+        stopTitleFlash(DEFAULT_DOC_TITLE);
       }
     };
-    document.addEventListener('visibilitychange', onVisibility);
+    clearUnreadAndFlash();
+    document.addEventListener('visibilitychange', clearUnreadAndFlash);
     return () => {
-      document.removeEventListener('visibilitychange', onVisibility);
-      document.title = DEFAULT_DOC_TITLE;
+      document.removeEventListener('visibilitychange', clearUnreadAndFlash);
+      stopTitleFlash(DEFAULT_DOC_TITLE);
     };
-  }, []);
+  }, [isMinimized]);
 
   useEffect(() => {
     const id = window.setInterval(() => setTick((t) => t + 1), 30000);
@@ -757,7 +850,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         if (prev.some((m) => m.id === cm.id)) return prev;
         const isSelf = cm.senderId === selfPeerId;
         if (cm.kind === 'image' && cm.mediaId) {
-          const url = buildCachedMediaUrl(roomCode, cm.mediaId, password);
+          const url = buildCachedMediaUrl(roomCode, cm.mediaId, passwordRef.current);
           return [
             ...prev,
             {
@@ -777,7 +870,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           ];
         }
         if (cm.kind === 'audio' && cm.mediaId) {
-          const url = buildCachedMediaUrl(roomCode, cm.mediaId, password);
+          const url = buildCachedMediaUrl(roomCode, cm.mediaId, passwordRef.current);
           return [
             ...prev,
             {
@@ -796,7 +889,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           ];
         }
         if (cm.kind === 'file_notice') {
-          const cachedUrl = cm.mediaId ? buildCachedFileUrl(roomCode, cm.mediaId, password) : undefined;
+          const cachedUrl = cm.mediaId ? buildCachedFileUrl(roomCode, cm.mediaId, passwordRef.current) : undefined;
           const basePrefix = cm.id.replace(/^fnotice_/, '');
           // 若当前会话已存在同批次实时 P2P 文件卡，则原地补充云端缓存直链，绝不重复渲染两张卡片
           const existingIdx = prev.findIndex(
@@ -878,7 +971,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         ];
       });
     },
-    [roomCode, password, selfPeerId]
+    [roomCode, selfPeerId]
   );
 
   // 本地移除被撤回的消息并插入系统提示（校验发送者归属与 180s 容忍时钟偏差窗口，同步刷新引用回复预览）
@@ -1016,8 +1109,14 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             },
           ];
         });
-        bumpUnreadIfHidden();
-        if (prefsRef.current.soundEnabled) playNoticeTone();
+        const mentioned = checkMentionMe(decoded.text);
+        notifyIncomingArrival({
+          itemId: msg.id,
+          senderName: sender?.name || '伙伴',
+          previewText: decoded.isSecret ? '[防窥密信]' : decoded.text,
+          mentionedMe: mentioned,
+        });
+        if (prefsRef.current.soundEnabled && (!isMutedRoomRef.current || mentioned)) playNoticeTone();
       },
       onRecallMessage: (peerId, msgId) => {
         const sender = peersRef.current[peerId];
@@ -1078,8 +1177,15 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         });
         const shakeTarget = isSelfTarget ? selfPeerId : targetPeerId;
         setNudgeShake((prev) => ({ peerId: shakeTarget, nonce: (prev?.nonce ?? 0) + 1 }));
-        if (isSelfTarget && prefsRef.current.soundEnabled) {
-          playNoticeTone();
+        if (isSelfTarget) {
+          notifyIncomingArrival({
+            itemId: id,
+            senderName: senderLabel,
+            previewText: nudgeText,
+          });
+          if (prefsRef.current.soundEnabled && !isMutedRoomRef.current) {
+            playNoticeTone();
+          }
         }
       },
       onClipboardSync: (peerId, text, updatedAt) => {
@@ -1103,7 +1209,12 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             },
           ];
         });
-        bumpUnreadIfHidden();
+        notifyIncomingArrival({
+          itemId: id,
+          senderName: sender?.name || '伙伴',
+          previewText: `[剪贴板] ${text}`,
+        });
+        if (prefsRef.current.soundEnabled && !isMutedRoomRef.current) playNoticeTone();
         onToast(`收到 ${sender?.name || '伙伴'} 共享的剪贴板内容`);
       },
       onRoomMoved: (_peerId, nextCode, nextPassword) => {
@@ -1208,8 +1319,15 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             },
           ];
         });
-        bumpUnreadIfHidden();
-        if (prefsRef.current.soundEnabled) playNoticeTone();
+        notifyIncomingArrival({
+          itemId,
+          senderName: sender?.name || '伙伴',
+          previewText: info.isImage ? `[图片] ${info.fileName}` : info.isAudio ? '[语音消息]' : `[文件] ${info.fileName} (${formatBytes(info.fileSize)})`,
+          isOffer: !info.isImage && !info.isAudio,
+        });
+        if (prefsRef.current.soundEnabled && (!isMutedRoomRef.current || (!info.isImage && !info.isAudio))) {
+          playNoticeTone();
+        }
       },
       onTransferUpdate: (updated) => {
         if (updated.objectUrl) trackObjectUrl(updated.objectUrl);
@@ -1228,6 +1346,21 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           })
         );
         if (updated.status === 'completed' && !updated.isImage && !updated.isAudio) {
+          const recKey = `${updated.transferId}_${updated.direction}`;
+          if (!recordedCompletedTransferIdsRef.current.has(recKey)) {
+            recordedCompletedTransferIdsRef.current.add(recKey);
+            onRecordTransferRef.current?.({
+              id: recKey,
+              fileName: updated.fileName,
+              fileSize: updated.fileSize,
+              mimeType: updated.mimeType,
+              direction: updated.direction,
+              roomCode,
+              peerName: updated.targetPeerName || peersRef.current[updated.targetPeerId || '']?.name || '伙伴',
+              verified: updated.verified,
+              createdAt: Date.now(),
+            });
+          }
           if (updated.direction === 'send') {
             const baseId = updated.transferId.split('_').slice(0, 3).join('_');
             if (!recordedTransferIdsRef.current.has(baseId)) {
@@ -1259,7 +1392,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
 
     const sig = new SignalingClient(
       roomCode,
-      password,
+      passwordRef.current,
       selfPeerProfile,
       {
         onConnectionState: (connected) => setWsConnected(connected),
@@ -1365,6 +1498,23 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         if (env.history) setHistoryMeta(env.history);
         if (env.message && env.message.senderId !== selfPeerId) {
           mergeCachedMessage(env.message, false);
+          const cm = env.message;
+          const previewText =
+            cm.kind === 'image'
+              ? '[图片]'
+              : cm.kind === 'audio'
+                ? '[语音消息]'
+                : cm.kind === 'file_notice'
+                  ? `[文件] ${cm.fileName || '附件'}`
+                  : cm.text || '[新消息]';
+          const mentioned = checkMentionMe(cm.text);
+          notifyIncomingArrival({
+            itemId: cm.id,
+            senderName: cm.senderName || '伙伴',
+            previewText,
+            mentionedMe: mentioned,
+          });
+          if (prefsRef.current.soundEnabled && (!isMutedRoomRef.current || mentioned)) playNoticeTone();
         }
       },
       onMessageRecalled: (env) => {
@@ -1471,13 +1621,13 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     };
   }, [
     roomCode,
-    password,
     selfPeerId,
     appendSystemMessage,
     applyMessageRecalled,
     applyWhiteboardEvent,
-    bumpUnreadIfHidden,
+    checkMentionMe,
     mergeCachedMessage,
+    notifyIncomingArrival,
     onExitToLobby,
     onToast,
     revokeAllTrackedUrls,
@@ -1585,6 +1735,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       if (filterTab === 'image' && m.kind !== 'image') return false;
       if (filterTab === 'file' && m.kind !== 'file') return false;
       if (filterTab === 'audio' && m.kind !== 'audio') return false;
+      if (filterTab === 'link' && !/(https?:\/\/[^\s<>"']+)/i.test(m.text || '')) return false;
       if (!kw) return true;
       if (m.isSecret) return false; // 搜索不暴露未揭晓密信明文
       const haystack = [
@@ -2352,6 +2503,8 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       showInvite ||
       confirmClearOpen ||
       confirmDestroyOpen ||
+      planeComposerOpen ||
+      forwardModalOpen ||
       Boolean(lightboxData);
     const activeEl = document.activeElement as HTMLElement | null;
     const isEditableTarget = Boolean(
@@ -2517,6 +2670,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       blockedAt: Date.now(),
     });
     setBlockedPeers(next);
+    onBlockedPeersChanged?.();
     meshRef.current?.removePeer(p.peerId);
     setPeers((prev) => {
       const copy = { ...prev };
@@ -2528,6 +2682,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
 
   const handleUnblockPeer = (clientId: string) => {
     setBlockedPeers(removeBlockedPeer(clientId));
+    onBlockedPeersChanged?.();
     onToast('已解除屏蔽，对方重新加入后可正常通信');
   };
 
@@ -2585,7 +2740,9 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       setRoomProfileOpen(false);
       onToast('房间资料已更新');
       if (nextPwd !== undefined) {
-        onSwitchRoom(roomCode, nextPwd, updated.mode, ownerToken);
+        passwordRef.current = nextPwd;
+        signalingRef.current?.updatePassword(nextPwd);
+        onPasswordUpdatedRef.current?.(roomCode, nextPwd, updated.mode, ownerToken);
       }
     } catch (err) {
       onToast(err instanceof Error ? err.message : '修改房间设置失败');
@@ -2723,15 +2880,34 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   }, [messages]);
 
   useEffect(() => {
-    if (!moreMenuOpen && !settingsPopoverOpen) return;
+    const hasOpenOverlay =
+      moreMenuOpen ||
+      settingsPopoverOpen ||
+      cachePopoverOpen ||
+      attachmentPopoverOpen ||
+      roomProfileOpen ||
+      confirmClearOpen ||
+      confirmDestroyOpen ||
+      forwardModalOpen ||
+      Boolean(reportTarget);
+    if (!hasOpenOverlay) return;
     const onDocClick = () => {
       setMoreMenuOpen(false);
       setSettingsPopoverOpen(false);
+      setCachePopoverOpen(false);
+      setAttachmentPopoverOpen(false);
     };
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setMoreMenuOpen(false);
         setSettingsPopoverOpen(false);
+        setCachePopoverOpen(false);
+        setAttachmentPopoverOpen(false);
+        setRoomProfileOpen(false);
+        setConfirmClearOpen(false);
+        setConfirmDestroyOpen(false);
+        setForwardModalOpen(false);
+        setReportTarget(null);
       }
     };
     window.addEventListener('click', onDocClick);
@@ -2740,7 +2916,124 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       window.removeEventListener('click', onDocClick);
       window.removeEventListener('keydown', onKeyDown);
     };
-  }, [moreMenuOpen, settingsPopoverOpen]);
+  }, [
+    moreMenuOpen,
+    settingsPopoverOpen,
+    cachePopoverOpen,
+    attachmentPopoverOpen,
+    roomProfileOpen,
+    confirmClearOpen,
+    confirmDestroyOpen,
+    forwardModalOpen,
+    reportTarget,
+  ]);
+
+  // 跨设备共享闪贴板文本发送
+  const handleSendClipboardSync = async () => {
+    let text = inputText.trim();
+    if (!text) {
+      try {
+        text = (await navigator.clipboard.readText()).trim();
+      } catch {
+        text = '';
+      }
+    }
+    if (!text) {
+      onToast('剪贴板或输入框为空，请先复制文本或输入内容');
+      return;
+    }
+    const now = Date.now();
+    const sent = meshRef.current?.broadcastClipboard(text, now) || 0;
+    const id = `clip_self_${now}_${Math.random().toString(36).slice(2, 6)}`;
+    setMessages((prev) => [
+      ...prev,
+      {
+        id,
+        kind: 'text',
+        senderId: selfPeerId,
+        senderName: profile.name,
+        senderAvatar: profile.avatar,
+        isSelf: true,
+        timestamp: now,
+        text,
+        isClipSync: true,
+      },
+    ]);
+    if (inputText.trim() === text) setInputText('');
+    onToast(sent > 0 ? `已将剪贴板内容同步给 ${sent} 位成员` : '当前暂无在线成员，已在本机记录同步卡片');
+  };
+
+  // 切换公开随机进入开关
+  const handleToggleAllowRandom = async () => {
+    if (updatingAllowRandom || !roomInfo) return;
+    const next = !roomInfo.allowRandom;
+    setUpdatingAllowRandom(true);
+    try {
+      const res = await updateRoomSettingsApi(roomCode, {
+        ownerToken,
+        password: passwordRef.current,
+        allowRandom: next,
+        actorName: profile.name,
+      });
+      setRoomInfo((prev) =>
+        prev ? { ...prev, allowRandom: typeof res.allowRandom === 'boolean' ? res.allowRandom : next } : prev
+      );
+      onToast(next ? '已开放免密随机加入，其他人可在广场看到此房' : '已关闭公开随机加入');
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : '更新随机加入开关失败');
+    } finally {
+      setUpdatingAllowRandom(false);
+    }
+  };
+
+  // @提及自动补全候选成员列表
+  const mentionCandidates = useMemo(() => {
+    const match = inputText.match(/(?:^|\s)@([^\s@]*)$/);
+    if (!match) return [];
+    const kw = match[1].toLowerCase();
+    return peerList.filter((p) => p.name.toLowerCase().includes(kw)).slice(0, 6);
+  }, [inputText, peerList]);
+
+  const insertMentionName = (name: string) => {
+    const next = inputText.replace(/(^|\s)@([^\s@]*)$/, `$1@${name} `);
+    setInputText(next);
+    window.setTimeout(() => composerInputRef.current?.focus(), 0);
+  };
+
+  const toggleSelectMessage = (msgId: string) => {
+    setSelectedMsgIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(msgId)) next.delete(msgId);
+      else next.add(msgId);
+      return next;
+    });
+  };
+
+  const handleDeleteSelectedMessages = () => {
+    if (selectedMsgIds.size === 0) return;
+    const count = selectedMsgIds.size;
+    setMessages((prev) => prev.filter((m) => !selectedMsgIds.has(m.id)));
+    setSelectedMsgIds(new Set());
+    setSelectionMode(false);
+    onToast(`已从当前会话视图移除 ${count} 条本地消息记录`);
+  };
+
+  const handleForwardToRoom = (targetCode: string, targetPwd: string, targetMode: RoomMode) => {
+    const pickedTexts = messages
+      .filter((m) => selectedMsgIds.has(m.id) && (m.text || m.caption || m.transfer?.fileName))
+      .map((m) => `${m.senderName}: ${m.text || m.caption || `[文件] ${m.transfer?.fileName}`}`);
+    setForwardModalOpen(false);
+    setSelectedMsgIds(new Set());
+    setSelectionMode(false);
+    if (pickedTexts.length === 0) {
+      onToast('所选消息无可转发的文本摘要');
+      return;
+    }
+    const merged = pickedTexts.join('\n').slice(0, 2000);
+    void copyTextToClipboard(merged);
+    onSwitchRoom(targetCode, targetPwd, targetMode, undefined);
+    onToast(`已复制 ${pickedTexts.length} 条消息摘要并切换至 #${targetCode}，按 Ctrl+V 即可发送`);
+  };
 
   return (
     <div
@@ -2836,9 +3129,10 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
 
           <button
             type="button"
-            className={`btn btn-sm hide-mobile ${showSearchBar ? 'btn-jelly' : 'btn-glass'}`}
+            className={`btn btn-sm ${showSearchBar ? 'btn-jelly' : 'btn-glass'}`}
             onClick={() => setShowSearchBar((v) => !v)}
-            title="搜索或按图片/文件筛选记录 (Ctrl+F)"
+            title="搜索或按图片/文件/链接筛选记录 (Ctrl+F)"
+            aria-label="查找记录"
           >
             <Search size={13} aria-hidden="true" />
             <span className="hide-mobile">查找</span>
@@ -2988,6 +3282,76 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                   <span className="more-menu-meta">{cacheShortLabel}</span>
                 </button>
 
+                {onToggleMuteRoom && (
+                  <button
+                    type="button"
+                    className="more-menu-item"
+                    onClick={() => {
+                      setMoreMenuOpen(false);
+                      onToggleMuteRoom(roomCode);
+                    }}
+                  >
+                    <span className="more-menu-item-left">
+                      {isMutedRoom ? (
+                        <BellOff size={14} style={{ color: 'var(--warning)' }} aria-hidden="true" />
+                      ) : (
+                        <Bell size={14} style={{ color: 'var(--accent)' }} aria-hidden="true" />
+                      )}
+                      <span>{isMutedRoom ? '取消本房免打扰' : '本房消息免打扰'}</span>
+                    </span>
+                    <span className="more-menu-meta">{isMutedRoom ? '已静音' : '正常提醒'}</span>
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  className="more-menu-item"
+                  onClick={() => {
+                    setMoreMenuOpen(false);
+                    setSelectionMode((v) => !v);
+                    setSelectedMsgIds(new Set());
+                  }}
+                >
+                  <span className="more-menu-item-left">
+                    <CheckSquare size={14} style={{ color: 'var(--accent)' }} aria-hidden="true" />
+                    <span>{selectionMode ? '退出多选模式' : '多选与转发消息'}</span>
+                  </span>
+                </button>
+
+                {canManageRoom && (
+                  <button
+                    type="button"
+                    className="more-menu-item"
+                    onClick={() => {
+                      setMoreMenuOpen(false);
+                      handleOpenRoomProfile();
+                    }}
+                  >
+                    <span className="more-menu-item-left">
+                      <Settings2 size={14} style={{ color: 'var(--accent)' }} aria-hidden="true" />
+                      <span>修改密码与主题</span>
+                    </span>
+                  </button>
+                )}
+
+                {canManageRoom && !roomInfo?.hasPassword && (
+                  <button
+                    type="button"
+                    className="more-menu-item"
+                    disabled={updatingAllowRandom}
+                    onClick={() => {
+                      setMoreMenuOpen(false);
+                      void handleToggleAllowRandom();
+                    }}
+                  >
+                    <span className="more-menu-item-left">
+                      <Globe size={14} style={{ color: 'var(--accent)' }} aria-hidden="true" />
+                      <span>公开随机加入</span>
+                    </span>
+                    <span className="more-menu-meta">{roomInfo?.allowRandom ? '已开放' : '已关闭'}</span>
+                  </button>
+                )}
+
                 {canManageRoom && (
                   <>
                     <div className="more-menu-divider" />
@@ -3010,7 +3374,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             )}
 
             {attachmentPopoverOpen && (
-              <div className="floating-popover" style={{ width: 344 }}>
+              <div className="floating-popover" style={{ width: 344 }} onClick={(e) => e.stopPropagation()}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <span style={{ fontWeight: 700, fontSize: 'var(--fs-callout)' }}>附件大小与传输调节</span>
                   <button
@@ -3137,7 +3501,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             )}
 
             {cachePopoverOpen && (
-              <div className="floating-popover">
+              <div className="floating-popover" onClick={(e) => e.stopPropagation()}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <span style={{ fontWeight: 700, fontSize: 'var(--fs-callout)' }}>服务器缓存保鲜期</span>
                   <button
@@ -3694,6 +4058,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                     { id: 'image', label: '图片' },
                     { id: 'file', label: '文件' },
                     { id: 'audio', label: '语音' },
+                    { id: 'link', label: '链接' },
                   ] as const
                 ).map((t) => (
                   <button
@@ -3720,6 +4085,26 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                 title="关闭"
               >
                 <X size={14} aria-hidden="true" />
+              </button>
+            </div>
+          )}
+
+          {/* 未读 @我 快速跳转条 */}
+          {unreadMentionIds.length > 0 && (
+            <div className="batch-accept-bar">
+              <span style={{ fontSize: 'var(--fs-subhead)', fontWeight: 700, color: 'var(--accent)' }}>
+                有人 @了你（{unreadMentionIds.length} 条）
+              </span>
+              <button
+                type="button"
+                className="btn btn-jelly btn-sm"
+                onClick={() => {
+                  const targetId = unreadMentionIds[0];
+                  setUnreadMentionIds((prev) => prev.slice(1));
+                  document.getElementById(`msg-${targetId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }}
+              >
+                定位到 @我
               </button>
             </div>
           )}
@@ -3799,7 +4184,16 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
               <MessageList
                 items={visibleMessages}
                 selfPeerId={selfPeerId}
+                selfName={profile.name}
                 recalledTexts={recalledTexts}
+                isSelectionMode={selectionMode}
+                selectedIds={selectedMsgIds}
+                onToggleSelect={toggleSelectMessage}
+                onEnterSelectionMode={(id) => {
+                  setSelectionMode(true);
+                  setSelectedMsgIds(new Set([id]));
+                }}
+                onFavoriteMessage={onFavoriteMessage}
                 onNudgeAvatar={handleNudgePeer}
                 shakePeerId={nudgeShake?.peerId}
                 shakeNonce={nudgeShake?.nonce}
@@ -3836,8 +4230,60 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             </div>
           )}
 
+          {/* 多选批量操作悬浮条 */}
+          {selectionMode && (
+            <div className="chat-selection-bar">
+              <span style={{ fontSize: 'var(--fs-subhead)', fontWeight: 700 }}>
+                已选中 {selectedMsgIds.size} 条记录
+              </span>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  type="button"
+                  className="btn btn-soft btn-sm"
+                  disabled={selectedMsgIds.size === 0}
+                  onClick={() => setForwardModalOpen(true)}
+                >
+                  <Forward size={13} aria-hidden="true" /> 合并转发
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-danger-soft btn-sm"
+                  disabled={selectedMsgIds.size === 0}
+                  onClick={handleDeleteSelectedMessages}
+                >
+                  <Trash2 size={13} aria-hidden="true" /> 本地删除
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-glass btn-sm"
+                  onClick={() => {
+                    setSelectionMode(false);
+                    setSelectedMsgIds(new Set());
+                  }}
+                >
+                  完成
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* 底部输入坞 */}
           <div className="composer-zone">
+            {mentionCandidates.length > 0 && (
+              <div className="mention-autocomplete-bar">
+                <span className="mention-ac-label">选择要 @提醒 的成员：</span>
+                {mentionCandidates.map((p) => (
+                  <button
+                    key={p.peerId}
+                    type="button"
+                    className="btn btn-soft btn-sm"
+                    onClick={() => insertMentionName(p.name)}
+                  >
+                    @{p.name}
+                  </button>
+                ))}
+              </div>
+            )}
             <div className="composer-pod">
               {replyingTo && (
                 <div className="composer-reply-bar">
@@ -4001,6 +4447,14 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                     title="打开多人实时协作白板"
                   >
                     <Palette size={14} aria-hidden="true" /> 白板
+                  </button>
+                  <button
+                    type="button"
+                    className="tool-pill"
+                    onClick={() => void handleSendClipboardSync()}
+                    title="读取当前剪贴板或输入框内容，同步给同房设备"
+                  >
+                    <Clipboard size={14} aria-hidden="true" /> 剪贴板
                   </button>
                   <button
                     type="button"
@@ -4315,6 +4769,55 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* 合并转发目标房间选择弹窗 */}
+      {forwardModalOpen && (
+        <div className="modal-overlay" onClick={() => setForwardModalOpen(false)}>
+          <div className="modal-sheet" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 420 }}>
+            <div className="modal-head">
+              <h3>转发选中消息至房间</h3>
+              <button
+                type="button"
+                className="btn btn-ghost btn-icon"
+                onClick={() => setForwardModalOpen(false)}
+                aria-label="关闭转发弹窗"
+              >
+                <X size={16} aria-hidden="true" />
+              </button>
+            </div>
+            <p style={{ margin: 0, fontSize: 13, color: 'var(--text-secondary)' }}>
+              将已选中的 {selectedMsgIds.size} 条文本摘要复制到剪贴板，并跳转进目标房间：
+            </p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 280, overflowY: 'auto' }}>
+              {[
+                ...savedFixedRooms.map((r) => ({ code: r.code, password: r.password || '', mode: 'fixed' as RoomMode, label: r.label })),
+                ...recentRooms
+                  .filter((r) => !savedFixedRooms.some((s) => s.code === r.code))
+                  .map((r) => ({ code: r.code, password: r.password || '', mode: r.mode, label: undefined })),
+              ]
+                .filter((r) => r.code !== roomCode)
+                .map((r) => (
+                  <button
+                    key={r.code}
+                    type="button"
+                    className="btn btn-glass"
+                    style={{ justifyContent: 'space-between' }}
+                    onClick={() => handleForwardToRoom(r.code, r.password, r.mode)}
+                  >
+                    <span className="mono">{r.label ? `${r.label} (#${r.code})` : `#${r.code}`}</span>
+                    <ArrowRight size={14} aria-hidden="true" />
+                  </button>
+                ))}
+              {savedFixedRooms.filter((r) => r.code !== roomCode).length === 0 &&
+                recentRooms.filter((r) => r.code !== roomCode).length === 0 && (
+                  <div style={{ padding: 14, textAlign: 'center', fontSize: 13, color: 'var(--text-muted)' }}>
+                    暂无其他可用最近/常驻房间
+                  </div>
+                )}
+            </div>
           </div>
         </div>
       )}

@@ -764,3 +764,75 @@ html[data-appearance='dark'] .file-kind-code {
   80% { transform: rotate(8deg); }
   100% { transform: rotate(0deg); }
 }
+
+/* @提及高亮、自动补全候选栏、多选悬浮操作条 */
+.msg-mention-tag {
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.bubble-self-highlight,
+.msg-item.self .msg-mention-tag {
+  color: var(--on-accent);
+  text-decoration: underline;
+}
+
+.msg-mention-tag.self {
+  display: inline-block;
+  padding: 0 5px;
+  border-radius: 6px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.msg-item.selecting {
+  cursor: pointer;
+  border-radius: var(--r-md);
+  padding: 4px 6px;
+}
+
+.msg-item.selecting.selected {
+  background: var(--accent-soft);
+}
+
+.msg-select-check {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.msg-select-check.checked {
+  color: var(--accent);
+}
+
+.chat-selection-bar {
+  max-width: 860px;
+  width: calc(100% - 32px);
+  margin: 0 auto 8px;
+  padding: 10px 14px;
+  border-radius: var(--r-md);
+  background: var(--surface-elevated);
+  box-shadow: var(--shadow-floating);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.mention-autocomplete-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 6px 10px;
+  border-radius: var(--r-sm);
+  background: var(--surface-elevated);
+  margin-bottom: 6px;
+}
+
+.mention-ac-label {
+  font-size: var(--fs-caption);
+  color: var(--text-muted);
+  font-weight: 600;
+}

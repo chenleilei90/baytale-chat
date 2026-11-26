@@ -1,10 +1,12 @@
 import type {
   AppearanceMode,
   BlockedPeer,
+  FavoriteItem,
   MyPickupRecord,
   RecentRoom,
   SavedFixedRoom,
   ThemeMode,
+  TransferRecord,
   UserProfile,
 } from '../types';
 import { generateRandomName, pickRandomPresetAvatar } from './avatar';
@@ -18,6 +20,9 @@ const KEY_PREFS = 'baychat_prefs_v1';
 const KEY_TAB_PEER_ID = 'baychat_tab_peer_id_v1';
 const KEY_BLOCKED_PEERS = 'baychat_blocked_peers_v1';
 const KEY_MY_PICKUPS = 'baychat_my_pickups_v1';
+const KEY_MUTED_ROOMS = 'baychat_muted_rooms_v1';
+const KEY_TRANSFER_RECORDS = 'baychat_transfer_records_v1';
+const KEY_FAVORITES = 'baychat_favorites_v1';
 
 // 为每个浏览器标签页分配独立 peerId（存在 sessionStorage），
 // 既保证 F5 刷新后身份连续，又彻底解决同一电脑开两个标签页进同房间互相顶号重连的 Bug！
@@ -39,6 +44,7 @@ export interface UserPrefs {
   imageSendMode: 'original' | 'compressed'; // 图片发送画质：原图无损 或 智能轻巧压缩
   soundEnabled: boolean; // 新消息提示音
   nearbyDiscoverable: boolean; // 大厅是否允许附近同 Wi-Fi 设备发现自己
+  desktopNotifications: boolean; // 是否启用浏览器桌面通知
 }
 
 const DEFAULT_PREFS: UserPrefs = {
@@ -47,6 +53,7 @@ const DEFAULT_PREFS: UserPrefs = {
   imageSendMode: 'original',
   soundEnabled: true,
   nearbyDiscoverable: true,
+  desktopNotifications: true,
 };
 
 function randomClientId(): string {
@@ -318,4 +325,182 @@ export function removeMyPickup(code: string): MyPickupRecord[] {
     // 忽略异常
   }
   return next;
+}
+
+// 修改已保存常驻房间的备注名称
+export function updateSavedFixedRoomLabel(code: string, label: string): SavedFixedRoom[] {
+  const list = loadSavedFixedRooms();
+  const cleanLabel = label.trim().slice(0, 24);
+  const next = list.map((r) =>
+    r.code === code ? { ...r, label: cleanLabel || undefined } : r
+  );
+  try {
+    localStorage.setItem(KEY_SAVED_ROOMS, JSON.stringify(next));
+  } catch {
+    // 忽略异常
+  }
+  return next;
+}
+
+// 单房间消息免打扰列表（小写房间码集合）
+export function loadMutedRooms(): string[] {
+  try {
+    const raw = localStorage.getItem(KEY_MUTED_ROOMS);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((c) => String(c).trim().toLowerCase()).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+export function isRoomMuted(roomCode?: string): boolean {
+  if (!roomCode) return false;
+  return loadMutedRooms().includes(roomCode.trim().toLowerCase());
+}
+
+export function toggleMutedRoom(roomCode: string): string[] {
+  const clean = roomCode.trim().toLowerCase();
+  if (!clean) return loadMutedRooms();
+  const cur = loadMutedRooms();
+  const next = cur.includes(clean) ? cur.filter((c) => c !== clean) : [clean, ...cur].slice(0, 100);
+  try {
+    localStorage.setItem(KEY_MUTED_ROOMS, JSON.stringify(next));
+  } catch {
+    // 忽略异常
+  }
+  return next;
+}
+
+// 本地文件传输历史记录（最多保留 150 条）
+export function loadTransferRecords(): TransferRecord[] {
+  try {
+    const raw = localStorage.getItem(KEY_TRANSFER_RECORDS);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return (parsed as TransferRecord[])
+      .filter((r) => Boolean(r?.id && r?.fileName))
+      .sort((a, b) => b.createdAt - a.createdAt);
+  } catch {
+    return [];
+  }
+}
+
+export function addTransferRecord(record: TransferRecord): TransferRecord[] {
+  const list = loadTransferRecords().filter((r) => r.id !== record.id);
+  const next = [record, ...list].slice(0, 150);
+  try {
+    localStorage.setItem(KEY_TRANSFER_RECORDS, JSON.stringify(next));
+  } catch {
+    // 忽略异常
+  }
+  return next;
+}
+
+export function removeTransferRecord(id: string): TransferRecord[] {
+  const next = loadTransferRecords().filter((r) => r.id !== id);
+  try {
+    localStorage.setItem(KEY_TRANSFER_RECORDS, JSON.stringify(next));
+  } catch {
+    // 忽略异常
+  }
+  return next;
+}
+
+export function clearTransferRecords(): TransferRecord[] {
+  try {
+    localStorage.removeItem(KEY_TRANSFER_RECORDS);
+  } catch {
+    // 忽略异常
+  }
+  return [];
+}
+
+// 本地消息与文件收藏夹（最多保留 200 条）
+export function loadFavorites(): FavoriteItem[] {
+  try {
+    const raw = localStorage.getItem(KEY_FAVORITES);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return (parsed as FavoriteItem[])
+      .filter((f) => Boolean(f?.id))
+      .sort((a, b) => b.createdAt - a.createdAt);
+  } catch {
+    return [];
+  }
+}
+
+export function addFavorite(item: FavoriteItem): FavoriteItem[] {
+  const list = loadFavorites().filter((f) => f.id !== item.id);
+  const next = [item, ...list].slice(0, 200);
+  try {
+    localStorage.setItem(KEY_FAVORITES, JSON.stringify(next));
+  } catch {
+    // 忽略异常
+  }
+  return next;
+}
+
+export function removeFavorite(id: string): FavoriteItem[] {
+  const next = loadFavorites().filter((f) => f.id !== id);
+  try {
+    localStorage.setItem(KEY_FAVORITES, JSON.stringify(next));
+  } catch {
+    // 忽略异常
+  }
+  return next;
+}
+
+export function clearFavorites(): FavoriteItem[] {
+  try {
+    localStorage.removeItem(KEY_FAVORITES);
+  } catch {
+    // 忽略异常
+  }
+  return [];
+}
+
+// 估算当前应用占用的本地存储字节数
+export function estimateLocalStorageBytes(): number {
+  let total = 0;
+  try {
+    const keys = [
+      KEY_PROFILE,
+      KEY_THEME,
+      KEY_APPEARANCE,
+      KEY_SAVED_ROOMS,
+      KEY_RECENT_ROOMS,
+      KEY_PREFS,
+      KEY_BLOCKED_PEERS,
+      KEY_MY_PICKUPS,
+      KEY_MUTED_ROOMS,
+      KEY_TRANSFER_RECORDS,
+      KEY_FAVORITES,
+    ];
+    for (const k of keys) {
+      const val = localStorage.getItem(k);
+      if (val) total += (k.length + val.length) * 2;
+    }
+  } catch {
+    return 0;
+  }
+  return total;
+}
+
+// 一键清理历史记录、最近访问、取件码、收藏与屏蔽名单（保留当前身份卡片）
+export function clearLocalCacheData(): void {
+  try {
+    [
+      KEY_RECENT_ROOMS,
+      KEY_MY_PICKUPS,
+      KEY_MUTED_ROOMS,
+      KEY_TRANSFER_RECORDS,
+      KEY_FAVORITES,
+    ].forEach((k) => localStorage.removeItem(k));
+  } catch {
+    // 忽略异常
+  }
 }

@@ -23,6 +23,9 @@ import {
   Mic,
   Reply,
   Undo2,
+  Bookmark,
+  CheckSquare,
+  Square,
 } from 'lucide-react';
 import type { ChatItem, FileTransferInfo } from '../types';
 import {
@@ -38,7 +41,13 @@ import { Avatar } from './Avatar';
 interface MessageListProps {
   items: ChatItem[];
   selfPeerId?: string;
+  selfName?: string;
   recalledTexts?: Record<string, string>;
+  isSelectionMode?: boolean;
+  selectedIds?: Set<string>;
+  onToggleSelect?: (msgId: string) => void;
+  onEnterSelectionMode?: (msgId: string) => void;
+  onFavoriteMessage?: (item: ChatItem) => void;
   onReEditRecalled?: (text: string) => void;
   onReactMessage: (msgId: string, emoji: string) => void;
   onReplyMessage: (item: ChatItem) => void;
@@ -70,7 +79,13 @@ const WEEKDAY_NAMES = ['星期日', '星期一', '星期二', '星期三', '星�
 export const MessageList: React.FC<MessageListProps> = ({
   items,
   selfPeerId,
+  selfName,
   recalledTexts,
+  isSelectionMode = false,
+  selectedIds,
+  onToggleSelect,
+  onEnterSelectionMode,
+  onFavoriteMessage,
   onReEditRecalled,
   onReactMessage,
   onReplyMessage,
@@ -181,12 +196,34 @@ export const MessageList: React.FC<MessageListProps> = ({
         const avatarPeerId = item.isSelf && selfPeerId ? selfPeerId : item.senderId;
         const isShaking = Boolean(shakePeerId && shakeNonce && (shakePeerId === avatarPeerId || shakePeerId === item.senderId));
 
+        const isSelected = Boolean(selectedIds?.has(item.id));
         return (
           <React.Fragment key={item.id}>
             {showTimeDivider && (
               <div className="msg-time-divider">{formatMessageDividerTime(item.timestamp)}</div>
             )}
-            <div className={`msg-item ${item.isSelf ? 'self' : 'other'}`}>
+            <div
+              id={`msg-${item.id}`}
+              className={`msg-item ${item.isSelf ? 'self' : 'other'} ${isSelectionMode ? 'selecting' : ''} ${isSelected ? 'selected' : ''}`}
+              onClick={
+                isSelectionMode && onToggleSelect
+                  ? () => onToggleSelect(item.id)
+                  : undefined
+              }
+            >
+              {isSelectionMode && (
+                <button
+                  type="button"
+                  className={`btn btn-ghost btn-icon msg-select-check ${isSelected ? 'checked' : ''}`}
+                  aria-label={isSelected ? '取消选中消息' : '选中消息'}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onToggleSelect?.(item.id);
+                  }}
+                >
+                  {isSelected ? <CheckSquare size={17} aria-hidden="true" /> : <Square size={17} aria-hidden="true" />}
+                </button>
+              )}
               <span
                 key={isShaking ? `shake_${shakeNonce}` : 'idle'}
                 className={`msg-avatar-wrap${isShaking ? ' nudge-shake' : ''}`}
@@ -273,6 +310,34 @@ export const MessageList: React.FC<MessageListProps> = ({
                     >
                       <Reply size={13} aria-hidden="true" />
                     </button>
+                    {onFavoriteMessage && (
+                      <button
+                        type="button"
+                        className="react-action-btn"
+                        onClick={() => {
+                          onFavoriteMessage(item);
+                          setActiveActionId(null);
+                        }}
+                        title="收藏"
+                        aria-label="收藏此消息"
+                      >
+                        <Bookmark size={13} aria-hidden="true" />
+                      </button>
+                    )}
+                    {onEnterSelectionMode && (
+                      <button
+                        type="button"
+                        className="react-action-btn"
+                        onClick={() => {
+                          onEnterSelectionMode(item.id);
+                          setActiveActionId(null);
+                        }}
+                        title="多选"
+                        aria-label="进入多选模式"
+                      >
+                        <CheckSquare size={13} aria-hidden="true" />
+                      </button>
+                    )}
                     {canRecall && (
                       <button
                         type="button"
@@ -302,7 +367,7 @@ export const MessageList: React.FC<MessageListProps> = ({
                         </div>
                       )}
                       <span style={{ filter: isSecretHidden ? 'blur(10px)' : 'none', userSelect: isSecretHidden ? 'none' : 'text' }}>
-                        {renderTextWithLinks(item.text || '')}
+                        {renderTextWithLinks(item.text || '', selfName)}
                       </span>
                       {isSecretHidden && (
                         <div className="secret-foil">
@@ -868,8 +933,10 @@ function formatMessageDividerTime(ts: number): string {
   return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日 ${clock}`;
 }
 
-function renderTextWithLinks(text: string): React.ReactNode {
+function renderTextWithLinks(text: string, selfName?: string): React.ReactNode {
   const parts = text.split(URL_REGEX);
+  const mentionRegex = /(@[^\s@#.,!?:;，。！？：；]+)/g;
+  const cleanSelf = (selfName || '').trim().toLowerCase();
   return parts.map((part, idx) => {
     if (part.startsWith('http://') || part.startsWith('https://')) {
       return (
@@ -878,7 +945,25 @@ function renderTextWithLinks(text: string): React.ReactNode {
         </a>
       );
     }
-    return <React.Fragment key={idx}>{part}</React.Fragment>;
+    const segs = part.split(mentionRegex);
+    return (
+      <React.Fragment key={idx}>
+        {segs.map((seg, sIdx) => {
+          if (seg.startsWith('@') && seg.length > 1) {
+            const isSelfMention = cleanSelf !== '' && seg.slice(1).toLowerCase() === cleanSelf;
+            return (
+              <span
+                key={sIdx}
+                className={`msg-mention-tag ${isSelfMention ? 'self' : ''}`}
+              >
+                {seg}
+              </span>
+            );
+          }
+          return <React.Fragment key={sIdx}>{seg}</React.Fragment>;
+        })}
+      </React.Fragment>
+    );
   });
 }
 

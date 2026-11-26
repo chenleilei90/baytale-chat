@@ -7,19 +7,27 @@ interface SwitchProps {
   onChange: (next: boolean) => void;
   label: string;
   description?: string;
+  disabled?: boolean;
 }
 
 // iOS 风格 51×31 零描边开关组件
-export const Switch: React.FC<SwitchProps> = ({ checked, onChange, label, description }) => {
+export const Switch: React.FC<SwitchProps> = ({
+  checked,
+  onChange,
+  label,
+  description,
+  disabled = false,
+}) => {
   return (
     <div
-      className="switch-row"
+      className={`switch-row ${disabled ? 'disabled' : ''}`}
       role="switch"
       aria-checked={checked}
-      tabIndex={0}
-      onClick={() => onChange(!checked)}
+      aria-disabled={disabled}
+      tabIndex={disabled ? -1 : 0}
+      onClick={() => !disabled && onChange(!checked)}
       onKeyDown={(e) => {
-        if (e.key === ' ' || e.key === 'Enter') {
+        if (!disabled && (e.key === ' ' || e.key === 'Enter')) {
           e.preventDefault();
           onChange(!checked);
         }

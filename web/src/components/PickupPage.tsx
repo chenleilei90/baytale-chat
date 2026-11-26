@@ -8,6 +8,7 @@ import {
   Lock,
   Package,
   RefreshCw,
+  Settings2,
 } from 'lucide-react';
 import type { AppearanceMode, PickupInfo, ThemeMode } from '../types';
 import {
@@ -16,7 +17,8 @@ import {
   fetchPickupInfo,
 } from '../lib/signaling';
 import { formatBytes, formatExpiryTime } from '../lib/platform';
-import { AppearancePicker, PalettePicker } from './Controls';
+import { loadUserPrefs, saveUserPrefs, type UserPrefs } from '../lib/storage';
+import { SettingsPopover } from './SettingsPopover';
 
 // 将长文件名拆分为可省略的主干与始终完整显示的扩展名
 function renderSplitFilename(name: string) {
@@ -61,6 +63,22 @@ export const PickupPage: React.FC<PickupPageProps> = ({
   const [needPassword, setNeedPassword] = useState(false);
   const [loading, setLoading] = useState(true);
   const [errorText, setErrorText] = useState('');
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [prefs, setPrefs] = useState<UserPrefs>(() => loadUserPrefs());
+
+  useEffect(() => {
+    if (!settingsOpen) return;
+    const onDocClick = () => setSettingsOpen(false);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setSettingsOpen(false);
+    };
+    window.addEventListener('click', onDocClick);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('click', onDocClick);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [settingsOpen]);
 
   const loadInfo = useCallback(
     async (pwd: string) => {
@@ -105,14 +123,35 @@ export const PickupPage: React.FC<PickupPageProps> = ({
     <div className="lobby-shell">
       <header className="top-glass-nav lobby-top-nav">
         <button type="button" className="btn btn-glass btn-sm lobby-touch-pill" onClick={onBackToLobby}>
-          <ArrowLeft size={14} aria-hidden="true" /> 返回大厅
+          <ArrowLeft size={14} aria-hidden="true" /> 返回
         </button>
         <div className="mono pickup-nav-title">
           取件码 #{code}
         </div>
-        <div className="lobby-theme-controls">
-          <AppearancePicker appearance={appearance} onSelect={onSelectAppearance} />
-          <PalettePicker theme={theme} onSelect={onSelectTheme} />
+        <div className="popover-anchor" onClick={(e) => e.stopPropagation()}>
+          <button
+            type="button"
+            className={`btn btn-sm ${settingsOpen ? 'btn-jelly' : 'btn-glass'} lobby-touch-pill`}
+            aria-label="外观与设置"
+            onClick={() => setSettingsOpen((v) => !v)}
+          >
+            <Settings2 size={14} aria-hidden="true" />
+            <span className="hide-mobile">外观</span>
+          </button>
+          {settingsOpen && (
+            <SettingsPopover
+              appearance={appearance}
+              theme={theme}
+              prefs={prefs}
+              onSelectAppearance={onSelectAppearance}
+              onSelectTheme={onSelectTheme}
+              onUpdatePrefs={(next) => {
+                saveUserPrefs(next);
+                setPrefs(next);
+              }}
+              onClose={() => setSettingsOpen(false)}
+            />
+          )}
         </div>
       </header>
 

@@ -442,27 +442,80 @@ export function buildCachedMediaUrl(code: string, mediaId: string, password: str
   return `${base}?password=${encodeURIComponent(password)}`;
 }
 
-// 上传普通历史附件到房间服务器限时缓存（受服务端 historyMaxFileBytes 限制，默认 100MB）
-export async function uploadCachedFile(
+// 上传普通历史附件到房间服务器限时缓存（支持 XHR 实时进度回调，受服务端 historyMaxFileBytes 限制）
+export function uploadCachedFile(
   code: string,
   password: string,
   file: Blob,
-  fileName: string
+  fileName: string,
+  onProgress?: (uploadedBytes: number) => void
 ): Promise<{ fileId: string; mediaId: string; fileName: string; mime: string; size: number }> {
-  const res = await fetch(`/api/rooms/${encodeURIComponent(code)}/files`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': file.type || 'application/octet-stream',
-      'X-Room-Password': password,
-      'X-File-Name': encodeURIComponent(fileName),
-    },
-    body: file,
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `/api/rooms/${encodeURIComponent(code)}/files`, true);
+    xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+    xhr.setRequestHeader('X-Room-Password', password);
+    xhr.setRequestHeader('X-File-Name', encodeURIComponent(fileName));
+    xhr.upload.onprogress = (ev) => {
+      if (ev.lengthComputable && onProgress) {
+        onProgress(Math.min(file.size, ev.loaded));
+      }
+    };
+    xhr.onload = () => {
+      let data: Record<string, unknown> = {};
+      try {
+        data = JSON.parse(xhr.responseText || '{}') as Record<string, unknown>;
+      } catch {
+        // 忽略非 JSON 响应
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        onProgress?.(file.size);
+        resolve(data as { fileId: string; mediaId: string; fileName: string; mime: string; size: number });
+      } else {
+        reject(
+          new ApiError(
+            xhr.status,
+            String(data.errorCode || 'UPLOAD_FAILED'),
+            String(data.error || '历史附件缓存上传失败')
+          )
+        );
+      }
+    };
+    xhr.onerror = () => reject(new ApiError(0, 'UPLOAD_FAILED', '历史附件缓存上传网络中断'));
+    xhr.onabort = () => reject(new ApiError(0, 'ABORTED', '历史附件上传已取消'));
+    xhr.send(file);
   });
-  const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-  if (!res.ok) {
-    throw new ApiError(res.status, String(data.errorCode || 'UPLOAD_FAILED'), String(data.error || '历史附件缓存上传失败'));
+}
+
+// 调整房间通用设置（允许随机进入等，对应 PUT /api/rooms/{code}/settings）
+export function updateRoomSettingsApi(
+  code: string,
+  opts: {
+    ownerToken?: string;
+    password?: string;
+    allowRandom?: boolean;
+    maxFileSizeMB?: number;
+    actorName?: string;
   }
-  return data as { fileId: string; mediaId: string; fileName: string; mime: string; size: number };
+): Promise<{ allowRandom?: boolean; maxFileSizeMB?: number }> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (opts.ownerToken) headers['X-Owner-Token'] = opts.ownerToken;
+  if (opts.password) headers['X-Room-Password'] = opts.password;
+  if (opts.actorName) headers['X-Actor-Name'] = encodeURIComponent(opts.actorName);
+  const body: Record<string, unknown> = {};
+  if (opts.allowRandom !== undefined) body.allowRandom = opts.allowRandom;
+  if (opts.maxFileSizeMB !== undefined) body.maxFileSizeMB = opts.maxFileSizeMB;
+  if (opts.actorName) body.actorName = opts.actorName;
+  return requestJSON<{ allowRandom?: boolean; maxFileSizeMB?: number }>(
+    `/api/rooms/${encodeURIComponent(code)}/settings`,
+    {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify(body),
+    }
+  );
 }
 
 // 构建历史附件限时缓存下载地址
@@ -667,6 +720,11 @@ export class SignalingClient {
   updateProfile(profile: PeerProfile): void {
     this.profile = profile;
     this.send({ type: 'profile_update', profile });
+  }
+
+  // 房主在线改密后原位刷新信令认证密码，避免触发 WS 断线清屏
+  updatePassword(nextPassword: string): void {
+    this.password = nextPassword;
   }
 
   cacheMessage(message: CachedMessage): void {
