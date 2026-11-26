@@ -276,8 +276,8 @@ fun TransferTab(
                                         val done = snap?.transferredBytes ?: primaryActive.transferredBytes
                                         if (primaryActive.fileSize > 0L) (done.toFloat() / primaryActive.fileSize.toFloat()).coerceIn(0f, 1f) else 0f
                                     }
-                                    primaryPartial != null && primaryPartial.fileSize > 0L ->
-                                        (primaryPartial.receivedBytes.toFloat() / primaryPartial.fileSize.toFloat()).coerceIn(0f, 1f)
+                                    primaryPartial != null && primaryPartial.totalBytes > 0L ->
+                                        (primaryPartial.savedBytes.toFloat() / primaryPartial.totalBytes.toFloat()).coerceIn(0f, 1f)
                                     else -> 0f
                                 }
                                 ChunkMatrixMonitorCard(
