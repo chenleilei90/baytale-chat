@@ -56,6 +56,14 @@ type ChatPacket =
       emoji: string;
     }
   | {
+      kind: 'nudge';
+      id: string;
+      targetPeerId: string;
+      targetName: string;
+      fromName: string;
+      timestamp: number;
+    }
+  | {
       kind: 'clip-sync';
       text: string;
       updatedAt: number;
@@ -208,6 +216,14 @@ export interface MeshCallbacks {
   onTyping: (peerId: string, isTyping: boolean) => void;
   onFunEffect?: (peerId: string, fxType: FunEffectType) => void;
   onReaction?: (peerId: string, msgId: string, emoji: string) => void;
+  onNudge?: (
+    peerId: string,
+    id: string,
+    targetPeerId: string,
+    targetName: string,
+    fromName: string,
+    timestamp: number
+  ) => void;
   onClipboardSync?: (peerId: string, text: string, updatedAt: number) => void;
   onRemoteAudioStream?: (peerId: string, stream: MediaStream | null) => void;
   onRemoteScreenStream?: (peerId: string, stream: MediaStream | null) => void;
@@ -779,6 +795,20 @@ export class WebRTCMeshManager {
     }
   }
 
+  // 广播 P2P「拍一拍」（不落服务端历史缓存）
+  broadcastNudge(
+    id: string,
+    targetPeerId: string,
+    targetName: string,
+    fromName: string,
+    timestamp: number
+  ): void {
+    const pkt: ChatPacket = { kind: 'nudge', id, targetPeerId, targetName, fromName, timestamp };
+    for (const session of this.sessions.values()) {
+      this.sendChatPacket(session, pkt);
+    }
+  }
+
   // 广播跨设备共享闪贴板文本
   broadcastClipboard(text: string, updatedAt: number): number {
     const pkt: ChatPacket = { kind: 'clip-sync', text, updatedAt };
@@ -1180,6 +1210,20 @@ export class WebRTCMeshManager {
       case 'reaction': {
         const r = pkt as Extract<ChatPacket, { kind: 'reaction' }>;
         this.callbacks.onReaction?.(session.peerId, r.msgId, r.emoji);
+        break;
+      }
+
+      case 'nudge': {
+        const n = pkt as Extract<ChatPacket, { kind: 'nudge' }>;
+        if (!n.id || !n.targetPeerId) break;
+        this.callbacks.onNudge?.(
+          session.peerId,
+          n.id,
+          n.targetPeerId,
+          n.targetName || '',
+          n.fromName || '',
+          n.timestamp || Date.now()
+        );
         break;
       }
 

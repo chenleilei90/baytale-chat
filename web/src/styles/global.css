@@ -1409,6 +1409,8 @@ button:not(:disabled):active,
   display: grid;
   grid-template-columns: repeat(8, 1fr);
   gap: 4px;
+  max-height: 240px;
+  overflow-y: auto;
   z-index: 80;
 }
 .emoji-cell {

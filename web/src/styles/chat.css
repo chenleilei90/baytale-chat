@@ -683,3 +683,25 @@ html[data-appearance='dark'] .file-kind-code {
     inset: -8px;
   }
 }
+
+.msg-avatar-wrap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.msg-avatar-wrap.nudge-shake {
+  animation: nudge-shake 600ms cubic-bezier(0.36, 0.07, 0.19, 0.97) both;
+}
+
+@keyframes nudge-shake {
+  0% { transform: rotate(0deg); }
+  20% { transform: rotate(-12deg); }
+  40% { transform: rotate(12deg); }
+  60% { transform: rotate(-8deg); }
+  80% { transform: rotate(8deg); }
+  100% { transform: rotate(0deg); }
+}

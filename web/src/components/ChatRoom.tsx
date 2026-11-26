@@ -92,6 +92,7 @@ import {
   triggerBlobDownload,
 } from '../lib/platform';
 import { decodeSecretText, launchScreenEffect } from '../lib/effects';
+import { EMOJI_LIST } from '../lib/emoji';
 import { ambientEngine, playPomodoroChime, type AmbientSoundType } from '../lib/ambient';
 import {
   buildZipArchive,
@@ -168,7 +169,6 @@ function formatLimitMB(mb: number): string {
   }
   return `${mb}MB`;
 }
-const QUICK_EMOJIS = ['😀', '😄', '😂', '🥰', '😎', '🤩', '👍', '👏', '🙏', '🎉', '🔥', '🚀', '✨', '💖', '🐱', '🌈'];
 const RETENTION_STEPS = [
   { days: 0, label: '阅后即焚' },
   { days: 1, label: '1天' },
@@ -272,6 +272,9 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
 
   const [pendingPaste, setPendingPaste] = useState<PendingPasteImage | null>(null);
   const [showEmoji, setShowEmoji] = useState(false);
+  const [nudgeShake, setNudgeShake] = useState<{ peerId: string; nonce: number } | null>(null);
+  const lastNudgeAtRef = useRef<number>(0);
+  const seenNudgeIdsRef = useRef<Set<string>>(new Set());
   const [cachePopoverOpen, setCachePopoverOpen] = useState(false);
   const [attachmentPopoverOpen, setAttachmentPopoverOpen] = useState(false);
   const [customLimitMBInput, setCustomLimitMBInput] = useState('');
@@ -616,6 +619,58 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       messageEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
   }, [messages.length, searchKeyword, filterTab]);
+
+  const handleNudgePeer = useCallback(
+    (targetPeerId: string, targetName: string) => {
+      const now = Date.now();
+      if (now - lastNudgeAtRef.current < 3000) {
+        onToast('操作太频繁');
+        return;
+      }
+      lastNudgeAtRef.current = now;
+      const isSelfTarget = targetPeerId === selfPeerId || targetPeerId === 'self';
+      const resolvedId = isSelfTarget ? selfPeerId : targetPeerId;
+      const resolvedName = isSelfTarget ? profileRef.current.name : targetName;
+      const id = `nudge_${now}_${Math.random().toString(36).slice(2, 7)}`;
+      seenNudgeIdsRef.current.add(id);
+      const text = isSelfTarget ? '我拍了拍自己' : `我拍了拍"${resolvedName}"`;
+      setMessages((prev) => [
+        ...prev,
+        {
+          id,
+          kind: 'system',
+          senderId: 'system',
+          senderName: '系统',
+          isSelf: false,
+          timestamp: now,
+          text,
+        },
+      ]);
+      setNudgeShake((prev) => ({ peerId: resolvedId, nonce: (prev?.nonce ?? 0) + 1 }));
+      meshRef.current?.broadcastNudge(id, resolvedId, resolvedName, profileRef.current.name, now);
+    },
+    [onToast, selfPeerId]
+  );
+
+  const handleInsertEmoji = useCallback((em: string) => {
+    const el = composerInputRef.current;
+    const start = el?.selectionStart ?? null;
+    const end = el?.selectionEnd ?? null;
+    setInputText((prev) => {
+      const s = start !== null ? Math.min(start, prev.length) : prev.length;
+      const e = end !== null ? Math.min(Math.max(s, end), prev.length) : s;
+      const next = prev.slice(0, s) + em + prev.slice(e);
+      const caret = s + em.length;
+      window.setTimeout(() => {
+        const cur = composerInputRef.current;
+        if (cur) {
+          cur.focus();
+          cur.setSelectionRange(caret, caret);
+        }
+      }, 0);
+      return next;
+    });
+  }, []);
 
   const appendSystemMessage = useCallback((text: string) => {
     setMessages((prev) => [
@@ -979,6 +1034,46 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       onReaction: (peerId, msgId, emoji) => {
         if (isBlockedPeerId(peerId)) return;
         toggleMessageReaction(msgId, emoji, peerId);
+      },
+      onNudge: (peerId, id, targetPeerId, targetName, fromName, timestamp) => {
+        if (isBlockedPeerId(peerId)) return;
+        if (seenNudgeIdsRef.current.has(id)) return;
+        seenNudgeIdsRef.current.add(id);
+        if (seenNudgeIdsRef.current.size > 500) {
+          seenNudgeIdsRef.current.clear();
+          seenNudgeIdsRef.current.add(id);
+        }
+        const isSelfTarget = targetPeerId === selfPeerId;
+        const isSenderSelfTarget = targetPeerId === peerId;
+        const senderLabel = peersRef.current[peerId]?.name || fromName || '伙伴';
+        const targetLabel = isSelfTarget
+          ? profileRef.current.name
+          : peersRef.current[targetPeerId]?.name || targetName || '伙伴';
+        const nudgeText = isSelfTarget
+          ? `"${senderLabel}" 拍了拍我`
+          : isSenderSelfTarget
+          ? `"${senderLabel}" 拍了拍自己`
+          : `"${senderLabel}" 拍了拍 "${targetLabel}"`;
+        setMessages((prev) => {
+          if (prev.some((m) => m.id === id)) return prev;
+          return [
+            ...prev,
+            {
+              id,
+              kind: 'system',
+              senderId: 'system',
+              senderName: '系统',
+              isSelf: false,
+              timestamp: timestamp || Date.now(),
+              text: nudgeText,
+            },
+          ];
+        });
+        const shakeTarget = isSelfTarget ? selfPeerId : targetPeerId;
+        setNudgeShake((prev) => ({ peerId: shakeTarget, nonce: (prev?.nonce ?? 0) + 1 }));
+        if (isSelfTarget && prefsRef.current.soundEnabled) {
+          playNoticeTone();
+        }
       },
       onClipboardSync: (peerId, text, updatedAt) => {
         if (isBlockedPeerId(peerId) || !text) return;
@@ -3551,7 +3646,11 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             ) : (
               <MessageList
                 items={visibleMessages}
+                selfPeerId={selfPeerId}
                 recalledTexts={recalledTexts}
+                onNudgeAvatar={handleNudgePeer}
+                shakePeerId={nudgeShake?.peerId}
+                shakeNonce={nudgeShake?.nonce}
                 onReEditRecalled={(text) => {
                   setInputText(text);
                   window.setTimeout(() => {
@@ -3697,15 +3796,12 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
 
               {showEmoji && (
                 <div className="emoji-palette">
-                  {QUICK_EMOJIS.map((em) => (
+                  {EMOJI_LIST.map((em) => (
                     <button
                       key={em}
                       type="button"
                       className="emoji-cell"
-                      onClick={() => {
-                        setInputText((prev) => prev + em);
-                        setShowEmoji(false);
-                      }}
+                      onClick={() => handleInsertEmoji(em)}
                       aria-label={`插入表情 ${em}`}
                     >
                       {em}

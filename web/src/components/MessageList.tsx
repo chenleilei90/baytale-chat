@@ -37,11 +37,15 @@ import { Avatar } from './Avatar';
 
 interface MessageListProps {
   items: ChatItem[];
+  selfPeerId?: string;
   recalledTexts?: Record<string, string>;
   onReEditRecalled?: (text: string) => void;
   onReactMessage: (msgId: string, emoji: string) => void;
   onReplyMessage: (item: ChatItem) => void;
   onRecallMessage: (msgId: string) => void;
+  onNudgeAvatar?: (peerId: string, name: string) => void;
+  shakePeerId?: string | null;
+  shakeNonce?: number;
   onAcceptFile: (
     peerId: string,
     transferId: string,
@@ -65,11 +69,15 @@ const WEEKDAY_NAMES = ['星期日', '星期一', '星期二', '星期三', '星�
 // 消息流：防窥密信卡、悬停贴纸回应/引用/2分钟撤回/重新编辑、居中时间胶囊、图片与语义文件卡
 export const MessageList: React.FC<MessageListProps> = ({
   items,
+  selfPeerId,
   recalledTexts,
   onReEditRecalled,
   onReactMessage,
   onReplyMessage,
   onRecallMessage,
+  onNudgeAvatar,
+  shakePeerId,
+  shakeNonce,
   onAcceptFile,
   onRejectFile,
   onCancelTransfer,
@@ -170,13 +178,25 @@ export const MessageList: React.FC<MessageListProps> = ({
           item.kind !== 'file' &&
           nowMs - item.timestamp <= RECALL_WINDOW_MS;
 
+        const avatarPeerId = item.isSelf && selfPeerId ? selfPeerId : item.senderId;
+        const isShaking = Boolean(shakePeerId && shakeNonce && (shakePeerId === avatarPeerId || shakePeerId === item.senderId));
+
         return (
           <React.Fragment key={item.id}>
             {showTimeDivider && (
               <div className="msg-time-divider">{formatMessageDividerTime(item.timestamp)}</div>
             )}
             <div className={`msg-item ${item.isSelf ? 'self' : 'other'}`}>
-              <Avatar name={item.senderName} avatar={item.senderAvatar} size={36} />
+              <span
+                key={isShaking ? `shake_${shakeNonce}` : 'idle'}
+                className={`msg-avatar-wrap${isShaking ? ' nudge-shake' : ''}`}
+                onDoubleClick={
+                  onNudgeAvatar ? () => onNudgeAvatar(avatarPeerId, item.senderName) : undefined
+                }
+                title={onNudgeAvatar ? '双击头像拍一拍' : undefined}
+              >
+                <Avatar name={item.senderName} avatar={item.senderAvatar} size={36} />
+              </span>
               <div className="msg-stack">
                 <div className="msg-header">
                   <span className="msg-sender-name">
