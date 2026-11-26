@@ -4293,7 +4293,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           </div>
 
           {typingNames.length > 0 && (
-            <div style={{ maxWidth: 860, width: '100%', margin: '0 auto', padding: '0 20px 4px', fontSize: 'var(--fs-footnote)', color: 'var(--accent)', fontWeight: 600 }}>
+            <div style={{ width: '100%', padding: '0 20px 4px', fontSize: 'var(--fs-footnote)', color: 'var(--accent)', fontWeight: 600 }}>
               {typingNames.join('、')} 正在输入中...
             </div>
           )}

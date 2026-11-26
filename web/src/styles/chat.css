@@ -242,10 +242,10 @@
   height: 26px;
 }
 
-/* 桌面端文本气泡行长收敛保护 */
+/* 桌面端文本气泡行长收敛保护（自适应大屏铺满比例） */
 @media (min-width: 881px) {
   .bubble-text {
-    max-width: 520px;
+    max-width: min(68%, 760px);
   }
 }
 
@@ -806,7 +806,7 @@ html[data-appearance='dark'] .file-kind-code {
 }
 
 .chat-selection-bar {
-  max-width: 860px;
+  max-width: none;
   width: calc(100% - 32px);
   margin: 0 auto 8px;
   padding: 10px 14px;
@@ -850,6 +850,13 @@ html[data-appearance='dark'] .file-kind-code {
   flex-direction: column;
   gap: 12px;
   overflow-y: auto;
+}
+
+@media (min-width: 1800px) {
+  .chat-side-bento,
+  .p2p-monitor-col {
+    width: 300px;
+  }
 }
 
 @media (max-width: 1179px) {

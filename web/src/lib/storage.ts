@@ -14,6 +14,7 @@ import { generateRandomName, pickRandomPresetAvatar } from './avatar';
 const KEY_PROFILE = 'baychat_profile_v1';
 const KEY_THEME = 'baychat_theme_v1';
 const KEY_APPEARANCE = 'baychat_appearance_v1';
+const KEY_GEEK_MIGRATED = 'baychat_geek_default_v1';
 const KEY_SAVED_ROOMS = 'baychat_fixed_rooms_v1';
 const KEY_RECENT_ROOMS = 'baychat_recent_rooms_v1';
 const KEY_PREFS = 'baychat_prefs_v1';
@@ -101,8 +102,22 @@ export function saveUserProfile(profile: UserProfile): void {
 const VALID_THEMES: ThemeMode[] = ['geek', 'air', 'mint', 'berry', 'peach', 'lime'];
 const VALID_APPEARANCES: AppearanceMode[] = ['system', 'light', 'dark'];
 
-// 读取强调色主题：全新访客默认 'geek'（极客青绿）；旧 'neon' 自动迁移为 'air'
+// 一次性迁移老浏览器默认外观至「极客青绿 + 深色」，后续用户手动切换可持久覆盖
+function ensureGeekDefaultMigration(): void {
+  try {
+    if (localStorage.getItem(KEY_GEEK_MIGRATED) === null) {
+      localStorage.setItem(KEY_THEME, 'geek');
+      localStorage.setItem(KEY_APPEARANCE, 'dark');
+      localStorage.setItem(KEY_GEEK_MIGRATED, '1');
+    }
+  } catch {
+    // 忽略隐私模式或存储异常
+  }
+}
+
+// 读取强调色主题：默认 'geek'（极客青绿）；旧 'neon' 自动迁移为 'air'
 export function loadTheme(): ThemeMode {
+  ensureGeekDefaultMigration();
   try {
     const saved = localStorage.getItem(KEY_THEME);
     if (saved === 'neon') {
@@ -129,8 +144,9 @@ export function saveTheme(theme: ThemeMode): void {
   }
 }
 
-// 读取外观模式偏好：全新访客默认 'dark' 匹配极客深海暗色工作台，已有偏好原样保留
+// 读取外观模式偏好：默认 'dark' 匹配极客深海暗色工作台，已有偏好原样保留
 export function loadAppearance(): AppearanceMode {
+  ensureGeekDefaultMigration();
   try {
     const saved = localStorage.getItem(KEY_APPEARANCE);
     if (saved && VALID_APPEARANCES.includes(saved as AppearanceMode)) {
