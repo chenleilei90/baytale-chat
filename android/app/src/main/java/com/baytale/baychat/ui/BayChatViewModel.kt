@@ -362,6 +362,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     private var awaitingInstallPermission: Boolean = false
     private var lastOtaStartRequestMs: Long = 0L
     private var dismissedUpdateVersionInSession: Int = 0
+    private var autoReenterAttempted: Boolean = false
     // 记录 peerId -> effectiveClientId 映射，避免成员离线后解除屏蔽仍残留拦截
     private val blockedPeerIdToClientId = ConcurrentHashMap<String, String>()
     private var lastForegroundBannerAt: Long = 0L
@@ -405,6 +406,54 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
             refreshPublicRooms()
             checkForAppUpdate(manual = false, bypassThrottle = true)
             startNearbyPolling()
+            autoReenterLastRoomIfNeeded()
+        }
+    }
+
+    // 只要用户未主动退房，冷启动或系统强杀重建后自动无感回到原房间
+    private fun autoReenterLastRoomIfNeeded() {
+        if (autoReenterAttempted) return
+        autoReenterAttempted = true
+        if (_uiState.value.lastRecoverableRoom == null) return
+        viewModelScope.launch {
+            // 留出 180ms 让冷启动深链、系统分享或通知直达 Intent 优先路由，避免抢占目标房间
+            delay(180L)
+            val snap = _uiState.value
+            if (snap.activeRoom != null) return@launch
+            if (snap.pendingShare.hasContent || snap.pendingJoinCode != null || snap.pendingAppAction != null) {
+                return@launch
+            }
+            val target = snap.lastRecoverableRoom ?: return@launch
+            runCatching { api.fetchRoomInfo(target.code) }
+                .onSuccess { info ->
+                    if (_uiState.value.activeRoom != null) return@onSuccess
+                    if (info.hasPassword) {
+                        if (target.password.isBlank()) return@onSuccess
+                        runCatching { api.verifyRoomPassword(info.code, target.password) }
+                            .onFailure { err ->
+                                if (err is ApiException && err.errorCode == "WRONG_PASSWORD") {
+                                    store.clearLastActiveRoom()
+                                    _uiState.update { it.copy(lastRecoverableRoom = null) }
+                                    showToast("上次房间 #${target.code} 密码已变更，请重新输入进入")
+                                }
+                                return@onSuccess
+                            }
+                    }
+                    _uiState.update { it.copy(lastRecoverableRoom = null) }
+                    enterRoomInternal(
+                        code = info.code,
+                        password = target.password,
+                        initialInfo = info,
+                        ownerToken = target.ownerToken,
+                    )
+                }
+                .onFailure { err ->
+                    if (err is ApiException && (err.errorCode == "ROOM_NOT_FOUND" || err.errorCode == "ROOM_EXPIRED")) {
+                        store.clearLastActiveRoom()
+                        _uiState.update { it.copy(lastRecoverableRoom = null) }
+                        showToast("上次房间 #${target.code} 已结束")
+                    }
+                }
         }
     }
 
@@ -529,6 +578,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         refreshPublicRooms()
         checkForAppUpdate(manual = false, bypassThrottle = true)
         startNearbyPolling()
+        autoReenterLastRoomIfNeeded()
     }
 
     fun onAppForegrounded() {
@@ -539,8 +589,13 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
             )
         }
         val fgState = _uiState.value
-        if (!fgState.roomMinimized && fgState.activeRoom != null) {
-            IncomingNotificationHelper.cancelMessageNotification(appContext)
+        if (fgState.activeRoom != null) {
+            if (!fgState.roomMinimized) {
+                IncomingNotificationHelper.cancelMessageNotification(appContext)
+            }
+            // 切回前台时立即探活或秒重连 WebSocket，同时确保前台保活通知在线
+            signaling?.notifyNetworkAvailable()
+            refreshForegroundBanner()
         }
         if (!_uiState.value.privacyAccepted) return
         startNearbyPolling()
@@ -569,8 +624,19 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun onAppBackgrounded() {
-        // 切入后台时立即中止未完成的语音录制，防止麦克风持续占用
+        // 切入后台时立即中止未完成的语音录制，并刷新当前活跃房间保活凭证与前台通知
         cancelVoiceRecording()
+        _uiState.value.activeRoom?.let { active ->
+            store.saveLastActiveRoom(
+                LastActiveRoom(
+                    code = active.roomCode,
+                    password = active.password,
+                    ownerToken = active.ownerToken,
+                    at = System.currentTimeMillis(),
+                )
+            )
+            refreshForegroundBanner()
+        }
         _uiState.update { it.copy(isAppForeground = false) }
         stopNearbyPolling()
     }
@@ -5941,8 +6007,8 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         private const val FOREGROUND_UPDATE_CHECK_INTERVAL_MS = 10L * 60L * 1000L
         // 发现页 15 秒 SWR 静默刷新过期阈值
         private const val DISCOVER_SWR_STALE_MS = 15_000L
-        // 最近活跃房间断线冷启动恢复窗口（10 分钟）
-        private const val LAST_ROOM_RECOVER_TTL_MS = 10L * 60L * 1000L
+        // 未主动退房时的自动重连与冷启动回房窗口（7 天）
+        private const val LAST_ROOM_RECOVER_TTL_MS = 7L * 24L * 60L * 60L * 1000L
         // B20：正在输入状态 6 秒自动超时清除
         private const val TYPING_TIMEOUT_MS = 6_000L
         // 最短与最长语音消息录制时长（1 秒 ~ 60 秒）
