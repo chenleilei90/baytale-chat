@@ -44,6 +44,9 @@ import com.baytale.baychat.core.model.PeerLinkStatus
 import com.baytale.baychat.core.model.PeerProfile
 import com.baytale.baychat.core.model.PickupInfo
 import com.baytale.baychat.core.model.PickupTransferProgress
+import com.baytale.baychat.core.model.PaperPlane
+import com.baytale.baychat.core.model.CreatePlaneRequest
+import com.baytale.baychat.core.model.PlaneFileMeta
 import com.baytale.baychat.core.model.RecentRoom
 import com.baytale.baychat.core.model.ReplyQuote
 import com.baytale.baychat.core.model.ReportRequest
@@ -70,6 +73,7 @@ import com.baytale.baychat.core.storage.MediaDownloadHelper
 import com.baytale.baychat.core.util.BaySoundPlayer
 import com.baytale.baychat.core.util.FormatUtils
 import com.baytale.baychat.core.util.TransferResumeUtils
+import com.baytale.baychat.core.util.classifyPlaneKind
 import com.baytale.baychat.core.webrtc.MeshCallbacks
 import com.baytale.baychat.core.webrtc.OutgoingFileSource
 import com.baytale.baychat.core.webrtc.WebRtcMeshManager
@@ -291,6 +295,11 @@ data class BayChatUiState(
     val recentEmojis: List<String> = emptyList(),
     val nudgedPeerId: String? = null,
     val nudgeNonce: Long = 0L,
+    // v1.4.0 纸飞机公开文件清单列表与状态
+    val planes: List<PaperPlane> = emptyList(),
+    val planesLoading: Boolean = false,
+    val planesError: String? = null,
+    val planesLastRefreshedAt: Long = 0L,
 ) {
     // B12：供 Activity 与导航判断当前是否保有活跃或后台挂起的房间会话
     val hasActiveRoom: Boolean
@@ -939,6 +948,183 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         val elapsed = System.currentTimeMillis() - current.publicRoomsLastRefreshedAt
         if (current.publicRooms.isEmpty() || elapsed >= staleMs) {
             refreshPublicRooms(silent = current.publicRooms.isNotEmpty())
+        }
+    }
+
+    // 纸飞机公开文件清单加载、放飞、免密/直通加入与举报
+    private suspend fun fetchPlanesInternal(silent: Boolean) {
+        if (!silent) {
+            _uiState.update { it.copy(planesLoading = true, planesError = null) }
+        } else {
+            _uiState.update { it.copy(planesError = null) }
+        }
+        runCatching { api.fetchPlanes(24) }
+            .onSuccess { resp ->
+                _uiState.update {
+                    it.copy(
+                        planes = resp.planes,
+                        planesLoading = false,
+                        planesError = null,
+                        planesLastRefreshedAt = System.currentTimeMillis(),
+                    )
+                }
+            }
+            .onFailure {
+                _uiState.update {
+                    it.copy(
+                        planesLoading = false,
+                        planesError = "网络异常，纸飞机列表加载失败",
+                    )
+                }
+            }
+    }
+
+    fun refreshPlanes(silent: Boolean = false) {
+        viewModelScope.launch {
+            fetchPlanesInternal(silent = silent)
+        }
+    }
+
+    fun refreshPlanesIfStale(staleMs: Long = DISCOVER_SWR_STALE_MS) {
+        val current = _uiState.value
+        val elapsed = System.currentTimeMillis() - current.planesLastRefreshedAt
+        if (current.planes.isEmpty() || elapsed >= staleMs) {
+            refreshPlanes(silent = current.planes.isNotEmpty())
+        }
+    }
+
+    fun planeCandidateFilesForActiveRoom(): List<PlaneFileMeta> {
+        val room = _uiState.value.activeRoom ?: return emptyList()
+        val seen = HashSet<String>()
+        val result = mutableListOf<PlaneFileMeta>()
+        for (i in room.messages.indices.reversed()) {
+            val m = room.messages[i]
+            if (m.kind != ChatKind.FILE && m.kind != ChatKind.IMAGE && m.kind != ChatKind.AUDIO) continue
+            val name = m.transfer?.fileName?.takeIf { it.isNotBlank() }
+                ?: m.caption?.takeIf { it.isNotBlank() }
+                ?: when (m.kind) {
+                    ChatKind.IMAGE -> "图片附件.png"
+                    ChatKind.AUDIO -> "语音消息.m4a"
+                    else -> ""
+                }
+            if (name.isBlank() || !seen.add(name)) continue
+            val mime = m.transfer?.mimeType ?: when (m.kind) {
+                ChatKind.IMAGE -> "image/*"
+                ChatKind.AUDIO -> "audio/*"
+                else -> ""
+            }
+            result.add(
+                PlaneFileMeta(
+                    name = name,
+                    size = m.transfer?.fileSize ?: 0L,
+                    kind = classifyPlaneKind(name, mime),
+                )
+            )
+            if (result.size >= 10) break
+        }
+        return result
+    }
+
+    fun createPlaneFromActiveRoom(
+        message: String,
+        files: List<PlaneFileMeta>,
+        allowEntry: Boolean,
+        onSuccess: () -> Unit,
+    ) {
+        val state = _uiState.value
+        val room = state.activeRoom ?: return
+        val hasPwd = room.password.isNotBlank() || room.roomInfo?.hasPassword == true
+        viewModelScope.launch {
+            runCatching {
+                api.createPlane(
+                    CreatePlaneRequest(
+                        clientId = state.profile.clientId,
+                        roomCode = room.roomCode,
+                        senderName = state.profile.name,
+                        senderAvatar = state.profile.avatar,
+                        message = message.trim(),
+                        files = files.take(5),
+                        allowEntry = allowEntry,
+                        ownerToken = if (allowEntry && hasPwd && room.isOwner) room.ownerToken else null,
+                        password = if (allowEntry && hasPwd && room.isOwner) room.password else null,
+                    )
+                )
+            }.onSuccess { created ->
+                _uiState.update { it.copy(planes = listOf(created) + it.planes.filterNot { p -> p.id == created.id }) }
+                showToast("纸飞机已放飞到大厅广场，24 小时内有效")
+                onSuccess()
+            }.onFailure { err ->
+                showToast(err.message ?: "放飞纸飞机失败")
+            }
+        }
+    }
+
+    fun joinFromPlane(
+        plane: PaperPlane,
+        onJoined: () -> Unit,
+        onPasswordExpired: () -> Unit,
+    ) {
+        viewModelScope.launch {
+            try {
+                val res = api.joinPlane(plane.id)
+                onJoined()
+                val current = _uiState.value.activeRoom
+                if (current != null && current.roomCode.equals(res.roomCode, ignoreCase = true)) {
+                    restoreRoom()
+                } else if (current != null) {
+                    _uiState.update {
+                        it.copy(
+                            pendingSwitchRoom = PendingSwitchRoom(
+                                targetCode = res.roomCode,
+                                password = res.password,
+                                source = "纸飞机",
+                            )
+                        )
+                    }
+                } else {
+                    joinRoomInternal(res.roomCode, res.password)
+                }
+            } catch (e: ApiException) {
+                if (e.errorCode == "PLANE_ENTRY_EXPIRED") {
+                    _uiState.update { st ->
+                        st.copy(
+                            planes = st.planes.map { if (it.id == plane.id) it.copy(allowEntry = false) else it },
+                            pendingJoinCode = plane.roomCode,
+                            lobbyNeedPassword = true,
+                            lobbyError = "房主已修改密码，请输入密码进入",
+                        )
+                    }
+                    showToast("房主已修改密码，请输入密码进入")
+                    onPasswordExpired()
+                } else if (e.errorCode == "PLANE_NOT_FOUND" || e.errorCode == "PLANE_EXPIRED") {
+                    _uiState.update { st -> st.copy(planes = st.planes.filterNot { it.id == plane.id }) }
+                    onJoined()
+                    showToast(e.message)
+                } else {
+                    showToast(e.message)
+                }
+            } catch (e: Exception) {
+                showToast(e.message ?: "通过纸飞机进入房间失败")
+            }
+        }
+    }
+
+    fun reportPlane(planeId: String, onDone: (Boolean) -> Unit) {
+        val clientId = _uiState.value.profile.clientId
+        viewModelScope.launch {
+            runCatching { api.reportPlane(planeId, clientId) }
+                .onSuccess { res ->
+                    if (res.deleted) {
+                        _uiState.update { st -> st.copy(planes = st.planes.filterNot { it.id == planeId }) }
+                        showToast("该纸飞机已被多名用户举报并移除")
+                    } else {
+                        showToast("已收到举报，系统将在累计达到阈值后自动清理")
+                    }
+                    onDone(res.deleted)
+                }
+                .onFailure { err ->
+                    showToast(err.message ?: "举报提交失败")
+                }
         }
     }
 
@@ -5198,11 +5384,24 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    // 收起房间至悬浮球，仅首次收起时给出一次性操作提示（随进随出）
     fun minimizeRoom() {
         cancelVoiceRecording()
-        if (_uiState.value.activeRoom != null) {
-            _uiState.update { it.copy(roomMinimized = true) }
-            showToast("房间已在后台保持连接与传输")
+        val state = _uiState.value
+        if (state.activeRoom != null) {
+            val shouldShowHint = !state.prefs.minimizeHintShown
+            if (shouldShowHint) {
+                store.setMinimizeHintShown(true)
+            }
+            _uiState.update {
+                it.copy(
+                    roomMinimized = true,
+                    prefs = if (shouldShowHint) it.prefs.copy(minimizeHintShown = true) else it.prefs,
+                )
+            }
+            if (shouldShowHint) {
+                showToast("房间已收起，连接与传输保持中。点悬浮球返回，在「聊天信息」里可退出房间")
+            }
         }
     }
 

@@ -222,8 +222,9 @@ class MainActivity : ComponentActivity() {
                     )
                 }
 
+                // 房间内按返回键直接收起至悬浮球，随进随出不弹窗打扰
                 BackHandler(enabled = uiState.activeRoom != null && !uiState.roomMinimized) {
-                    showLeaveConfirm = true
+                    viewModel.minimizeRoom()
                 }
 
                 Box(modifier = Modifier.fillMaxSize()) {
@@ -312,47 +313,21 @@ class MainActivity : ComponentActivity() {
                         )
                     }
 
-                    // 安全离开确认弹窗：适配「房间内按返回」与「大厅悬浮球退出」两种场景
+                    // 安全离开确认弹窗：仅用于悬浮球主动点击退出，房间内按返回键已直接收起
                     if (showLeaveConfirm && uiState.activeRoom != null) {
-                        val isMinimized = uiState.roomMinimized
                         val roomCode = uiState.activeRoom?.roomCode.orEmpty()
-                        if (isMinimized) {
-                            BayDialog(
-                                title = "确认退出后台房间 #$roomCode？",
-                                message = "退出后将立即断开当前 P2P 连接并终止后台进行中的文件传输。",
-                                confirmText = "彻底断开退出",
-                                onConfirm = {
-                                    showLeaveConfirm = false
-                                    viewModel.leaveRoom()
-                                },
-                                dismissText = "继续挂起",
-                                onDismiss = { showLeaveConfirm = false },
-                                destructive = true,
-                            )
-                        } else {
-                            BayDialog(
-                                title = "收起或离开房间 #$roomCode？",
-                                message = "「最小化挂起」可返回大厅并保持 P2P 连接与后台传输；「彻底断开离开」将结束当前连接。",
-                                confirmText = "最小化挂起",
-                                onConfirm = {
-                                    showLeaveConfirm = false
-                                    viewModel.minimizeRoom()
-                                },
-                                dismissText = "彻底断开离开",
-                                onDismiss = {
-                                    showLeaveConfirm = false
-                                    viewModel.leaveRoom()
-                                },
-                            ) {
-                                BayButton(
-                                    text = "取消，继续留在房间",
-                                    onClick = { showLeaveConfirm = false },
-                                    style = BayButtonStyle.Plain,
-                                    size = BayButtonSize.Small,
-                                    modifier = Modifier.fillMaxWidth(),
-                                )
-                            }
-                        }
+                        BayDialog(
+                            title = "确认退出后台房间 #$roomCode？",
+                            message = "退出后将立即断开当前 P2P 连接并终止后台进行中的文件传输。",
+                            confirmText = "彻底断开退出",
+                            onConfirm = {
+                                showLeaveConfirm = false
+                                viewModel.leaveRoom()
+                            },
+                            dismissText = "继续挂起",
+                            onDismiss = { showLeaveConfirm = false },
+                            destructive = true,
+                        )
                     }
                 }
             }

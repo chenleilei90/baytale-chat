@@ -4,9 +4,15 @@ import android.content.Context
 import android.net.Uri
 import android.os.SystemClock
 import com.baytale.baychat.core.model.AppReleaseInfo
+import com.baytale.baychat.core.model.CreatePlaneRequest
 import com.baytale.baychat.core.model.CreateRoomRequest
 import com.baytale.baychat.core.model.FileUploadResponse
 import com.baytale.baychat.core.model.MediaUploadResponse
+import com.baytale.baychat.core.model.PaperPlane
+import com.baytale.baychat.core.model.PlaneJoinResult
+import com.baytale.baychat.core.model.PlaneListResponse
+import com.baytale.baychat.core.model.PlaneReportRequest
+import com.baytale.baychat.core.model.PlaneReportResponse
 import com.baytale.baychat.core.model.PublicRoomsResponse
 import com.baytale.baychat.core.model.RandomRoomRequest
 import com.baytale.baychat.core.model.ReportRequest
@@ -203,6 +209,43 @@ class BayChatApi(
             .post(body)
             .build()
         executeRaw(req)
+    }
+
+    // 纸飞机公开文件清单接口
+    suspend fun fetchPlanes(limit: Int = 24): PlaneListResponse = withContext(Dispatchers.IO) {
+        val req = Request.Builder()
+            .url("${baseUrl()}/api/planes?limit=$limit")
+            .get()
+            .build()
+        executeJson(req)
+    }
+
+    suspend fun createPlane(request: CreatePlaneRequest): PaperPlane = withContext(Dispatchers.IO) {
+        val body = json.encodeToString(CreatePlaneRequest.serializer(), request).toRequestBody(jsonMediaType)
+        val req = Request.Builder()
+            .url("${baseUrl()}/api/planes")
+            .post(body)
+            .build()
+        executeJson(req)
+    }
+
+    suspend fun joinPlane(planeId: String): PlaneJoinResult = withContext(Dispatchers.IO) {
+        val emptyBody = ByteArray(0).toRequestBody(jsonMediaType)
+        val req = Request.Builder()
+            .url("${baseUrl()}/api/planes/${encodePath(planeId)}/join")
+            .post(emptyBody)
+            .build()
+        executeJson(req)
+    }
+
+    suspend fun reportPlane(planeId: String, clientId: String): PlaneReportResponse = withContext(Dispatchers.IO) {
+        val body = json.encodeToString(PlaneReportRequest.serializer(), PlaneReportRequest(clientId))
+            .toRequestBody(jsonMediaType)
+        val req = Request.Builder()
+            .url("${baseUrl()}/api/planes/${encodePath(planeId)}/report")
+            .post(body)
+            .build()
+        executeJson(req)
     }
 
     suspend fun uploadCachedMedia(

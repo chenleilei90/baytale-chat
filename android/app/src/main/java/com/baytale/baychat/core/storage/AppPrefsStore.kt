@@ -38,6 +38,7 @@ data class AppUserPrefs(
     val acceptClipShare: Boolean = true,
     val onboardingDone: Boolean = false,
     val notificationAsked: Boolean = false,
+    val minimizeHintShown: Boolean = false,
 )
 
 // 本地偏好、传输记录与身份持久化仓库（全部存于应用私有 SharedPreferences，已禁用系统云备份）
@@ -120,6 +121,7 @@ class AppPrefsStore(context: Context) {
             acceptClipShare = sp.getBoolean(KEY_ACCEPT_CLIP_SHARE, true),
             onboardingDone = sp.getBoolean(KEY_ONBOARDING_DONE, false),
             notificationAsked = sp.getBoolean(KEY_NOTIFICATION_ASKED, false),
+            minimizeHintShown = sp.getBoolean(KEY_MINIMIZE_HINT_SHOWN, false),
         )
     }
 
@@ -140,6 +142,7 @@ class AppPrefsStore(context: Context) {
             .putBoolean(KEY_ACCEPT_CLIP_SHARE, prefs.acceptClipShare)
             .putBoolean(KEY_ONBOARDING_DONE, prefs.onboardingDone)
             .putBoolean(KEY_NOTIFICATION_ASKED, prefs.notificationAsked)
+            .putBoolean(KEY_MINIMIZE_HINT_SHOWN, prefs.minimizeHintShown)
             .apply()
     }
 
@@ -185,6 +188,11 @@ class AppPrefsStore(context: Context) {
 
     fun setNotificationAsked(asked: Boolean) {
         sp.edit().putBoolean(KEY_NOTIFICATION_ASKED, asked).apply()
+    }
+
+    // 记录「收起房间」一次性引导提示已展示
+    fun setMinimizeHintShown(shown: Boolean) {
+        sp.edit().putBoolean(KEY_MINIMIZE_HINT_SHOWN, shown).apply()
     }
 
     fun loadSavedRooms(): List<SavedFixedRoom> {
@@ -564,6 +572,7 @@ class AppPrefsStore(context: Context) {
         private const val KEY_ACCEPT_CLIP_SHARE = "accept_clip_share_v1"
         private const val KEY_ONBOARDING_DONE = "onboarding_done_v1"
         private const val KEY_NOTIFICATION_ASKED = "notification_asked_v1"
+        private const val KEY_MINIMIZE_HINT_SHOWN = "minimize_hint_shown_v1"
         private const val KEY_BLOCKED_CLIENTS = "blocked_clients_v1"
         private const val KEY_MY_PICKUPS = "my_pickups_v1"
         private const val KEY_LAST_ACTIVE_ROOM = "last_active_room_v1"

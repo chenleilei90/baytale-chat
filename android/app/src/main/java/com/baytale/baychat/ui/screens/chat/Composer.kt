@@ -56,6 +56,7 @@ import androidx.compose.material.icons.rounded.Keyboard
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.PhotoCamera
 import androidx.compose.material.icons.rounded.PhotoLibrary
+import androidx.compose.material.icons.rounded.Send
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -123,6 +124,7 @@ fun Composer(
     showEmojiPanel: Boolean,
     onShowEmojiPanelChange: (Boolean) -> Unit,
     onOpenFavoritesPicker: () -> Unit,
+    onOpenPlaneComposer: () -> Unit,
     inputFocusRequester: FocusRequester,
     replyingTo: ReplyQuote?,
     vm: BayChatViewModel,
@@ -691,7 +693,17 @@ fun Composer(
                         },
                         modifier = Modifier.weight(1f),
                     )
-                    Spacer(modifier = Modifier.weight(2f))
+                    AttachmentGridItem(
+                        icon = Icons.Rounded.Send,
+                        label = "纸飞机",
+                        tint = colors.accent,
+                        onClick = {
+                            onShowAttachmentPanelChange(false)
+                            onOpenPlaneComposer()
+                        },
+                        modifier = Modifier.weight(1f),
+                    )
+                    Spacer(modifier = Modifier.weight(1f))
                 }
             }
         }

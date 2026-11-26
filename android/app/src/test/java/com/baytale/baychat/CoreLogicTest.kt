@@ -5,6 +5,7 @@ import com.baytale.baychat.core.model.SignalEnvelope
 import com.baytale.baychat.core.network.OutboundSignalQueue
 import com.baytale.baychat.core.util.FormatUtils
 import com.baytale.baychat.core.util.TransferResumeUtils
+import com.baytale.baychat.core.util.classifyPlaneKind
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -196,5 +197,17 @@ class CoreLogicTest {
             "\"小红\" 拍了拍 \"小刚\"",
             FormatUtils.formatNudgeText("小红", "小刚", isSelfSender = false, isSelfTarget = false, isSenderTargetSelf = false),
         )
+    }
+
+    @Test
+    fun testClassifyPlaneKindCoversAllVariants() {
+        assertEquals("apk", classifyPlaneKind("BayChat-v1.4.0.apk"))
+        assertEquals("image", classifyPlaneKind("photo.webp", "image/webp"))
+        assertEquals("video", classifyPlaneKind("clip.mp4"))
+        assertEquals("audio", classifyPlaneKind("voice.m4a"))
+        assertEquals("archive", classifyPlaneKind("backup.7z"))
+        assertEquals("doc", classifyPlaneKind("manual.pdf"))
+        assertEquals("doc", classifyPlaneKind("notes.md"))
+        assertEquals("file", classifyPlaneKind("installer.bin"))
     }
 }

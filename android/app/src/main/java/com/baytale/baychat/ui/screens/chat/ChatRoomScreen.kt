@@ -121,6 +121,7 @@ import com.baytale.baychat.ui.design.BayTextField
 import com.baytale.baychat.ui.design.SheetAction
 import com.baytale.baychat.ui.design.bayClickable
 import com.baytale.baychat.ui.sheets.FavoritesSheet
+import com.baytale.baychat.ui.sheets.PlaneComposerSheet
 import com.baytale.baychat.ui.theme.BayShapes
 import com.baytale.baychat.ui.theme.BaySpacing
 import com.baytale.baychat.ui.theme.BayTheme
@@ -157,6 +158,7 @@ fun ChatRoomScreen(
     var showAttachmentPanel by rememberSaveable(room.roomCode) { mutableStateOf(false) }
     var showEmojiPanel by rememberSaveable(room.roomCode) { mutableStateOf(false) }
     var showFavoritesPicker by rememberSaveable(room.roomCode) { mutableStateOf(false) }
+    var showPlaneComposer by rememberSaveable(room.roomCode) { mutableStateOf(false) }
     var voiceMode by rememberSaveable(room.roomCode) { mutableStateOf(false) }
     var actionTargetMessageId by rememberSaveable(room.roomCode) { mutableStateOf<String?>(null) }
     var actionTargetAnchorRect by remember { mutableStateOf(Rect.Zero) }
@@ -1169,6 +1171,7 @@ fun ChatRoomScreen(
                     showEmojiPanel = showEmojiPanel,
                     onShowEmojiPanelChange = { showEmojiPanel = it },
                     onOpenFavoritesPicker = { showFavoritesPicker = true },
+                    onOpenPlaneComposer = { showPlaneComposer = true },
                     inputFocusRequester = inputFocusRequester,
                     replyingTo = room.replyingTo,
                     vm = vm,
@@ -1195,6 +1198,7 @@ fun ChatRoomScreen(
                 showRoomInfo = false
                 showInviteSheet = true
             },
+            onOpenPlaneComposer = { showPlaneComposer = true },
             onJumpToMessage = { msgId -> jumpAndHighlightMessage(msgId) },
             onRequestLeaveRoom = { showLeaveRoomConfirm = true },
             onDismiss = { showRoomInfo = false },
@@ -1465,6 +1469,28 @@ fun ChatRoomScreen(
             onDismiss = { showQuickSwitchSheet = false },
             title = "切换房间与快捷操作",
             actions = quickActions,
+        )
+    }
+
+    if (showPlaneComposer) {
+        val candidateFiles = remember(room.messages.size, room.roomCode) {
+            vm.planeCandidateFilesForActiveRoom()
+        }
+        PlaneComposerSheet(
+            roomCode = room.roomCode,
+            hasPassword = room.password.isNotBlank() || room.roomInfo?.hasPassword == true,
+            isOwner = room.isOwner,
+            candidateFiles = candidateFiles,
+            onConfirm = { msg, files, allowEntry ->
+                vm.createPlaneFromActiveRoom(
+                    message = msg,
+                    files = files,
+                    allowEntry = allowEntry,
+                    onSuccess = { showPlaneComposer = false },
+                )
+            },
+            onDismiss = { showPlaneComposer = false },
+            onToast = { vm.showToast(it) },
         )
     }
 }

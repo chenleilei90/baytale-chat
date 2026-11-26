@@ -59,6 +59,7 @@ import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.SearchOff
+import androidx.compose.material.icons.rounded.Send
 import androidx.compose.material.icons.rounded.TouchApp
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -141,6 +142,7 @@ fun RoomInfoScreen(
     room: ActiveRoomSession,
     vm: BayChatViewModel,
     onOpenInvite: () -> Unit,
+    onOpenPlaneComposer: () -> Unit,
     onJumpToMessage: (String) -> Unit,
     onRequestLeaveRoom: () -> Unit,
     onDismiss: () -> Unit,
@@ -453,7 +455,7 @@ fun RoomInfoScreen(
                         }
                     }
 
-                    // 3. 查找聊天记录、导出与悬浮挂起
+                    // 3. 查找聊天记录、放飞纸飞机、导出与悬浮挂起
                     BayGroup {
                         BayListRow(
                             icon = Icons.Rounded.Search,
@@ -461,6 +463,17 @@ fun RoomInfoScreen(
                             trailing = RowTrailing.Chevron,
                             showDivider = true,
                             onClick = { showHistorySearch = true },
+                        )
+                        BayListRow(
+                            icon = Icons.Rounded.Send,
+                            title = "放飞纸飞机（分享房间文件）",
+                            subtitle = "公开房间内待分享文件清单，他人点开即可进房下载",
+                            trailing = RowTrailing.Chevron,
+                            showDivider = true,
+                            onClick = {
+                                onDismiss()
+                                onOpenPlaneComposer()
+                            },
                         )
                         BayListRow(
                             icon = Icons.Rounded.Download,

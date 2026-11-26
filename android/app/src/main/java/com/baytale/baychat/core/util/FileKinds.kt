@@ -95,3 +95,18 @@ fun classifyFile(fileName: String, mimeType: String? = null): BayFileKind {
         else -> BayFileKind.OTHER
     }
 }
+
+/**
+ * 将本地文件类型映射为服务端纸飞机元数据的精简分类标识（image / video / audio / archive / doc / apk / file）。
+ */
+fun classifyPlaneKind(fileName: String, mimeType: String? = null): String {
+    return when (classifyFile(fileName, mimeType)) {
+        BayFileKind.IMAGE -> "image"
+        BayFileKind.VIDEO -> "video"
+        BayFileKind.AUDIO -> "audio"
+        BayFileKind.ARCHIVE -> "archive"
+        BayFileKind.PDF, BayFileKind.DOCUMENT -> "doc"
+        BayFileKind.APK -> "apk"
+        BayFileKind.OTHER -> "file"
+    }
+}

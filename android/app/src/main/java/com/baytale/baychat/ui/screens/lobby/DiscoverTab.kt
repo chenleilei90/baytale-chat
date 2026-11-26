@@ -27,7 +27,9 @@ import androidx.compose.material.icons.rounded.Explore
 import androidx.compose.material.icons.rounded.Group
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Send
 import androidx.compose.material.icons.rounded.Shuffle
+import androidx.compose.material.icons.rounded.VpnKey
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -58,12 +60,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.baytale.baychat.core.model.PaperPlane
 import com.baytale.baychat.core.model.RoomSummary
 import com.baytale.baychat.core.util.BayHaptic
 import com.baytale.baychat.core.util.FormatUtils
 import com.baytale.baychat.core.util.stripLeadingEmoji
 import com.baytale.baychat.ui.BayChatUiState
 import com.baytale.baychat.ui.BayChatViewModel
+import com.baytale.baychat.ui.design.BayAvatar
 import com.baytale.baychat.ui.design.BayBottomSheet
 import com.baytale.baychat.ui.design.BayButton
 import com.baytale.baychat.ui.design.BayButtonSize
@@ -74,7 +78,10 @@ import com.baytale.baychat.ui.design.BayEmptyState
 import com.baytale.baychat.ui.design.BayIconButton
 import com.baytale.baychat.ui.design.BayIconStyle
 import com.baytale.baychat.ui.design.BayLargeTitleHeader
+import com.baytale.baychat.ui.design.BaySegmented
 import com.baytale.baychat.ui.design.BayTextField
+import com.baytale.baychat.ui.sheets.PlaneViewerSheet
+import com.baytale.baychat.ui.sheets.rememberPlaneKindVisual
 import com.baytale.baychat.ui.theme.BayShapes
 import com.baytale.baychat.ui.theme.BaySpacing
 import com.baytale.baychat.ui.theme.BayTheme
@@ -124,24 +131,38 @@ fun DiscoverTab(
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
 
+    var selectedSubTab by rememberSaveable { mutableIntStateOf(0) } // 0 = 公开房间（默认），1 = 纸飞机
     var searchKeyword by rememberSaveable { mutableStateOf("") }
     var showCreatePublicSheet by remember { mutableStateOf(false) }
+    var viewingPlane by remember { mutableStateOf<PaperPlane?>(null) }
+    var joiningPlane by remember { mutableStateOf(false) }
     var pullRefreshing by remember { mutableStateOf(false) }
     var lastPullAt by remember { mutableLongStateOf(0L) }
     var pullStartedAt by remember { mutableLongStateOf(0L) }
-    val latestLoading by rememberUpdatedState(state.publicRoomsLoading)
+    val latestRoomsLoading by rememberUpdatedState(state.publicRoomsLoading)
+    val latestPlanesLoading by rememberUpdatedState(state.planesLoading)
     val latestHapticEnabled by rememberUpdatedState(state.prefs.hapticEnabled)
 
     LaunchedEffect(Unit) {
         vm.refreshPublicRoomsIfStale()
     }
 
-    // UX-7：等待真实公开房刷新结束（最短 350ms 防闪烁，最长 8000ms 超时兜底）
-    LaunchedEffect(pullRefreshing) {
+    LaunchedEffect(selectedSubTab) {
+        if (selectedSubTab == 1) {
+            vm.refreshPlanesIfStale()
+        }
+    }
+
+    // UX-7：等待真实刷新结束（最短 350ms 防闪烁，最长 8000ms 超时兜底）
+    LaunchedEffect(pullRefreshing, selectedSubTab) {
         if (!pullRefreshing) return@LaunchedEffect
         delay(120L)
         withTimeoutOrNull(DISCOVER_REFRESH_TIMEOUT_MS) {
-            snapshotFlow { latestLoading }.first { !it }
+            if (selectedSubTab == 1) {
+                snapshotFlow { latestPlanesLoading }.first { !it }
+            } else {
+                snapshotFlow { latestRoomsLoading }.first { !it }
+            }
         }
         val elapsed = System.currentTimeMillis() - pullStartedAt
         if (elapsed < DISCOVER_MIN_REFRESH_MS) {
@@ -164,10 +185,26 @@ fun DiscoverTab(
         }
     }
 
+    val filteredPlanes = remember(state.planes, searchKeyword) {
+        val q = searchKeyword.trim()
+        if (q.isEmpty()) {
+            state.planes
+        } else {
+            state.planes.filter { plane ->
+                plane.roomCode.contains(q, ignoreCase = true) ||
+                    plane.senderName.contains(q, ignoreCase = true) ||
+                    plane.message.contains(q, ignoreCase = true) ||
+                    plane.files.any { it.name.contains(q, ignoreCase = true) }
+            }
+        }
+    }
+
     Column(modifier = modifier.fillMaxSize()) {
         BayLargeTitleHeader(
             title = "发现",
-            subtitle = if (state.publicRooms.isNotEmpty()) {
+            subtitle = if (selectedSubTab == 1) {
+                "纸飞机 · 公开的文件分享（24 小时有效）"
+            } else if (state.publicRooms.isNotEmpty()) {
                 "当前 ${state.publicRooms.size} 个公开房间"
             } else {
                 "探索免密公开交流房间"
@@ -193,6 +230,19 @@ fun DiscoverTab(
             },
         )
 
+        // 分段切换：已有「公开房间」居中为默认，次级「纸飞机」放在其后
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = BaySpacing.lg, vertical = BaySpacing.xs),
+        ) {
+            BaySegmented(
+                options = listOf("公开房间", "纸飞机"),
+                selected = selectedSubTab,
+                onSelect = { selectedSubTab = it },
+            )
+        }
+
         // 本地关键词搜索栏（UX-32：配置 Search 动作收起键盘）
         Box(
             modifier = Modifier
@@ -202,7 +252,7 @@ fun DiscoverTab(
             BayTextField(
                 value = searchKeyword,
                 onValueChange = { searchKeyword = it.take(60) },
-                placeholder = "搜索房间口令或主题关键词",
+                placeholder = if (selectedSubTab == 1) "搜索文件名、留言或房间口令" else "搜索房间口令或主题关键词",
                 leadingIcon = Icons.Rounded.Search,
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                 keyboardActions = KeyboardActions(
@@ -240,14 +290,100 @@ fun DiscoverTab(
                     lastPullAt = now
                     pullStartedAt = now
                     pullRefreshing = true
-                    vm.refreshPublicRooms(silent = false)
+                    if (selectedSubTab == 1) {
+                        vm.refreshPlanes(silent = false)
+                    } else {
+                        vm.refreshPublicRooms(silent = false)
+                    }
                 }
             },
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth(),
         ) {
-            if (filteredRooms.isEmpty()) {
+            if (selectedSubTab == 1) {
+                if (filteredPlanes.isEmpty()) {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(vertical = BaySpacing.xl),
+                    ) {
+                        item {
+                            when {
+                                state.planesLoading -> {
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = BaySpacing.xxxl),
+                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                        verticalArrangement = Arrangement.spacedBy(BaySpacing.md),
+                                    ) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(28.dp),
+                                            color = colors.accent,
+                                            strokeWidth = 2.5.dp,
+                                            strokeCap = StrokeCap.Round,
+                                        )
+                                        Text(
+                                            text = "正在加载纸飞机…",
+                                            style = BayType.subhead,
+                                            color = colors.textSecondary,
+                                        )
+                                    }
+                                }
+                                state.planesError != null -> {
+                                    BayEmptyState(
+                                        icon = Icons.Rounded.ErrorOutline,
+                                        title = "纸飞机加载失败",
+                                        message = state.planesError,
+                                        actionLabel = "重新加载",
+                                        onAction = { vm.refreshPlanes(silent = false) },
+                                    )
+                                }
+                                searchKeyword.isNotBlank() -> {
+                                    BayEmptyState(
+                                        icon = Icons.Rounded.Search,
+                                        title = "未找到匹配的纸飞机",
+                                        message = "换个文件名、留言或房间号试试。",
+                                        actionLabel = "清空搜索",
+                                        onAction = { searchKeyword = "" },
+                                    )
+                                }
+                                else -> {
+                                    BayEmptyState(
+                                        icon = Icons.Rounded.Send,
+                                        title = "暂无公开纸飞机",
+                                        message = "进入任意房间后，可在「聊天信息」或附件栏点「放飞纸飞机（分享房间文件）」。",
+                                        actionLabel = "刷新",
+                                        onAction = { vm.refreshPlanes(silent = false) },
+                                    )
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(
+                            start = BaySpacing.lg,
+                            end = BaySpacing.lg,
+                            top = BaySpacing.xs,
+                            bottom = BaySpacing.xxl,
+                        ),
+                        verticalArrangement = Arrangement.spacedBy(BaySpacing.md),
+                    ) {
+                        items(
+                            items = filteredPlanes,
+                            key = { it.id },
+                        ) { plane ->
+                            PaperPlaneCard(
+                                plane = plane,
+                                enabled = !state.lobbyBusy,
+                                onClick = { viewingPlane = plane },
+                            )
+                        }
+                    }
+                }
+            } else if (filteredRooms.isEmpty()) {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(vertical = BaySpacing.xl),
@@ -345,6 +481,190 @@ fun DiscoverTab(
             },
             onDismiss = { showCreatePublicSheet = false },
         )
+    }
+
+    viewingPlane?.let { targetPlane ->
+        PlaneViewerSheet(
+            plane = targetPlane,
+            joining = joiningPlane,
+            onJoin = {
+                if (joiningPlane) return@PlaneViewerSheet
+                joiningPlane = true
+                vm.joinFromPlane(
+                    plane = targetPlane,
+                    onJoined = {
+                        joiningPlane = false
+                        viewingPlane = null
+                    },
+                    onPasswordExpired = {
+                        joiningPlane = false
+                        viewingPlane = null
+                        nav.switchTab(0)
+                    },
+                )
+            },
+            onReport = {
+                vm.reportPlane(targetPlane.id) {
+                    viewingPlane = null
+                }
+            },
+            onDismiss = { if (!joiningPlane) viewingPlane = null },
+        )
+    }
+}
+
+@Composable
+private fun PaperPlaneCard(
+    plane: PaperPlane,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    val colors = BayTheme.colors
+    BayCard(
+        modifier = Modifier
+            .fillMaxWidth()
+            .graphicsLayer { alpha = if (enabled) 1f else 0.55f },
+        onClick = if (enabled) onClick else null,
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(BaySpacing.sm)) {
+            // 文件清单主体展示
+            if (plane.files.isNotEmpty()) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    plane.files.take(3).forEach { file ->
+                        val visual = rememberPlaneKindVisual(file.kind)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(BayShapes.xsShape)
+                                .background(colors.fill)
+                                .padding(horizontal = BaySpacing.sm, vertical = 7.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(BaySpacing.sm),
+                        ) {
+                            Icon(
+                                imageVector = visual.icon,
+                                contentDescription = visual.label,
+                                tint = visual.tint,
+                                modifier = Modifier.size(16.dp),
+                            )
+                            Text(
+                                text = file.name,
+                                style = BayType.subhead.copy(fontWeight = FontWeight.SemiBold),
+                                color = colors.textPrimary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f),
+                            )
+                            if (file.size > 0L) {
+                                Text(
+                                    text = FormatUtils.formatBytes(file.size),
+                                    style = BayType.caption.copy(fontFamily = FontFamily.Monospace),
+                                    color = colors.textTertiary,
+                                )
+                            }
+                        }
+                    }
+                    if (plane.files.size > 3) {
+                        Text(
+                            text = "另外还有 ${plane.files.size - 3} 个文件",
+                            style = BayType.caption,
+                            color = colors.accent,
+                        )
+                    }
+                }
+            }
+
+            if (plane.message.isNotBlank()) {
+                Text(
+                    text = plane.message,
+                    style = BayType.footnote,
+                    color = colors.textSecondary,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    BayAvatar(emojiId = plane.senderAvatar, size = 22.dp)
+                    Text(
+                        text = plane.senderName.ifBlank { "匿名旅人" },
+                        style = BayType.footnote.copy(fontWeight = FontWeight.Medium),
+                        color = colors.textPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    Text(
+                        text = "· ${FormatUtils.formatRelativeTime(plane.createdAt)}",
+                        style = BayType.caption,
+                        color = colors.textTertiary,
+                        maxLines = 1,
+                    )
+                }
+
+                when {
+                    !plane.allowEntry -> {
+                        Box(
+                            modifier = Modifier
+                                .clip(BayShapes.fullShape)
+                                .background(colors.fill)
+                                .padding(horizontal = BaySpacing.sm, vertical = 3.dp),
+                        ) {
+                            Text(
+                                text = "仅展示",
+                                style = BayType.caption,
+                                color = colors.textSecondary,
+                            )
+                        }
+                    }
+                    plane.hasPassword -> {
+                        Row(
+                            modifier = Modifier
+                                .clip(BayShapes.fullShape)
+                                .background(colors.accentSoft)
+                                .padding(horizontal = BaySpacing.sm, vertical = 3.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(3.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.VpnKey,
+                                contentDescription = null,
+                                tint = colors.accent,
+                                modifier = Modifier.size(11.dp),
+                            )
+                            Text(
+                                text = "免密进入",
+                                style = BayType.caption.copy(fontWeight = FontWeight.SemiBold),
+                                color = colors.accent,
+                            )
+                        }
+                    }
+                    else -> {
+                        Box(
+                            modifier = Modifier
+                                .clip(BayShapes.fullShape)
+                                .background(colors.success.copy(alpha = if (colors.isDark) 0.22f else 0.14f))
+                                .padding(horizontal = BaySpacing.sm, vertical = 3.dp),
+                        ) {
+                            Text(
+                                text = "可直接加入",
+                                style = BayType.caption.copy(fontWeight = FontWeight.SemiBold),
+                                color = colors.success,
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

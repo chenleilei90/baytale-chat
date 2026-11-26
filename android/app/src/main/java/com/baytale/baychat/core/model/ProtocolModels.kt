@@ -595,3 +595,61 @@ data class FavoriteItem(
     val savedAt: Long = System.currentTimeMillis(),
     val sourceKey: String = "",
 )
+
+// 纸飞机公开文件分享元数据模型（仅包含文件清单元数据，绝不上传文件本体或泄露密码）
+@Serializable
+data class PlaneFileMeta(
+    val name: String,
+    val size: Long = 0L,
+    val kind: String = "file", // image | video | audio | archive | doc | apk | file
+)
+
+@Serializable
+data class PaperPlane(
+    val id: String,
+    val roomCode: String,
+    val senderName: String,
+    val senderAvatar: String = "",
+    val message: String = "",
+    val files: List<PlaneFileMeta> = emptyList(),
+    val hasPassword: Boolean = false,
+    val allowEntry: Boolean = true,
+    val createdAt: Long = 0L,
+    val expiresAt: Long = 0L,
+)
+
+@Serializable
+data class PlaneListResponse(
+    val planes: List<PaperPlane> = emptyList(),
+)
+
+@Serializable
+data class CreatePlaneRequest(
+    val clientId: String,
+    val roomCode: String,
+    val senderName: String,
+    val senderAvatar: String = "",
+    val message: String = "",
+    val files: List<PlaneFileMeta> = emptyList(),
+    val allowEntry: Boolean = true,
+    val ownerToken: String? = null,
+    val password: String? = null,
+)
+
+@Serializable
+data class PlaneJoinResult(
+    val roomCode: String,
+    val hasPassword: Boolean = false,
+    val password: String = "",
+)
+
+@Serializable
+data class PlaneReportRequest(
+    val clientId: String,
+)
+
+@Serializable
+data class PlaneReportResponse(
+    val ok: Boolean = true,
+    val deleted: Boolean = false,
+)
