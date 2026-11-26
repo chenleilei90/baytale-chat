@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -69,6 +70,7 @@ func main() {
 		"POST /api/planes/{id}/join":    {Capacity: 30, Window: time.Minute},
 		"POST /api/planes/{id}/report":  {Capacity: 10, Window: time.Hour},
 		"POST /api/report":              {Capacity: 10, Window: time.Hour},
+		"POST /api/asr":                 {Capacity: 30, Window: time.Minute},
 	})
 
 	// 定期清理限流器的空闲令牌桶
@@ -640,6 +642,62 @@ func main() {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":      true,
 			"deleted": res.Deleted,
+		})
+	})
+
+	// 自托管中文语音转文字接口（转发至本机 sherpa-onnx ASR 服务）
+	asrEndpoint := strings.TrimSpace(os.Getenv("ASR_ENDPOINT"))
+	if asrEndpoint == "" {
+		asrEndpoint = "http://127.0.0.1:18190/transcribe"
+	}
+	asrClient := &http.Client{Timeout: 25 * time.Second}
+	mux.HandleFunc("POST /api/asr", func(w http.ResponseWriter, r *http.Request) {
+		if !allowRate(limiter, "POST /api/asr", w, r) {
+			return
+		}
+		audioBytes, err := io.ReadAll(io.LimitReader(r.Body, 6*1024*1024+1))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_AUDIO", "读取音频数据失败")
+			return
+		}
+		if len(audioBytes) == 0 {
+			writeError(w, http.StatusBadRequest, "EMPTY_AUDIO", "音频内容为空")
+			return
+		}
+		if len(audioBytes) > 6*1024*1024 {
+			writeError(w, http.StatusRequestEntityTooLarge, "AUDIO_TOO_LARGE", "语音文件超过 6MB 上限")
+			return
+		}
+		upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, asrEndpoint, bytes.NewReader(audioBytes))
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "ASR_UNAVAILABLE", "语音识别服务暂不可用")
+			return
+		}
+		if ct := strings.TrimSpace(r.Header.Get("Content-Type")); ct != "" {
+			upstreamReq.Header.Set("Content-Type", ct)
+		} else {
+			upstreamReq.Header.Set("Content-Type", "audio/mp4")
+		}
+		resp, err := asrClient.Do(upstreamReq)
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "ASR_UNAVAILABLE", "语音识别服务暂不可用，请稍后重试")
+			return
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
+		if err != nil || resp.StatusCode >= 400 {
+			writeError(w, http.StatusServiceUnavailable, "ASR_FAILED", "语音转文字处理失败")
+			return
+		}
+		var result struct {
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(body, &result); err != nil {
+			writeError(w, http.StatusServiceUnavailable, "ASR_FAILED", "语音识别结果解析失败")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"text": strings.TrimSpace(result.Text),
 		})
 	})
 
