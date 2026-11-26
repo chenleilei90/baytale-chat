@@ -27,6 +27,7 @@ import androidx.compose.material.icons.rounded.BookmarkBorder
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.CloudUpload
+import androidx.compose.material.icons.rounded.ContentPaste
 import androidx.compose.material.icons.rounded.Dns
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Image
@@ -492,6 +493,20 @@ fun MineTab(
                             checked = state.prefs.nearbyDiscoverable,
                             onChange = { checked ->
                                 vm.updatePrefs(state.prefs.copy(nearbyDiscoverable = checked))
+                            },
+                        ),
+                        showDivider = true,
+                    )
+
+                    BayListRow(
+                        icon = Icons.Rounded.ContentPaste,
+                        iconTint = colors.accent,
+                        title = "切回前台自动同步剪贴板",
+                        subtitle = "处于聊天房间时切回前台自动检测新剪贴板并推送给伙伴",
+                        trailing = RowTrailing.Switch(
+                            checked = state.prefs.autoClipboardSync,
+                            onChange = { checked ->
+                                vm.setAutoClipboardSync(checked)
                             },
                         ),
                         showDivider = true,

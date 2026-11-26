@@ -17,6 +17,7 @@ import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.MoreHoriz
 import androidx.compose.material.icons.rounded.NotificationsOff
+import androidx.compose.material.icons.rounded.PhotoLibrary
 import androidx.compose.material.icons.rounded.QrCode2
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.UnfoldMore
@@ -52,6 +53,7 @@ fun ChatTopBar(
     onToggleSearch: () -> Unit,
     onOpenInvite: () -> Unit,
     onOpenSettings: () -> Unit,
+    onQuickSendOriginalMedia: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val colors = BayTheme.colors
@@ -67,6 +69,46 @@ fun ChatTopBar(
             .fillMaxWidth()
             .background(colors.chatBg),
     ) {
+        // 顶部 P2PLink 守护服务运行与局域网保活状态条
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(colors.accentSoft)
+                .padding(horizontal = BaySpacing.md, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(7.dp)
+                        .clip(CircleShape)
+                        .background(colors.success),
+                )
+                Text(
+                    text = "BayChat 守护服务运行中 · 局域网直连就绪",
+                    style = BayType.caption.copy(fontWeight = FontWeight.SemiBold),
+                    color = colors.accent,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Box(
+                modifier = Modifier
+                    .clip(BayShapes.fullShape)
+                    .background(colors.surface)
+                    .padding(horizontal = 7.dp, vertical = 2.dp),
+            ) {
+                Text(
+                    text = "已保活",
+                    style = BayType.caption.copy(fontWeight = FontWeight.SemiBold),
+                    color = colors.success,
+                )
+            }
+        }
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -174,6 +216,28 @@ fun ChatTopBar(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(BaySpacing.xs),
             ) {
+                // 一键发送相册 4K 原片快捷入口（对齐 P2PLink 原型）
+                Row(
+                    modifier = Modifier
+                        .clip(BayShapes.fullShape)
+                        .background(colors.accentSoft)
+                        .bayClickable(onClick = onQuickSendOriginalMedia)
+                        .padding(horizontal = 9.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.PhotoLibrary,
+                        contentDescription = "发送相册 4K 原片",
+                        tint = colors.accent,
+                        modifier = Modifier.size(14.dp),
+                    )
+                    Text(
+                        text = "原片",
+                        style = BayType.caption.copy(fontWeight = FontWeight.SemiBold),
+                        color = colors.accent,
+                    )
+                }
                 BayIconButton(
                     icon = Icons.Rounded.Search,
                     contentDescription = "搜索消息",

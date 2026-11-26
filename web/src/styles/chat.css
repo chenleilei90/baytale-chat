@@ -1204,3 +1204,46 @@ html[data-appearance='dark'][data-accent='geek'] .chat-top-nav .btn-soft {
   color: #2DD4BF;
   border: 1px solid rgba(20, 184, 166, 0.26);
 }
+
+/* 输入坞顶部剪贴板自动同步控制条 */
+.p2p-clip-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 6px;
+  border-bottom: 0.5px solid var(--separator);
+  flex-wrap: wrap;
+}
+
+/* 左侧栏同局域网在线直连设备列表 */
+.p2p-nearby-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.p2p-nearby-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--separator);
+  background: var(--fill);
+  cursor: pointer;
+  transition: background-color 150ms ease, border-color 150ms ease, transform 150ms var(--ease-spring);
+}
+
+.p2p-nearby-item:hover:not(:disabled) {
+  background: var(--accent-soft);
+  border-color: rgba(20, 184, 166, 0.45);
+  transform: translateY(-1px);
+}
+
+/* 高密度传输卡片微质感优化 */
+.file-bento-card {
+  border: 1px solid var(--separator);
+  box-shadow: var(--surface-highlight);
+}

@@ -26,6 +26,9 @@ import {
   Bookmark,
   CheckSquare,
   Square,
+  Pause,
+  Play,
+  ShieldCheck,
 } from 'lucide-react';
 import type { ChatItem, FileTransferInfo } from '../types';
 import {
@@ -742,7 +745,7 @@ const TransferFileCard: React.FC<{
               className="btn btn-danger-soft btn-sm"
               onClick={() => onCancel(transfer.targetPeerId!, transfer.transferId)}
             >
-              取消
+              <Pause size={12} aria-hidden="true" /> 暂停/中断
             </button>
           )}
 
@@ -755,7 +758,11 @@ const TransferFileCard: React.FC<{
             ) : (
               <>
                 <span className="pill pill-emerald">
-                  <CheckCircle2 size={12} aria-hidden="true" />
+                  {transfer.verified ? (
+                    <ShieldCheck size={12} aria-hidden="true" />
+                  ) : (
+                    <CheckCircle2 size={12} aria-hidden="true" />
+                  )}
                   {transfer.verified
                     ? 'SHA-256 校验通过'
                     : transfer.cachedDownloadUrl
@@ -809,7 +816,7 @@ const TransferFileCard: React.FC<{
                   className="btn btn-soft btn-sm"
                   onClick={() => onRequestResume(transfer.targetPeerId!, transfer)}
                 >
-                  <HardDriveDownload size={13} aria-hidden="true" /> 请求对方续传
+                  <Play size={12} aria-hidden="true" /> 断点续传
                 </button>
               )}
           </>
@@ -828,7 +835,7 @@ const TransferFileCard: React.FC<{
                   className="btn btn-soft btn-sm"
                   onClick={() => onRequestResume(transfer.targetPeerId!, transfer)}
                 >
-                  <HardDriveDownload size={13} aria-hidden="true" /> 请求对方续传
+                  <Play size={12} aria-hidden="true" /> 断点续传
                 </button>
               )}
           </>

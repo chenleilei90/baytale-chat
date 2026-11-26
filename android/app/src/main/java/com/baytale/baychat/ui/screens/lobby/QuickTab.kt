@@ -3,6 +3,8 @@ package com.baytale.baychat.ui.screens.lobby
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -10,6 +12,8 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.rounded.InsertDriveFile
+import androidx.compose.material.icons.rounded.Radar
 import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.Wifi
 import androidx.compose.ui.text.font.FontFamily
@@ -73,6 +77,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.baytale.baychat.core.lan.LanDirectMessage
+import com.baytale.baychat.core.lan.LanDirectPeer
 import com.baytale.baychat.core.model.NearbyPeer
 import com.baytale.baychat.core.model.RecentRoom
 import com.baytale.baychat.core.model.RoomMode
@@ -96,6 +102,7 @@ import com.baytale.baychat.ui.design.BayIconStyle
 import com.baytale.baychat.ui.design.BayLargeTitleHeader
 import com.baytale.baychat.ui.design.BayListRow
 import com.baytale.baychat.ui.design.BaySectionHeader
+import com.baytale.baychat.ui.design.BaySwitch
 import com.baytale.baychat.ui.design.BayTextField
 import com.baytale.baychat.ui.design.RowTrailing
 import com.baytale.baychat.ui.design.SheetAction
@@ -180,6 +187,21 @@ fun QuickTab(
     var renameInput by rememberSaveable { mutableStateOf("") }
     var passwordDialogCode by rememberSaveable { mutableStateOf<String?>(null) }
     var passwordInput by rememberSaveable { mutableStateOf("") }
+
+    // 离线局域网 mDNS 直连会话弹窗状态
+    var activeLanPeerKey by rememberSaveable { mutableStateOf<String?>(null) }
+    var lanChatInput by rememberSaveable { mutableStateOf("") }
+    val activeLanPeer = remember(activeLanPeerKey, state.lanDirectPeers) {
+        activeLanPeerKey?.let { key -> state.lanDirectPeers.firstOrNull { it.peerKey == key } }
+    }
+    val lanFileLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        val peer = activeLanPeer
+        if (uri != null && peer != null) {
+            vm.sendLanDirectFile(peer, uri)
+        }
+    }
 
     // 同步深链/外部跳转写入的待加入口令
     LaunchedEffect(state.pendingJoinCode) {
@@ -492,6 +514,17 @@ fun QuickTab(
                     }
                 }
 
+                // 5.5 真·离线局域网 mDNS 直连（断外网零服务器可用）
+                item(key = "lan_direct_mdns_section") {
+                    LanDirectMdnsCard(
+                        running = state.lanDirectRunning,
+                        localEndpoint = state.lanLocalEndpoint,
+                        peers = state.lanDirectPeers,
+                        onToggle = { enabled -> vm.toggleLanDirect(enabled) },
+                        onOpenPeer = { peer -> activeLanPeerKey = peer.peerKey },
+                    )
+                }
+
                 // 6. 收藏常驻房间（UX-28：提供更多操作菜单）
                 if (state.savedRooms.isNotEmpty()) {
                     item(key = "saved_rooms_section") {
@@ -547,6 +580,24 @@ fun QuickTab(
             maxRoomPeers = state.serverConfig.maxRoomPeers,
             onApply = { updated -> optionsDraft = updated },
             onDismiss = { showRoomOptions = false },
+        )
+    }
+
+    if (activeLanPeer != null) {
+        LanDirectPeerDialog(
+            peer = activeLanPeer,
+            messages = state.lanDirectMessages.filter { it.peerKey == activeLanPeer.peerKey },
+            input = lanChatInput,
+            onInputChange = { lanChatInput = it },
+            onSendText = {
+                val clean = lanChatInput.trim()
+                if (clean.isNotEmpty()) {
+                    vm.sendLanDirectText(activeLanPeer, clean)
+                    lanChatInput = ""
+                }
+            },
+            onPickFile = { lanFileLauncher.launch(arrayOf("*/*")) },
+            onDismiss = { activeLanPeerKey = null },
         )
     }
 
@@ -1322,6 +1373,227 @@ private fun P2PNodeStatusCard(
                         color = if (nearbyDiscoverable) colors.textPrimary else colors.textTertiary,
                     )
                 }
+            }
+        }
+    }
+}
+
+/**
+ * 真·离线局域网 mDNS（_baychat._tcp.）发现与直连入口卡片（无需互联网与中心服务器）。
+ */
+@Composable
+private fun LanDirectMdnsCard(
+    running: Boolean,
+    localEndpoint: String,
+    peers: List<LanDirectPeer>,
+    onToggle: (Boolean) -> Unit,
+    onOpenPeer: (LanDirectPeer) -> Unit,
+) {
+    val colors = BayTheme.colors
+    Column(verticalArrangement = Arrangement.spacedBy(BaySpacing.sm)) {
+        BaySectionHeader(title = "离线局域网直连 (mDNS)")
+        BayCard(modifier = Modifier.fillMaxWidth()) {
+            Column(verticalArrangement = Arrangement.spacedBy(BaySpacing.md)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(BaySpacing.md),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(38.dp)
+                            .clip(BayShapes.smShape)
+                            .background(if (running) colors.accentSoft else colors.fill),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Radar,
+                            contentDescription = null,
+                            tint = if (running) colors.accent else colors.textSecondary,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = if (running) "mDNS 离线广播运行中" else "断外网局域网直连",
+                            style = BayType.callout.copy(fontWeight = FontWeight.SemiBold),
+                            color = colors.textPrimary,
+                        )
+                        Text(
+                            text = if (running && localEndpoint.isNotBlank()) {
+                                "_baychat._tcp. · $localEndpoint"
+                            } else {
+                                "开启后断外网也可直连同 Wi-Fi 安卓端互传"
+                            },
+                            style = BayType.caption.copy(fontFamily = if (running) FontFamily.Monospace else FontFamily.Default),
+                            color = if (running) colors.accent else colors.textSecondary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    BaySwitch(
+                        checked = running,
+                        onCheckedChange = onToggle,
+                    )
+                }
+
+                if (running) {
+                    if (peers.isEmpty()) {
+                        Text(
+                            text = "正在扫描同 Wi-Fi 下开启离线直连的设备...",
+                            style = BayType.caption,
+                            color = colors.textTertiary,
+                        )
+                    } else {
+                        Column(verticalArrangement = Arrangement.spacedBy(BaySpacing.xs)) {
+                            peers.forEach { peer ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(BayShapes.smShape)
+                                        .background(colors.fill)
+                                        .bayClickable { onOpenPeer(peer) }
+                                        .padding(horizontal = BaySpacing.md, vertical = BaySpacing.sm),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(BaySpacing.sm),
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(8.dp)
+                                            .clip(CircleShape)
+                                            .background(colors.success),
+                                    )
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = peer.displayName,
+                                            style = BayType.subhead.copy(fontWeight = FontWeight.SemiBold),
+                                            color = colors.textPrimary,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                        Text(
+                                            text = "${peer.host}:${peer.port}",
+                                            style = BayType.caption.copy(fontFamily = FontFamily.Monospace),
+                                            color = colors.textTertiary,
+                                        )
+                                    }
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(BayShapes.fullShape)
+                                            .background(colors.accentSoft)
+                                            .padding(horizontal = 10.dp, vertical = 4.dp),
+                                    ) {
+                                        Text(
+                                            text = "离线直传",
+                                            style = BayType.caption.copy(fontWeight = FontWeight.SemiBold),
+                                            color = colors.accent,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 离线局域网（无中心服务器 TCP Socket）点对点即时文本/文件收发弹窗。
+ */
+@Composable
+private fun LanDirectPeerDialog(
+    peer: LanDirectPeer,
+    messages: List<LanDirectMessage>,
+    input: String,
+    onInputChange: (String) -> Unit,
+    onSendText: () -> Unit,
+    onPickFile: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val colors = BayTheme.colors
+    BayDialog(
+        title = "局域网直连 · ${peer.displayName}",
+        confirmText = "关闭",
+        onConfirm = onDismiss,
+        onDismiss = onDismiss,
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(BaySpacing.sm)) {
+            Text(
+                text = "直连端点 ${peer.host}:${peer.port}（无中心服务器）",
+                style = BayType.caption.copy(fontFamily = FontFamily.Monospace),
+                color = colors.accent,
+            )
+
+            if (messages.isEmpty()) {
+                Text(
+                    text = "可直接在下方发送文字，或选择任意文件高速直传至对方手机",
+                    style = BayType.footnote,
+                    color = colors.textSecondary,
+                )
+            } else {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    messages.takeLast(5).forEach { msg ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(BayShapes.xsShape)
+                                .background(if (msg.isSelf) colors.accentSoft else colors.fill)
+                                .padding(horizontal = BaySpacing.sm, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            if (msg.isFile) {
+                                Icon(
+                                    imageVector = Icons.Rounded.InsertDriveFile,
+                                    contentDescription = null,
+                                    tint = colors.accent,
+                                    modifier = Modifier.size(15.dp),
+                                )
+                            }
+                            Text(
+                                text = if (msg.isFile) {
+                                    "${if (msg.isSelf) "我发出" else "收到"} ${msg.fileName} (${FormatUtils.formatBytes(msg.fileSize)})${if (msg.verified) " · SHA-256✓" else ""}"
+                                } else {
+                                    "${if (msg.isSelf) "我" else msg.senderName}: ${msg.text}"
+                                },
+                                style = BayType.caption,
+                                color = colors.textPrimary,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                }
+            }
+
+            BayTextField(
+                value = input,
+                onValueChange = onInputChange,
+                placeholder = "输入局域网直连消息...",
+                singleLine = true,
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(BaySpacing.sm),
+            ) {
+                BayButton(
+                    text = "发文件",
+                    onClick = onPickFile,
+                    style = BayButtonStyle.Secondary,
+                    size = BayButtonSize.Small,
+                    modifier = Modifier.weight(1f),
+                )
+                BayButton(
+                    text = "发文字",
+                    onClick = onSendText,
+                    style = BayButtonStyle.Primary,
+                    size = BayButtonSize.Small,
+                    enabled = input.isNotBlank(),
+                    modifier = Modifier.weight(1f),
+                )
             }
         }
     }

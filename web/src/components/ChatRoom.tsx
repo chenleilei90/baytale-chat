@@ -48,6 +48,8 @@ import {
   PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
+  Wifi,
+  ClipboardCheck,
 } from 'lucide-react';
 import QRCode from 'qrcode';
 import type {
@@ -58,6 +60,7 @@ import type {
   FileTransferInfo,
   HistoryMeta,
   MinimizedTransferState,
+  NearbyDevice,
   PeerLinkStatus,
   PeerMediaState,
   PeerProfile,
@@ -87,6 +90,8 @@ import {
   createRoom,
   fetchNearbyInviteStatus,
   fetchRoomInfo,
+  sendNearbyHeartbeat,
+  sendNearbyInvite,
   SignalingClient,
   submitReport,
   updateRoomProfile,
@@ -270,6 +275,16 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   const [roomInfo, setRoomInfo] = useState<RoomSummary | null>(null);
   const [isOwner, setIsOwner] = useState<boolean>(Boolean(ownerToken));
   const [blockedPeers, setBlockedPeers] = useState<BlockedPeer[]>(() => loadBlockedPeers());
+  const [nearbyDevices, setNearbyDevices] = useState<NearbyDevice[]>([]);
+  const [invitingNearbyId, setInvitingNearbyId] = useState<string | null>(null);
+  const [autoClipboardSync, setAutoClipboardSync] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('baychat_auto_clip_sync') === '1';
+    } catch {
+      return false;
+    }
+  });
+  const lastAutoClipRef = useRef<string>('');
   const [nearbyInviteStatus, setNearbyInviteStatus] = useState<
     'pending' | 'accepted' | 'declined' | 'expired' | null
   >(pendingNearbyInvite ? 'pending' : null);
@@ -3047,7 +3062,120 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       },
     ]);
     if (inputText.trim() === text) setInputText('');
+    lastAutoClipRef.current = text;
     onToast(sent > 0 ? `已将剪贴板内容同步给 ${sent} 位成员` : '当前暂无在线成员，已在本机记录同步卡片');
+  };
+
+  // 开关剪贴板自动同步并持久化偏好
+  const handleToggleAutoClipboardSync = (checked: boolean) => {
+    setAutoClipboardSync(checked);
+    try {
+      localStorage.setItem('baychat_auto_clip_sync', checked ? '1' : '0');
+    } catch {
+      // 忽略存储限制
+    }
+    onToast(checked ? '已开启剪贴板自动同步（切回前台时自动检测推送）' : '已关闭剪贴板自动同步');
+  };
+
+  // 在聊天室左栏实时发现同局域网在线设备（6 秒轮询，支持一键无缝发起直连并切换中栏会话）
+  useEffect(() => {
+    if (!prefs.nearbyDiscoverable) {
+      setNearbyDevices([]);
+      return;
+    }
+    let cancelled = false;
+    const poll = async () => {
+      if (cancelled || document.hidden) return;
+      try {
+        const res = await sendNearbyHeartbeat({
+          clientId: profile.clientId,
+          name: profile.name,
+          avatar: profile.avatar,
+          device: 'web',
+          network: 'wifi',
+        });
+        if (!cancelled) {
+          setNearbyDevices(res.devices || []);
+        }
+      } catch {
+        // 静默忽略瞬态网络波动
+      }
+    };
+    void poll();
+    const timer = window.setInterval(() => {
+      void poll();
+    }, 6000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [prefs.nearbyDiscoverable, profile.clientId, profile.name, profile.avatar]);
+
+  // 切回前台时自动检测剪贴板变更并推送给同房设备
+  useEffect(() => {
+    const peerCount = Object.keys(peers).length;
+    if (!autoClipboardSync || !wsConnected || peerCount === 0) return;
+
+    const tryAutoPushClipboard = async () => {
+      if (document.hidden || !navigator.clipboard?.readText) return;
+      try {
+        const raw = (await navigator.clipboard.readText()).trim();
+        if (!raw || raw === lastAutoClipRef.current) return;
+        lastAutoClipRef.current = raw;
+        const now = Date.now();
+        const sent = meshRef.current?.broadcastClipboard(raw, now) || 0;
+        if (sent > 0) {
+          const id = `clip_auto_${now}_${Math.random().toString(36).slice(2, 6)}`;
+          setMessages((prev) => [
+            ...prev,
+            {
+              id,
+              kind: 'text',
+              senderId: selfPeerId,
+              senderName: profile.name,
+              senderAvatar: profile.avatar,
+              isSelf: true,
+              timestamp: now,
+              text: raw,
+              isClipSync: true,
+            },
+          ]);
+          onToast(`已自动同步新剪贴板给 ${sent} 位成员`);
+        }
+      } catch {
+        // 浏览器未授予剪贴板后台读取权限时静默跳过
+      }
+    };
+
+    const onVis = () => {
+      if (!document.hidden) void tryAutoPushClipboard();
+    };
+    window.addEventListener('focus', tryAutoPushClipboard);
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      window.removeEventListener('focus', tryAutoPushClipboard);
+      document.removeEventListener('visibilitychange', onVis);
+    };
+  }, [autoClipboardSync, wsConnected, peers, selfPeerId, profile.name, profile.avatar, onToast]);
+
+  // 在左栏直接点击同局域网设备：发起直连邀请并在中栏无缝切换会话
+  const handleQuickInviteNearby = async (dev: NearbyDevice) => {
+    if (invitingNearbyId) return;
+    setInvitingNearbyId(dev.clientId);
+    try {
+      const res = await sendNearbyInvite({
+        fromClientId: profile.clientId,
+        toClientId: dev.clientId,
+        fromName: profile.name,
+        fromAvatar: profile.avatar,
+      });
+      onToast(`已向 ${dev.name} 发起直连，正在切换会话`);
+      onSwitchRoom(res.room.code, '', 'ephemeral', res.ownerToken);
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : '发起附近直连失败');
+    } finally {
+      setInvitingNearbyId(null);
+    }
   };
 
   // 切换公开随机进入开关
@@ -3791,6 +3919,47 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             </div>
           </div>
 
+          {/* 同局域网在线设备列表（左栏单页无缝直连切换） */}
+          <div className="p2p-nearby-section">
+            <div className="sidebar-section-head">
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                <Wifi size={12} aria-hidden="true" /> 同局域网直连设备 ({nearbyDevices.length})
+              </span>
+              <span className="mono" style={{ fontSize: 10, color: prefs.nearbyDiscoverable ? 'var(--accent)' : 'var(--text-muted)' }}>
+                {prefs.nearbyDiscoverable ? '雷达在线' : '已关闭'}
+              </span>
+            </div>
+            {nearbyDevices.length > 0 ? (
+              nearbyDevices.slice(0, 5).map((dev) => (
+                <button
+                  key={dev.clientId}
+                  type="button"
+                  className="p2p-nearby-item"
+                  disabled={invitingNearbyId === dev.clientId}
+                  onClick={() => void handleQuickInviteNearby(dev)}
+                  title={`点击与 ${dev.name} 建立点对点直连会话`}
+                >
+                  <Avatar name={dev.name} avatar={dev.avatar} size={28} />
+                  <div style={{ flex: 1, minWidth: 0, textAlign: 'left' }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {dev.name}
+                    </div>
+                    <div className="mono" style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+                      {dev.device === 'android' ? 'Android 手机' : 'Web 桌面'} · LAN
+                    </div>
+                  </div>
+                  <span className="p2p-badge mono">
+                    {invitingNearbyId === dev.clientId ? '连接中' : '直连'}
+                  </span>
+                </button>
+              ))
+            ) : (
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '4px 6px' }}>
+                {prefs.nearbyDiscoverable ? '同一 Wi-Fi 下开启 BayChat 的设备将自动出现' : '在左下角外观与设置开启同网发现'}
+              </div>
+            )}
+          </div>
+
           {/* 秘密基地成长统计卡 */}
           {(roomInfo?.mode === 'fixed' || roomStats.totalFiles > 0 || roomStats.totalPomodoros > 0) && (
             <div className="base-stats-card">
@@ -4430,6 +4599,23 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
               </div>
             )}
             <div className="composer-pod">
+              <div className="p2p-clip-bar">
+                <Switch
+                  checked={autoClipboardSync}
+                  onChange={handleToggleAutoClipboardSync}
+                  label="剪贴板自动同步"
+                />
+                <button
+                  type="button"
+                  className="btn btn-glass btn-sm"
+                  style={{ height: 26, padding: '0 10px', fontSize: 11 }}
+                  onClick={() => void handleSendClipboardSync()}
+                  title="读取当前剪贴板或输入框文本同步给同房设备"
+                >
+                  <ClipboardCheck size={12} aria-hidden="true" />
+                  <span>推送当前剪贴板</span>
+                </button>
+              </div>
               {replyingTo && (
                 <div className="composer-reply-bar">
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, flex: 1 }}>

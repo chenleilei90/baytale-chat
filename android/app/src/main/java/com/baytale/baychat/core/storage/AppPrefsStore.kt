@@ -36,6 +36,7 @@ data class AppUserPrefs(
     val nearbyDiscoverable: Boolean = true,
     val cloudBackupOnWifi: Boolean = true,
     val acceptClipShare: Boolean = true,
+    val autoClipboardSync: Boolean = false,
     val onboardingDone: Boolean = false,
     val notificationAsked: Boolean = false,
     val batteryOptAsked: Boolean = false,
@@ -130,6 +131,7 @@ class AppPrefsStore(context: Context) {
             nearbyDiscoverable = sp.getBoolean(KEY_NEARBY_DISCOVERABLE, true),
             cloudBackupOnWifi = sp.getBoolean(KEY_CLOUD_BACKUP_WIFI, true),
             acceptClipShare = sp.getBoolean(KEY_ACCEPT_CLIP_SHARE, true),
+            autoClipboardSync = sp.getBoolean(KEY_AUTO_CLIPBOARD_SYNC, false),
             onboardingDone = sp.getBoolean(KEY_ONBOARDING_DONE, false),
             notificationAsked = sp.getBoolean(KEY_NOTIFICATION_ASKED, false),
             batteryOptAsked = sp.getBoolean(KEY_BATTERY_OPT_ASKED, false),
@@ -154,6 +156,7 @@ class AppPrefsStore(context: Context) {
             .putBoolean(KEY_NEARBY_DISCOVERABLE, prefs.nearbyDiscoverable)
             .putBoolean(KEY_CLOUD_BACKUP_WIFI, prefs.cloudBackupOnWifi)
             .putBoolean(KEY_ACCEPT_CLIP_SHARE, prefs.acceptClipShare)
+            .putBoolean(KEY_AUTO_CLIPBOARD_SYNC, prefs.autoClipboardSync)
             .putBoolean(KEY_ONBOARDING_DONE, prefs.onboardingDone)
             .putBoolean(KEY_NOTIFICATION_ASKED, prefs.notificationAsked)
             .putBoolean(KEY_BATTERY_OPT_ASKED, prefs.batteryOptAsked)
@@ -197,6 +200,10 @@ class AppPrefsStore(context: Context) {
 
     fun setAcceptClipShare(enabled: Boolean) {
         sp.edit().putBoolean(KEY_ACCEPT_CLIP_SHARE, enabled).apply()
+    }
+
+    fun setAutoClipboardSync(enabled: Boolean) {
+        sp.edit().putBoolean(KEY_AUTO_CLIPBOARD_SYNC, enabled).apply()
     }
 
     fun setOnboardingDone(done: Boolean) {
@@ -601,6 +608,7 @@ class AppPrefsStore(context: Context) {
         private const val KEY_NEARBY_DISCOVERABLE = "nearby_discoverable_v1"
         private const val KEY_CLOUD_BACKUP_WIFI = "cloud_backup_wifi_v1"
         private const val KEY_ACCEPT_CLIP_SHARE = "accept_clip_share_v1"
+        private const val KEY_AUTO_CLIPBOARD_SYNC = "auto_clipboard_sync_v1"
         private const val KEY_ONBOARDING_DONE = "onboarding_done_v1"
         private const val KEY_NOTIFICATION_ASKED = "notification_asked_v1"
         private const val KEY_BATTERY_OPT_ASKED = "battery_opt_asked"

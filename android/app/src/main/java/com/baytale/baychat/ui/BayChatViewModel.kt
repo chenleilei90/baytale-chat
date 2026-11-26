@@ -22,6 +22,9 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.baytale.baychat.AppForegroundTracker
 import com.baytale.baychat.BuildConfig
+import com.baytale.baychat.core.lan.LanDirectManager
+import com.baytale.baychat.core.lan.LanDirectMessage
+import com.baytale.baychat.core.lan.LanDirectPeer
 import com.baytale.baychat.core.model.AppReleaseInfo
 import com.baytale.baychat.core.model.AppThemeMode
 import com.baytale.baychat.core.model.AppearanceMode
@@ -324,6 +327,11 @@ data class BayChatUiState(
     val roomPresenceNotice: String? = null,
     // 语音转文字 AI 智能纠错加载态
     val isCorrectingVoiceText: Boolean = false,
+    // 真·离线局域网 mDNS + Socket 直连状态与实时列表
+    val lanDirectRunning: Boolean = false,
+    val lanLocalEndpoint: String = "",
+    val lanDirectPeers: List<LanDirectPeer> = emptyList(),
+    val lanDirectMessages: List<LanDirectMessage> = emptyList(),
 ) {
     // B12：供 Activity 与导航判断当前是否保有活跃或后台挂起的房间会话
     val hasActiveRoom: Boolean
@@ -339,6 +347,10 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     private val nearbyApi = NearbyApi(serverUrlProvider = { _uiState.value.prefs.serverUrl }, okHttpClient = api.okHttpClient)
     private val updateManager = AppUpdateManager(appContext, api.okHttpClient)
     private val soundPlayer = BaySoundPlayer(appContext)
+    private val lanDirectManager = LanDirectManager(appContext) { notice ->
+        showToast(notice)
+    }
+    private var lastAutoClipSyncedText: String = ""
 
     private val initialProfile = store.loadProfile()
     private val initialBlocked = store.loadBlockedPeers()
@@ -439,6 +451,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         observeOtaUpdateCenter()
         observeAppForegroundState()
         observeIncomingNotificationActions()
+        observeLanDirectState()
         registerNetworkMonitor()
         if (_uiState.value.privacyAccepted) {
             refreshServerConfig()
@@ -3366,6 +3379,98 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    // 开启/关闭「切回前台自动同步剪贴板」偏好开关
+    fun setAutoClipboardSync(enabled: Boolean) {
+        store.setAutoClipboardSync(enabled)
+        _uiState.update { it.copy(prefs = it.prefs.copy(autoClipboardSync = enabled)) }
+        showToast(if (enabled) "已开启切回前台自动同步剪贴板" else "已关闭自动同步剪贴板")
+    }
+
+    // 切回前台时检测系统剪贴板变化，去重后静默同步给同房已直连成员
+    fun syncClipboardOnForegroundIfChanged(rawText: String?) {
+        val clean = rawText?.trim().orEmpty()
+        if (clean.isEmpty()) return
+        val snap = _uiState.value
+        if (!snap.prefs.autoClipboardSync || snap.activeRoom == null) return
+        if (clean == lastAutoClipSyncedText) return
+        lastAutoClipSyncedText = clean
+        val ts = System.currentTimeMillis()
+        val sent = mesh?.broadcastClipboard(clean, ts) ?: 0
+        if (sent > 0) {
+            val profile = snap.profile
+            appendMessageIfAbsent(
+                ChatItem(
+                    id = "clip_auto_${ts}_self",
+                    kind = ChatKind.CLIP,
+                    senderId = selfPeerId,
+                    senderName = profile.name,
+                    senderAvatar = profile.avatar,
+                    isSelf = true,
+                    timestamp = ts,
+                    text = clean,
+                    sendStatus = MessageSendStatus.SENT,
+                )
+            )
+            showToast("已自动同步新剪贴板给 $sent 位伙伴")
+        }
+    }
+
+    private fun observeLanDirectState() {
+        viewModelScope.launch {
+            lanDirectManager.isRunning.collect { running ->
+                _uiState.update { it.copy(lanDirectRunning = running) }
+            }
+        }
+        viewModelScope.launch {
+            lanDirectManager.localEndpoint.collect { ep ->
+                _uiState.update { it.copy(lanLocalEndpoint = ep) }
+            }
+        }
+        viewModelScope.launch {
+            lanDirectManager.peers.collect { list ->
+                _uiState.update { it.copy(lanDirectPeers = list) }
+            }
+        }
+        viewModelScope.launch {
+            lanDirectManager.messages.collect { msgs ->
+                _uiState.update { it.copy(lanDirectMessages = msgs) }
+            }
+        }
+    }
+
+    fun toggleLanDirect(enabled: Boolean) {
+        val profile = _uiState.value.profile
+        if (enabled) {
+            lanDirectManager.start(displayName = profile.name, clientId = profile.clientId)
+            showToast("已开启真·离线局域网 mDNS 广播与发现")
+        } else {
+            lanDirectManager.stop()
+            showToast("已关闭离线局域网 mDNS 直连")
+        }
+    }
+
+    fun sendLanDirectText(peer: LanDirectPeer, text: String) {
+        val profile = _uiState.value.profile
+        lanDirectManager.sendText(
+            peer = peer,
+            senderId = profile.clientId,
+            senderName = profile.name,
+            senderAvatar = profile.avatar,
+            text = text,
+        )
+    }
+
+    fun sendLanDirectFile(peer: LanDirectPeer, uri: Uri) {
+        val profile = _uiState.value.profile
+        lanDirectManager.sendFile(
+            peer = peer,
+            uri = uri,
+            senderId = profile.clientId,
+            senderName = profile.name,
+            senderAvatar = profile.avatar,
+        )
+    }
+
     // UX-5：对同一消息 ID 600ms 内连续触发的重发请求去重防连点
     private fun acquireResendDebounce(id: String): Boolean {
         val now = System.currentTimeMillis()
@@ -3461,7 +3566,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         return prefs.cloudBackupOnWifi && AppUpdateManager.isUnmeteredWifi(appContext)
     }
 
-    fun sendUris(uris: List<Uri>) {
+    fun sendUris(uris: List<Uri>, forceOriginalFile: Boolean = false) {
         val room = _uiState.value.activeRoom ?: return
         if (uris.isEmpty()) return
 
@@ -3486,7 +3591,9 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                     continue
                 }
 
-                val isImage = meta.mimeType.startsWith("image/", ignoreCase = true) &&
+                // 当非原片直发模式时，中等大小图片走缩略图+内联图通道；原片模式一律走无损文件直传
+                val isImage = !forceOriginalFile &&
+                    meta.mimeType.startsWith("image/", ignoreCase = true) &&
                     meta.fileSize <= TransferResumeUtils.IMAGE_AUTO_ACCEPT_MAX_BYTES
 
                 if (isImage) {
@@ -6579,6 +6686,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         }
         networkCallback = null
         tearDownSession(stopService = true)
+        runCatching { lanDirectManager.stop() }
         runCatching { soundPlayer.release() }
         super.onCleared()
     }

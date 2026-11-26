@@ -138,7 +138,7 @@ fun BayTextField(
                                 text = placeholder,
                                 style = textStyle,
                                 color = colors.textTertiary,
-                                maxLines = if (singleLine) 1 else resolvedMaxLines,
+                                maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )
                         }

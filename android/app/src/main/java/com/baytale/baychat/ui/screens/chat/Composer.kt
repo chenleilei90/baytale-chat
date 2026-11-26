@@ -674,7 +674,7 @@ fun Composer(
                             vm.updateDraft(roomCode, next)
                             vm.onDraftTypingChanged(next.isNotBlank())
                         },
-                        placeholder = "点击输入，长按转文字",
+                        placeholder = "可按住 转文字",
                         singleLine = false,
                         maxLines = 4,
                         containerColor = colors.wechatPeerBubble,

@@ -45,8 +45,8 @@ internal fun rememberLinkStatusBadge(room: ActiveRoomSession): LinkStatusBadge {
     return remember(room.peers, room.linkStatuses, room.wsConnected, colors) {
         when {
             !room.wsConnected -> LinkStatusBadge(
-                color = colors.warning,
-                label = "信令重连中",
+                color = colors.accent,
+                label = "收取中...",
                 connected = false,
             )
             room.peers.isEmpty() -> LinkStatusBadge(

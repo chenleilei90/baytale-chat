@@ -2,8 +2,6 @@ package com.baytale.baychat.ui.screens.lobby
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.Crossfade
-import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -16,16 +14,17 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -48,11 +47,12 @@ import com.baytale.baychat.ui.sheets.PickupHubSheet
 import com.baytale.baychat.ui.theme.BaySpacing
 import com.baytale.baychat.ui.theme.BayTheme
 import com.baytale.baychat.ui.theme.BayType
+import kotlinx.coroutines.launch
 
 private const val BACK_EXIT_WINDOW_MS = 2000L
 
 /**
- * 大厅 4-Tab 主宿主（快传 / 发现 / 传输 / 我的）：统一管理 Tab 切换、状态保持、全局直连邀请横幅与确认弹窗。
+ * 大厅 4-Tab 主宿主（快传 / 发现 / 传输 / 我的）：支持底部 4 菜单手势左右滑动丝滑切换、全局直连邀请横幅与确认弹窗。
  */
 @Composable
 fun LobbyScreen(
@@ -63,15 +63,18 @@ fun LobbyScreen(
     modifier: Modifier = Modifier,
 ) {
     val colors = BayTheme.colors
-    var selectedTab by rememberSaveable { mutableIntStateOf(0) }
+    val pagerState = rememberPagerState(initialPage = 0, pageCount = { 4 })
+    val scope = rememberCoroutineScope()
+    val selectedTab = pagerState.currentPage
     var showPickupHub by rememberSaveable { mutableStateOf(false) }
     var lastBackPressAt by remember { mutableLongStateOf(0L) }
-    val stateHolder = rememberSaveableStateHolder()
 
-    val nav = remember(vm, onRequestQrScan) {
+    val nav = remember(vm, onRequestQrScan, scope, pagerState) {
         object : LobbyNav {
             override fun switchTab(index: Int) {
-                selectedTab = index.coerceIn(0, 3)
+                scope.launch {
+                    pagerState.animateScrollToPage(index.coerceIn(0, 3))
+                }
             }
 
             override fun requestQrScan() {
@@ -89,11 +92,11 @@ fun LobbyScreen(
         if (!state.privacyAccepted) return@LaunchedEffect
         when (state.pendingAppAction) {
             AppShortcutAction.QUICK_SEND -> {
-                selectedTab = 0
+                pagerState.scrollToPage(0)
                 vm.consumePendingAppAction()
             }
             AppShortcutAction.PICKUP -> {
-                selectedTab = 0
+                pagerState.scrollToPage(0)
                 showPickupHub = true
                 vm.consumePendingAppAction()
             }
@@ -104,7 +107,7 @@ fun LobbyScreen(
     // 若收到外部待发分享或待加入口令，切回「快传」主入口便于直达
     LaunchedEffect(state.pendingJoinCode) {
         if (!state.pendingJoinCode.isNullOrBlank()) {
-            selectedTab = 0
+            pagerState.animateScrollToPage(0)
         }
     }
 
@@ -119,7 +122,7 @@ fun LobbyScreen(
     // B12：非「快传」Tab 按返回切回「快传」，「快传」Tab 双击返回退至桌面
     BackHandler(enabled = state.privacyAccepted && state.prefs.onboardingDone) {
         if (selectedTab != 0) {
-            selectedTab = 0
+            scope.launch { pagerState.animateScrollToPage(0) }
         } else {
             val now = System.currentTimeMillis()
             if (now - lastBackPressAt <= BACK_EXIT_WINDOW_MS) {
@@ -176,39 +179,36 @@ fun LobbyScreen(
             }
         }
 
-        // UX-9：SaveableStateProvider 保留各 Tab 列表滚动位置与局部状态
-        Crossfade(
-            targetState = selectedTab,
-            animationSpec = tween(durationMillis = 150),
+        // 支持左右手势丝滑滑动切换底部 4 个页面
+        HorizontalPager(
+            state = pagerState,
+            beyondViewportPageCount = 1,
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth(),
-            label = "bayLobbyTabCrossfade",
         ) { tab ->
-            stateHolder.SaveableStateProvider(key = tab) {
-                when (tab) {
-                    0 -> QuickTab(
-                        state = state,
-                        vm = vm,
-                        nav = nav,
-                        onOpenPickupHub = { showPickupHub = true },
-                    )
-                    1 -> DiscoverTab(
-                        state = state,
-                        vm = vm,
-                        nav = nav,
-                    )
-                    2 -> TransferTab(
-                        state = state,
-                        vm = vm,
-                        nav = nav,
-                    )
-                    else -> MineTab(
-                        state = state,
-                        vm = vm,
-                        nav = nav,
-                    )
-                }
+            when (tab) {
+                0 -> QuickTab(
+                    state = state,
+                    vm = vm,
+                    nav = nav,
+                    onOpenPickupHub = { showPickupHub = true },
+                )
+                1 -> DiscoverTab(
+                    state = state,
+                    vm = vm,
+                    nav = nav,
+                )
+                2 -> TransferTab(
+                    state = state,
+                    vm = vm,
+                    nav = nav,
+                )
+                else -> MineTab(
+                    state = state,
+                    vm = vm,
+                    nav = nav,
+                )
             }
         }
 
@@ -217,7 +217,11 @@ fun LobbyScreen(
             activeTransferCount = activeTransferCount,
             mineHasBadge = mineHasBadge,
             hapticEnabled = state.prefs.hapticEnabled,
-            onSelectTab = { target -> selectedTab = target },
+            onSelectTab = { target ->
+                scope.launch {
+                    pagerState.animateScrollToPage(target.coerceIn(0, 3))
+                }
+            },
         )
     }
 

@@ -1,6 +1,12 @@
 package com.baytale.baychat.ui.screens.chat
 
+import android.app.Activity
+import android.content.Intent
+import android.provider.MediaStore
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -79,6 +85,7 @@ import androidx.compose.material.icons.rounded.WifiOff
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -107,6 +114,7 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontFamily
@@ -114,6 +122,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.baytale.baychat.core.model.ChatItem
 import com.baytale.baychat.core.model.ChatKind
 import com.baytale.baychat.core.model.RoomMode
@@ -166,6 +176,66 @@ fun ChatRoomScreen(
     }
     val scope = rememberCoroutineScope()
     val inputFocusRequester = remember { FocusRequester() }
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    // 切回前台时，若开启了剪贴板自动同步且剪贴板文本变化，则静默同步给同房成员
+    DisposableEffect(lifecycleOwner, room.roomCode) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                vm.syncClipboardOnForegroundIfChanged(readTextFromClipboard(context))
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
+    // 顶部栏“原片”直发媒体选择器（强制走无损原文件传输通道）
+    val originalPhotoPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickMultipleVisualMedia(maxItems = 20),
+    ) { uris ->
+        if (uris.isNotEmpty()) {
+            vm.sendUris(uris, forceOriginalFile = true)
+        }
+    }
+
+    val originalGalleryIntentLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        if (result.resultCode != Activity.RESULT_OK) return@rememberLauncherForActivityResult
+        val data = result.data ?: return@rememberLauncherForActivityResult
+        val picked = buildList {
+            data.clipData?.let { clip ->
+                for (i in 0 until clip.itemCount) {
+                    clip.getItemAt(i)?.uri?.let { add(it) }
+                }
+            }
+            if (isEmpty()) {
+                data.data?.let { add(it) }
+            }
+        }
+        if (picked.isNotEmpty()) {
+            vm.sendUris(picked, forceOriginalFile = true)
+        }
+    }
+
+    fun launchOriginalMediaPicker() {
+        runCatching {
+            val intent = Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI).apply {
+                type = "image/* video/*"
+                putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("image/*", "video/*"))
+                putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+            }
+            originalGalleryIntentLauncher.launch(intent)
+        }.onFailure {
+            runCatching {
+                originalPhotoPicker.launch(
+                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo),
+                )
+            }
+        }
+    }
 
     // UX-10：全部局部界面状态采用 rememberSaveable 保持，确保旋转屏幕不丢失
     var showSearchBar by rememberSaveable(room.roomCode) { mutableStateOf(false) }
@@ -487,12 +557,32 @@ fun ChatRoomScreen(
                         dismissKeyboardAndPanel()
                         showRoomInfo = true
                     },
+                    onQuickSendOriginalMedia = {
+                        dismissKeyboardAndPanel()
+                        launchOriginalMediaPicker()
+                    },
                 )
             }
 
-            // UX-14：房内断网 / 信令重连紧凑提示条
+            // UX-14：静默无感重连策略——刚切回前台或初始化握手的前 5 秒保持“收取中...”而不闪黄条，仅真实断网或超 5 秒未连通时提示
+            var showReconnectBanner by remember(room.roomCode) { mutableStateOf(false) }
+            LaunchedEffect(state.isNetworkOffline, room.wsConnected) {
+                when {
+                    state.isNetworkOffline -> {
+                        showReconnectBanner = true
+                    }
+                    room.wsConnected -> {
+                        showReconnectBanner = false
+                    }
+                    else -> {
+                        delay(5_000L)
+                        showReconnectBanner = true
+                    }
+                }
+            }
+
             AnimatedVisibility(
-                visible = state.isNetworkOffline || !room.wsConnected,
+                visible = showReconnectBanner && (state.isNetworkOffline || !room.wsConnected),
                 enter = expandVertically() + fadeIn(),
                 exit = shrinkVertically() + fadeOut(),
             ) {
@@ -514,7 +604,7 @@ fun ChatRoomScreen(
                         text = if (state.isNetworkOffline) {
                             "当前网络不可用，请检查网络连接"
                         } else {
-                            "与服务器连接断开，正在尝试重连..."
+                            "当前网络较慢，正在重连..."
                         },
                         style = BayType.footnote.copy(fontWeight = FontWeight.Medium),
                         color = colors.textPrimary,
