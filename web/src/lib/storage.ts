@@ -98,10 +98,10 @@ export function saveUserProfile(profile: UserProfile): void {
   }
 }
 
-const VALID_THEMES: ThemeMode[] = ['air', 'mint', 'berry', 'peach', 'lime'];
+const VALID_THEMES: ThemeMode[] = ['geek', 'air', 'mint', 'berry', 'peach', 'lime'];
 const VALID_APPEARANCES: AppearanceMode[] = ['system', 'light', 'dark'];
 
-// 读取强调色主题：默认 'air'；旧 'neon' 自动迁移为 'air' 且若未保存外观偏好则迁移外观为 'dark'
+// 读取强调色主题：全新访客默认 'geek'（极客青绿）；旧 'neon' 自动迁移为 'air'
 export function loadTheme(): ThemeMode {
   try {
     const saved = localStorage.getItem(KEY_THEME);
@@ -118,7 +118,7 @@ export function loadTheme(): ThemeMode {
   } catch {
     // 忽略异常
   }
-  return 'air';
+  return 'geek';
 }
 
 export function saveTheme(theme: ThemeMode): void {
@@ -129,7 +129,7 @@ export function saveTheme(theme: ThemeMode): void {
   }
 }
 
-// 读取外观模式偏好：默认 'system'；兼容首次从旧版 'neon' 迁移而来的深色偏好
+// 读取外观模式偏好：全新访客默认 'dark' 匹配极客深海暗色工作台，已有偏好原样保留
 export function loadAppearance(): AppearanceMode {
   try {
     const saved = localStorage.getItem(KEY_APPEARANCE);
@@ -143,7 +143,7 @@ export function loadAppearance(): AppearanceMode {
   } catch {
     // 忽略异常
   }
-  return 'system';
+  return 'dark';
 }
 
 export function saveAppearance(mode: AppearanceMode): void {

@@ -8,6 +8,7 @@ export interface ThemeOption {
 }
 
 export const THEME_OPTIONS: ThemeOption[] = [
+  { id: 'geek', name: '极客青绿', orb: '#14B8A6' },
   { id: 'air', name: '海空蓝', orb: '#007AFF' },
   { id: 'mint', name: '海盐青', orb: '#14A3B8' },
   { id: 'berry', name: '莓果紫', orb: '#5E5CE6' },

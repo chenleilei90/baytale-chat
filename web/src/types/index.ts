@@ -2,7 +2,7 @@
 
 export type RoomMode = 'fixed' | 'ephemeral';
 
-export type ThemeMode = 'air' | 'mint' | 'berry' | 'peach' | 'lime';
+export type ThemeMode = 'air' | 'mint' | 'berry' | 'peach' | 'lime' | 'geek';
 
 export type AppearanceMode = 'system' | 'light' | 'dark';
 

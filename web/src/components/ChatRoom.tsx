@@ -41,6 +41,9 @@ import {
   Clipboard,
   Forward,
   Globe,
+  Activity,
+  ShieldCheck,
+  FolderUp,
 } from 'lucide-react';
 import QRCode from 'qrcode';
 import type {
@@ -128,6 +131,7 @@ import { WhiteboardModal, type RemoteCursorState } from './WhiteboardModal';
 import { StudyPomodoroCard } from './StudyPomodoroCard';
 import { RemoteAudioPlayer, ScreenShareStage, type ScreenFeedItem } from './MediaCallBar';
 import { Lightbox } from './Lightbox';
+import { P2PMonitorPanel } from './P2PMonitorPanel';
 
 interface ChatRoomProps {
   roomCode: string;
@@ -313,6 +317,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   const [attachmentPopoverOpen, setAttachmentPopoverOpen] = useState(false);
   const [customLimitMBInput, setCustomLimitMBInput] = useState('');
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [monitorOpen, setMonitorOpen] = useState(true);
   const [showInvite, setShowInvite] = useState(false);
   const [showWhiteboard, setShowWhiteboard] = useState(false);
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
@@ -1718,6 +1723,19 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     if (allLan) return { cls: 'pill-emerald', dot: 'emerald', text: `局域网直连${rttLabel}` };
     return { cls: 'pill-emerald', dot: 'emerald', text: `跨公网 P2P 直连${rttLabel}` };
   }, [peers, linkStatuses]);
+
+  const roomTransfers = useMemo(
+    () =>
+      messages
+        .map((m) => m.transfer)
+        .filter((t): t is FileTransferInfo => Boolean(t && !t.isAudio)),
+    [messages]
+  );
+
+  const directPeerCount = useMemo(
+    () => Object.values(peers).filter((p) => Boolean(linkStatuses[p.peerId]?.dataReady)).length,
+    [peers, linkStatuses]
+  );
 
   // 计算待接收的批量文件列表（>= 2 个时显示「一键接收全部」快捷条）
   const pendingIncomingFiles = useMemo(() => {
@@ -3178,6 +3196,17 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
 
           <button
             type="button"
+            className={`btn btn-sm p2p-monitor-toggle ${monitorOpen ? 'btn-jelly' : 'btn-glass'}`}
+            onClick={() => setMonitorOpen((v) => !v)}
+            title={monitorOpen ? '收起右侧 P2P 监控面板' : '展开右侧 P2P 监控面板'}
+            aria-label="切换 P2P 监控面板"
+          >
+            <Activity size={13} aria-hidden="true" />
+            <span>监控</span>
+          </button>
+
+          <button
+            type="button"
             className="btn btn-glass btn-sm"
             onClick={onMinimizeRoom}
             title="最小化挂起房间回大厅（保持 P2P 直连与文件传输不断线）"
@@ -3936,6 +3965,18 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             </div>
           )}
 
+          <div className="sidebar-e2ee-badge">
+            <ShieldCheck size={16} style={{ color: 'var(--success)', flexShrink: 0 }} aria-hidden="true" />
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-primary)' }}>
+                端到端加密已启用
+              </div>
+              <div className="mono" style={{ fontSize: 10.5, color: 'var(--accent)' }}>
+                AES-256-GCM + DTLS 1.3
+              </div>
+            </div>
+          </div>
+
           <div className="sidebar-footer-section">
             <div className="popover-anchor" onClick={(e) => e.stopPropagation()}>
               <button
@@ -4509,6 +4550,21 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                 </button>
               </div>
 
+              <button
+                type="button"
+                className="p2p-drop-strip"
+                onClick={() => fileInputRef.current?.click()}
+                title="拖拽文件或整个文件夹到聊天区即可免压缩 P2P 直传，点击也可选择本地文件"
+              >
+                <span className="p2p-drop-strip-left">
+                  <FolderUp size={15} style={{ color: 'var(--accent)', flexShrink: 0 }} aria-hidden="true" />
+                  <span className="p2p-drop-strip-title">
+                    拖拽文件或文件夹至此 · 零压缩 P2P 分片直传
+                  </span>
+                </span>
+                <span className="p2p-drop-strip-action">选文件</span>
+              </button>
+
               <input
                 ref={fileInputRef}
                 type="file"
@@ -4542,6 +4598,19 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             </div>
           )}
         </section>
+
+        {monitorOpen && (
+          <P2PMonitorPanel
+            roomCode={roomCode}
+            wsConnected={wsConnected}
+            peerCount={Object.keys(peers).length}
+            directPeerCount={directPeerCount}
+            transfers={roomTransfers}
+            onOpenQrInvite={() => setShowInvite(true)}
+            onCancelTransfer={(pid, tid) => meshRef.current?.cancelTransfer(pid, tid)}
+            onRequestResume={(pid, tr) => void handleRequestResume(pid, tr)}
+          />
+        )}
       </div>
 
       {showInvite && roomInfo && (

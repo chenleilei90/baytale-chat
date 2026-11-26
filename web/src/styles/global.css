@@ -135,6 +135,56 @@ html[data-appearance='dark'][data-accent='lime'] {
   --accent-soft: rgba(48, 209, 88, 0.22);
 }
 
+/* 极客青绿（P2PLink Dark Teal 工作台预设：保留完整浅/深色自适应对比度） */
+html[data-accent='geek'] {
+  --accent: #0D9488;
+  --accent-soft: rgba(13, 148, 136, 0.12);
+  --on-accent: #FFFFFF;
+}
+html[data-appearance='dark'][data-accent='geek'] {
+  --bg: #070B12;
+  --surface: #0D1424;
+  --surface-elevated: #101E33;
+  --fill: rgba(20, 184, 166, 0.10);
+  --fill-strong: rgba(20, 184, 166, 0.20);
+  --separator: rgba(51, 65, 85, 0.72);
+  --accent: #14B8A6;
+  --accent-soft: rgba(20, 184, 166, 0.18);
+  --on-accent: #041214;
+  --bubble-peer: #131D31;
+  --bubble-self: #14B8A6;
+  --bubble-self-text: #041214;
+  --success: #34D399;
+  --success-soft: rgba(52, 211, 153, 0.16);
+  --warning: #FBBF24;
+  --warning-soft: rgba(251, 191, 36, 0.16);
+  --danger: #FB7185;
+  --danger-soft: rgba(251, 113, 133, 0.16);
+}
+
+html[data-appearance='dark'][data-accent='geek'] .geek-scroll::-webkit-scrollbar,
+html[data-appearance='dark'][data-accent='geek'] .chat-scroll-area::-webkit-scrollbar,
+html[data-appearance='dark'][data-accent='geek'] .p2p-monitor-col::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+html[data-appearance='dark'][data-accent='geek'] .geek-scroll::-webkit-scrollbar-track,
+html[data-appearance='dark'][data-accent='geek'] .chat-scroll-area::-webkit-scrollbar-track,
+html[data-appearance='dark'][data-accent='geek'] .p2p-monitor-col::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.4);
+}
+html[data-appearance='dark'][data-accent='geek'] .geek-scroll::-webkit-scrollbar-thumb,
+html[data-appearance='dark'][data-accent='geek'] .chat-scroll-area::-webkit-scrollbar-thumb,
+html[data-appearance='dark'][data-accent='geek'] .p2p-monitor-col::-webkit-scrollbar-thumb {
+  background: rgba(20, 184, 166, 0.35);
+  border-radius: 9999px;
+}
+html[data-appearance='dark'][data-accent='geek'] .geek-scroll::-webkit-scrollbar-thumb:hover,
+html[data-appearance='dark'][data-accent='geek'] .chat-scroll-area::-webkit-scrollbar-thumb:hover,
+html[data-appearance='dark'][data-accent='geek'] .p2p-monitor-col::-webkit-scrollbar-thumb:hover {
+  background: rgba(20, 184, 166, 0.65);
+}
+
 /* ==========================================================================
    全局重置与零描边无边框规范
    ========================================================================== */

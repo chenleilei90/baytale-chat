@@ -836,3 +836,328 @@ html[data-appearance='dark'] .file-kind-code {
   color: var(--text-muted);
   font-weight: 600;
 }
+
+/* ==========================================================================
+   桌面端三栏 P2P 实时监控面板与霓虹青绿虚线拖拽直传条
+   ========================================================================== */
+.p2p-monitor-col {
+  width: 272px;
+  flex-shrink: 0;
+  background: var(--surface);
+  border-radius: var(--r-lg);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+}
+
+@media (max-width: 1179px) {
+  .p2p-monitor-col,
+  .p2p-monitor-toggle {
+    display: none !important;
+  }
+}
+
+.p2p-card {
+  background: var(--fill);
+  border: 1px solid var(--separator);
+  border-radius: var(--r-md);
+  padding: 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.p2p-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.p2p-card-title {
+  font-size: var(--fs-footnote);
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.p2p-badge {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: var(--r-full);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.p2p-file-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.p2p-file-name-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.p2p-file-name {
+  font-size: var(--fs-footnote);
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.p2p-file-sub {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10.5px;
+  color: var(--text-muted);
+}
+
+.p2p-chunk-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 5px;
+}
+
+.p2p-chunk-cell {
+  height: 20px;
+  border-radius: 5px;
+  border: 1px solid var(--separator);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 240ms ease;
+}
+
+.p2p-chunk-cell.done {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+  font-weight: 700;
+}
+
+.p2p-chunk-cell.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 700;
+  animation: p2pPulse 1.2s ease-in-out infinite;
+}
+
+.p2p-chunk-cell.paused {
+  background: var(--warning-soft);
+  border-color: var(--warning);
+  color: var(--warning);
+  font-weight: 700;
+}
+
+@keyframes p2pPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
+.p2p-task-switcher {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.p2p-task-pill {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 2px 7px;
+  border-radius: var(--r-full);
+  border: 1px solid var(--separator);
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.p2p-task-pill.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.p2p-done-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--success);
+  background: var(--success-soft);
+  border-radius: var(--r-sm);
+  padding: 5px 8px;
+}
+
+.p2p-speed-now {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.p2p-wave-box {
+  border-radius: var(--r-sm);
+  border: 1px solid var(--separator);
+  background: var(--bg);
+  padding: 6px;
+  overflow: hidden;
+}
+
+.p2p-wave-svg {
+  width: 100%;
+  height: 62px;
+  display: block;
+}
+
+.p2p-wave-foot {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.p2p-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+}
+
+.p2p-status-dot.online {
+  background: var(--success);
+  box-shadow: 0 0 8px var(--success);
+}
+
+.p2p-status-dot.warn {
+  background: var(--warning);
+}
+
+.p2p-security-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  border: 1px solid var(--separator);
+}
+
+.p2p-security-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.p2p-kv-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 6px;
+  border-top: 1px solid var(--separator);
+}
+
+.p2p-kv {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10.5px;
+  color: var(--text-muted);
+}
+
+.p2p-kv strong {
+  color: var(--text-primary);
+}
+
+.p2p-reconnect-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--warning);
+}
+
+/* 左侧栏安全加密徽章 */
+.sidebar-e2ee-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--r-sm);
+  background: var(--fill);
+  border: 1px solid var(--separator);
+}
+
+.chat-side-bento .floating-popover {
+  width: 252px;
+}
+
+.chat-side-bento .palette-bar {
+  gap: 6px;
+  padding: 5px 8px;
+}
+
+/* 底部霓虹青绿虚线拖拽直传区 */
+.p2p-drop-strip {
+  margin-top: 6px;
+  width: 100%;
+  padding: 8px 12px;
+  border-radius: var(--r-md);
+  border: 1.5px dashed var(--accent);
+  background: var(--accent-soft);
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  cursor: pointer;
+  transition: all 160ms ease;
+  text-align: left;
+}
+
+.p2p-drop-strip:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px var(--accent-soft);
+}
+
+.p2p-drop-strip-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.p2p-drop-strip-title {
+  font-size: var(--fs-footnote);
+  font-weight: 700;
+  color: var(--accent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.p2p-drop-strip-action {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--surface);
+  padding: 3px 9px;
+  border-radius: var(--r-sm);
+  flex-shrink: 0;
+}
