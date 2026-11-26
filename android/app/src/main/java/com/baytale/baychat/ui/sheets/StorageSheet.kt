@@ -10,6 +10,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Collections
 import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.FolderZip
+import androidx.compose.material.icons.rounded.Forum
 import androidx.compose.material.icons.rounded.PauseCircle
 import androidx.compose.material.icons.rounded.PhotoLibrary
 import androidx.compose.material.icons.rounded.SystemUpdate
@@ -66,6 +67,7 @@ fun StorageSheet(
 
     var pendingCategory by remember { mutableStateOf<StorageCategoryDisplay?>(null) }
     var confirmClearAll by remember { mutableStateOf(false) }
+    var confirmClearHistory by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         vm.refreshStorageStats()
@@ -74,8 +76,8 @@ fun StorageSheet(
     val items = listOf(
         StorageCategoryDisplay(
             category = StorageCategory.RECEIVED_MEDIA,
-            title = "图片与视频缓存",
-            subtitle = "聊天内已保存的图片与视频预览副本",
+            title = "聊天附件与媒体缓存",
+            subtitle = "聊天内下载保留的图片、视频与附件缓存",
             icon = Icons.Rounded.PhotoLibrary,
             tint = colors.fileTypeColors.image,
             bytes = stats.receivedMediaBytes,
@@ -106,7 +108,7 @@ fun StorageSheet(
         ),
         StorageCategoryDisplay(
             category = StorageCategory.EXPORTS,
-            title = "导出与打包临时文件",
+            title = "临时附件与语音缓存",
             subtitle = "文件夹压缩包、拍照录像及语音临时文件",
             icon = Icons.Rounded.FolderZip,
             tint = colors.fileTypeColors.archive,
@@ -182,6 +184,28 @@ fun StorageSheet(
                 }
             }
 
+            // 聊天与最近记录清理入口
+            val hasRecordsToClear = state.recentRooms.isNotEmpty() ||
+                state.draftsByRoom.isNotEmpty() ||
+                (state.activeRoom?.messages?.isNotEmpty() == true)
+            BayGroup(header = "消息记录清理") {
+                BayListRow(
+                    icon = Icons.Rounded.Forum,
+                    iconTint = colors.danger,
+                    title = "清理聊天与最近记录",
+                    subtitle = "清空本机最近房间（${state.recentRooms.size} 条）、草稿与当前消息流",
+                    trailing = RowTrailing.Custom {
+                        BayButton(
+                            text = "清理",
+                            onClick = { confirmClearHistory = true },
+                            style = BayButtonStyle.DestructiveSoft,
+                            size = BayButtonSize.Small,
+                            enabled = hasRecordsToClear,
+                        )
+                    },
+                )
+            }
+
             // 一键清理全部缓存
             BayButton(
                 text = "一键清理全部缓存",
@@ -225,6 +249,21 @@ fun StorageSheet(
             },
             dismissText = "取消",
             onDismiss = { confirmClearAll = false },
+            destructive = true,
+        )
+    }
+
+    if (confirmClearHistory) {
+        BayDialog(
+            title = "清理聊天与最近记录？",
+            message = "将清空本机最近访问房间列表、输入草稿及当前聊天消息显示，收藏的常驻房间与已保存的系统文件不受影响。",
+            confirmText = "确认清理",
+            onConfirm = {
+                vm.clearAllLocalHistoryRecords()
+                confirmClearHistory = false
+            },
+            dismissText = "取消",
+            onDismiss = { confirmClearHistory = false },
             destructive = true,
         )
     }

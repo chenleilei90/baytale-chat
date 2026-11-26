@@ -6,6 +6,7 @@ import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
@@ -33,6 +34,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -44,6 +46,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Forward
@@ -61,12 +64,14 @@ import androidx.compose.material.icons.rounded.GroupAdd
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.InsertDriveFile
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.SearchOff
 import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material.icons.rounded.Undo
 import androidx.compose.material.icons.rounded.WifiOff
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -83,6 +88,7 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.geometry.Offset
@@ -111,6 +117,7 @@ import com.baytale.baychat.ui.BayChatUiState
 import com.baytale.baychat.ui.BayChatViewModel
 import com.baytale.baychat.ui.ForwardPayload
 import com.baytale.baychat.ui.design.BayActionSheet
+import com.baytale.baychat.ui.design.BayBottomSheet
 import com.baytale.baychat.ui.design.BayButton
 import com.baytale.baychat.ui.design.BayButtonSize
 import com.baytale.baychat.ui.design.BayButtonStyle
@@ -179,7 +186,7 @@ fun ChatRoomScreen(
     var peerQuickTargetName by rememberSaveable(room.roomCode) { mutableStateOf<String?>(null) }
     var inputText by rememberSaveable(room.roomCode) { mutableStateOf(vm.draftFor(room.roomCode)) }
 
-    var isVoiceCancelling by remember { mutableStateOf(false) }
+    var voiceGestureZone by remember { mutableStateOf(VoiceGestureZone.SEND) }
     var highlightedMessageId by remember { mutableStateOf<String?>(null) }
 
     // UX-3：返回键逐层退回（先退出多选/表情面板/附件面板，再关闭搜索栏，避免直接触发退房确认弹窗）
@@ -237,7 +244,7 @@ fun ChatRoomScreen(
 
     LaunchedEffect(state.isRecordingVoice) {
         if (!state.isRecordingVoice) {
-            isVoiceCancelling = false
+            voiceGestureZone = VoiceGestureZone.SEND
         }
     }
 
@@ -1090,12 +1097,32 @@ fun ChatRoomScreen(
                 }
             }
 
-            // 6. 正在输入提示条
-            val typingNames = remember(room.typingPeers, room.peers) {
-                room.typingPeers.mapNotNull { room.peers[it]?.name }.joinToString("、")
+            // 6. 多人输入与语音说话状态提示条（精准区分多人及「正在输入」/「正在说话」）
+            val typingSummary = remember(room.typingPeers, room.peers) {
+                val voiceNames = mutableListOf<String>()
+                val textNames = mutableListOf<String>()
+                room.typingPeers.forEach { (pid, mode) ->
+                    val name = room.peers[pid]?.name?.takeIf { it.isNotBlank() } ?: return@forEach
+                    if (mode == "voice") voiceNames.add(name) else textNames.add(name)
+                }
+                fun formatNames(names: List<String>): String = when (names.size) {
+                    0 -> ""
+                    1 -> names[0]
+                    2 -> "${names[0]}、${names[1]}"
+                    else -> "${names[0]}、${names[1]} 等 ${names.size} 人"
+                }
+                val hasVoice = voiceNames.isNotEmpty()
+                val text = when {
+                    voiceNames.isNotEmpty() && textNames.isNotEmpty() ->
+                        "${formatNames(voiceNames)} 正在说话，${formatNames(textNames)} 正在输入..."
+                    voiceNames.isNotEmpty() -> "${formatNames(voiceNames)} 正在说话..."
+                    textNames.isNotEmpty() -> "${formatNames(textNames)} 正在输入..."
+                    else -> ""
+                }
+                text to hasVoice
             }
             AnimatedVisibility(
-                visible = typingNames.isNotBlank(),
+                visible = typingSummary.first.isNotBlank(),
                 enter = expandVertically() + fadeIn(),
                 exit = shrinkVertically() + fadeOut(),
             ) {
@@ -1107,13 +1134,13 @@ fun ChatRoomScreen(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     Icon(
-                        imageVector = Icons.Rounded.Edit,
+                        imageVector = if (typingSummary.second) Icons.Rounded.Mic else Icons.Rounded.Edit,
                         contentDescription = null,
                         tint = colors.accent,
                         modifier = Modifier.size(13.dp),
                     )
                     Text(
-                        text = "$typingNames 正在输入...",
+                        text = typingSummary.first,
                         style = BayType.caption,
                         color = colors.accent,
                         maxLines = 1,
@@ -1227,18 +1254,36 @@ fun ChatRoomScreen(
                     inputFocusRequester = inputFocusRequester,
                     replyingTo = room.replyingTo,
                     vm = vm,
-                    onVoiceCancellingChanged = { isVoiceCancelling = it },
+                    onVoiceZoneChanged = { voiceGestureZone = it },
                 )
             }
         }
 
-        // 8. 微信式录音居中浮层（纯视觉遮罩穿透指针事件，绝不阻断底层按住说话手势）
+        // 8. 新版微信式录音与转文字全屏浮层（纯视觉遮罩穿透指针事件，绝不阻断底层手势）
         VoiceRecordingOverlay(
             visible = state.isRecordingVoice,
-            isCancelling = isVoiceCancelling,
+            zone = voiceGestureZone,
             durationMs = state.voiceRecordDurationMs,
             amplitude = state.voiceAmplitude,
+            transcribePreview = state.voiceTranscribeText,
+            isSpeechRecognizing = state.isSpeechRecognizing,
         )
+
+        // 8b. 语音转文字确认与编辑面板（支持发送文字、发送原语音或再次语音听写）
+        if (state.showVoiceTranscribePanel) {
+            VoiceTranscribeConfirmSheet(
+                text = state.voiceTranscribeText,
+                hasDraftAudio = !state.voiceDraftAudioPath.isNullOrBlank(),
+                isRecognizing = state.isSpeechRecognizing,
+                onTextChange = { vm.updateVoiceTranscribeText(it) },
+                onToggleDictation = {
+                    if (state.isSpeechRecognizing) vm.stopSpeechDictationInPanel() else vm.startSpeechDictationInPanel()
+                },
+                onSendAudio = { vm.sendVoiceDraftAudio() },
+                onSendText = { vm.sendVoiceTranscribeText() },
+                onDismiss = { vm.dismissVoiceTranscribePanel() },
+            )
+        }
 
         // 9. 微信式全屏「聊天信息」房间页（从右侧滑入覆盖当前聊天视图）
         RoomInfoScreen(
@@ -1671,18 +1716,23 @@ private fun EmptyRoomOverview(
 private val RECORD_METER_FACTORS = listOf(0.36f, 0.54f, 0.74f, 0.90f, 1.0f, 0.90f, 0.74f, 0.54f, 0.36f)
 
 /**
- * 录音中全屏居中浮层（纯视觉遮罩，不拦截任何指针事件以确保底部按住说话手势持续追踪）。
+ * 新版微信同款全屏按住说话浮层：
+ * 居中呈现声波气泡 / 实时转文字预览，底部双圆形按钮区分「左取消 / 右转文字」，最底端呈宽弧形发送区。
  */
 @Composable
 private fun VoiceRecordingOverlay(
     visible: Boolean,
-    isCancelling: Boolean,
+    zone: VoiceGestureZone,
     durationMs: Long,
     amplitude: Float,
+    transcribePreview: String,
+    isSpeechRecognizing: Boolean,
 ) {
     val colors = BayTheme.colors
     val isCountingDown = durationMs >= 50_000L
     val remSec = ((60_000L - durationMs + 999L) / 1000L).coerceIn(1L, 10L)
+    val isCancel = zone == VoiceGestureZone.CANCEL
+    val isConvert = zone == VoiceGestureZone.CONVERT_TEXT
 
     AnimatedVisibility(
         visible = visible,
@@ -1692,82 +1742,304 @@ private fun VoiceRecordingOverlay(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color.Black.copy(alpha = 0.40f)),
-            contentAlignment = Alignment.Center,
+                .background(Color.Black.copy(alpha = 0.56f))
+                .navigationBarsPadding(),
         ) {
-            val cardBg = if (isCancelling) colors.danger else colors.surfaceElevated
-            val titleColor = if (isCancelling) Color.White else colors.textPrimary
-            val hintColor = when {
-                isCancelling -> Color.White.copy(alpha = 0.92f)
-                isCountingDown -> colors.warning
-                else -> colors.textSecondary
-            }
-
-            Column(
+            // 中部状态气泡：松开发送显示声波，左滑变红，右滑「文 转文字」实时预览识别文案
+            Box(
                 modifier = Modifier
-                    .width(224.dp)
-                    .clip(BayShapes.lgShape)
-                    .background(cardBg)
-                    .padding(horizontal = BaySpacing.xl, vertical = BaySpacing.xxl),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(BaySpacing.md),
+                    .align(Alignment.Center)
+                    .padding(bottom = 84.dp)
+                    .padding(horizontal = BaySpacing.xl),
             ) {
-                if (isCancelling) {
-                    Box(
-                        modifier = Modifier
-                            .size(56.dp)
-                            .clip(BayShapes.mdShape)
-                            .background(Color.White.copy(alpha = 0.18f)),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Undo,
-                            contentDescription = "取消发送",
-                            tint = Color.White,
-                            modifier = Modifier.size(30.dp),
-                        )
-                    }
-                } else {
-                    // 9 根居中对称动态音量柱
-                    Row(
-                        modifier = Modifier.height(40.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(5.dp),
-                    ) {
-                        val normAmp = amplitude.coerceIn(0f, 1f)
-                        RECORD_METER_FACTORS.forEachIndexed { idx, factor ->
-                            val targetHeight by animateDpAsState(
-                                targetValue = 6.dp + 32.dp * maxOf(0.14f, normAmp) * factor,
-                                animationSpec = tween(durationMillis = 90),
-                                label = "voiceMeterBar_$idx",
+                val bubbleBg = when {
+                    isCancel -> colors.danger
+                    isConvert -> colors.surfaceElevated
+                    else -> colors.accent
+                }
+                val bubbleTextColor = if (isConvert) colors.textPrimary else colors.onAccent
+
+                Column(
+                    modifier = Modifier
+                        .width(if (isConvert) 264.dp else 210.dp)
+                        .clip(BayShapes.lgShape)
+                        .background(bubbleBg)
+                        .padding(horizontal = BaySpacing.xl, vertical = BaySpacing.lg),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(BaySpacing.sm),
+                ) {
+                    when {
+                        isCancel -> {
+                            Icon(
+                                imageVector = Icons.Rounded.Undo,
+                                contentDescription = "松开取消发送",
+                                tint = bubbleTextColor,
+                                modifier = Modifier.size(30.dp),
                             )
-                            Box(
-                                modifier = Modifier
-                                    .width(4.dp)
-                                    .height(targetHeight)
-                                    .clip(BayShapes.fullShape)
-                                    .background(colors.accent),
+                            Text(
+                                text = "松开手指，取消发送",
+                                style = BayType.subhead.copy(fontWeight = FontWeight.SemiBold),
+                                color = bubbleTextColor,
+                            )
+                        }
+
+                        isConvert -> {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Mic,
+                                    contentDescription = null,
+                                    tint = colors.accent,
+                                    modifier = Modifier.size(16.dp),
+                                )
+                                Text(
+                                    text = if (isSpeechRecognizing) "正在识别说话内容..." else "松开转为文字并编辑",
+                                    style = BayType.caption.copy(fontWeight = FontWeight.SemiBold),
+                                    color = colors.accent,
+                                )
+                            }
+                            Text(
+                                text = transcribePreview.ifBlank {
+                                    if (isSpeechRecognizing) "请直接说出你想发送的文字..." else "松手进入语音转文字确认面板"
+                                },
+                                style = BayType.body,
+                                color = if (transcribePreview.isNotBlank()) colors.textPrimary else colors.textSecondary,
+                                textAlign = TextAlign.Start,
+                                maxLines = 4,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+
+                        else -> {
+                            Row(
+                                modifier = Modifier.height(34.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                            ) {
+                                val normAmp = amplitude.coerceIn(0f, 1f)
+                                RECORD_METER_FACTORS.forEachIndexed { idx, factor ->
+                                    val targetHeight by animateDpAsState(
+                                        targetValue = 6.dp + 26.dp * maxOf(0.16f, normAmp) * factor,
+                                        animationSpec = tween(durationMillis = 90),
+                                        label = "voiceMeterBar_$idx",
+                                    )
+                                    Box(
+                                        modifier = Modifier
+                                            .width(4.dp)
+                                            .height(targetHeight)
+                                            .clip(BayShapes.fullShape)
+                                            .background(colors.onAccent),
+                                    )
+                                }
+                            }
+                            Text(
+                                text = if (isCountingDown) {
+                                    "${formatDurationMs(durationMs)} · 还可以说 $remSec 秒"
+                                } else {
+                                    formatDurationMs(durationMs)
+                                },
+                                style = BayType.footnote.copy(
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.SemiBold,
+                                ),
+                                color = colors.onAccent,
                             )
                         }
                     }
                 }
+            }
 
-                Text(
-                    text = formatDurationMs(durationMs),
-                    style = BayType.title2.copy(fontFamily = FontFamily.Monospace),
-                    color = titleColor,
+            // 底部交互分区指示：左圆形「取消」+ 右圆形「文 转文字」+ 最底端发送提示条
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .padding(bottom = BaySpacing.lg),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(BaySpacing.lg),
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 42.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    // 左侧：取消区域
+                    val cancelScale by animateFloatAsState(
+                        targetValue = if (isCancel) 1.18f else 1.0f,
+                        animationSpec = tween(120),
+                        label = "cancelScale",
+                    )
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(60.dp)
+                                .scale(cancelScale)
+                                .clip(CircleShape)
+                                .background(if (isCancel) colors.danger else colors.surfaceElevated.copy(alpha = 0.90f)),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Close,
+                                contentDescription = "取消",
+                                tint = if (isCancel) Color.White else colors.textPrimary,
+                                modifier = Modifier.size(26.dp),
+                            )
+                        }
+                        Text(
+                            text = if (isCancel) "松开取消" else "取消",
+                            style = BayType.caption.copy(fontWeight = FontWeight.Medium),
+                            color = if (isCancel) colors.danger else Color.White.copy(alpha = 0.85f),
+                        )
+                    }
+
+                    // 右侧：转文字区域
+                    val convertScale by animateFloatAsState(
+                        targetValue = if (isConvert) 1.18f else 1.0f,
+                        animationSpec = tween(120),
+                        label = "convertScale",
+                    )
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(60.dp)
+                                .scale(convertScale)
+                                .clip(CircleShape)
+                                .background(if (isConvert) colors.accent else colors.surfaceElevated.copy(alpha = 0.90f)),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                text = "文",
+                                style = BayType.headline.copy(fontWeight = FontWeight.Bold),
+                                color = if (isConvert) colors.onAccent else colors.textPrimary,
+                            )
+                        }
+                        Text(
+                            text = if (isConvert) "松开转文字" else "转文字",
+                            style = BayType.caption.copy(fontWeight = FontWeight.Medium),
+                            color = if (isConvert) colors.accent else Color.White.copy(alpha = 0.85f),
+                        )
+                    }
+                }
+
+                // 底部发送托盘指示条
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = BaySpacing.lg)
+                        .height(54.dp)
+                        .clip(BayShapes.lgShape)
+                        .background(
+                            if (zone == VoiceGestureZone.SEND) colors.surfaceElevated else colors.surfaceElevated.copy(alpha = 0.55f),
+                        ),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = when (zone) {
+                            VoiceGestureZone.SEND -> "松开 发送 · 上滑左取消 / 右转文字"
+                            VoiceGestureZone.CANCEL -> "松开取消发送"
+                            VoiceGestureZone.CONVERT_TEXT -> "松开进入文字发送确认"
+                        },
+                        style = BayType.subhead.copy(fontWeight = FontWeight.Medium),
+                        color = if (zone == VoiceGestureZone.SEND) colors.textPrimary else colors.textSecondary,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 语音转文字确认抽屉：支持语音听写、手动修改及选择「发送文字」或「发送原语音」。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun VoiceTranscribeConfirmSheet(
+    text: String,
+    hasDraftAudio: Boolean,
+    isRecognizing: Boolean,
+    onTextChange: (String) -> Unit,
+    onToggleDictation: () -> Unit,
+    onSendAudio: () -> Unit,
+    onSendText: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val colors = BayTheme.colors
+    BayBottomSheet(
+        onDismiss = onDismiss,
+        title = "语音转文字",
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(BaySpacing.md),
+        ) {
+            BayTextField(
+                value = text,
+                onValueChange = onTextChange,
+                placeholder = if (isRecognizing) "正在识别语音..." else "可点击下方「语音听写」识别内容，或直接修改后发送",
+                singleLine = false,
+                maxLines = 5,
+                modifier = Modifier.fillMaxWidth(),
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                BayButton(
+                    text = if (isRecognizing) "正在聆听，点此完成" else "点击语音听写",
+                    onClick = onToggleDictation,
+                    style = if (isRecognizing) BayButtonStyle.Primary else BayButtonStyle.Secondary,
+                    size = BayButtonSize.Small,
+                    leadingIcon = Icons.Rounded.Mic,
                 )
+                if (hasDraftAudio) {
+                    Text(
+                        text = "已保留刚刚录制的原语音",
+                        style = BayType.caption,
+                        color = colors.textSecondary,
+                    )
+                }
+            }
 
-                Text(
-                    text = when {
-                        isCancelling -> "松开手指，取消发送"
-                        isCountingDown -> "还可以说 ${remSec} 秒"
-                        else -> "松开发送，上滑取消"
-                    },
-                    style = BayType.footnote.copy(fontWeight = FontWeight.Medium),
-                    color = hintColor,
-                    textAlign = TextAlign.Center,
-                    maxLines = 1,
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(BaySpacing.sm),
+            ) {
+                BayButton(
+                    text = "取消",
+                    onClick = onDismiss,
+                    style = BayButtonStyle.Neutral,
+                    size = BayButtonSize.Medium,
+                    modifier = Modifier.weight(1f),
+                )
+                if (hasDraftAudio) {
+                    BayButton(
+                        text = "发原语音",
+                        onClick = onSendAudio,
+                        style = BayButtonStyle.Secondary,
+                        size = BayButtonSize.Medium,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                BayButton(
+                    text = "发送文字",
+                    onClick = onSendText,
+                    style = BayButtonStyle.Primary,
+                    size = BayButtonSize.Medium,
+                    enabled = text.isNotBlank(),
+                    modifier = Modifier.weight(1f),
                 )
             }
         }

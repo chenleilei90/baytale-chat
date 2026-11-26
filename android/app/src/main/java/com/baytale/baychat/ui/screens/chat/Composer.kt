@@ -108,6 +108,13 @@ import com.baytale.baychat.ui.theme.BayType
 import java.text.BreakIterator
 import kotlin.coroutines.cancellation.CancellationException
 
+// 新版微信式按住说话三段手势区域：松开发送 / 上滑左取消 / 上滑右转文字
+enum class VoiceGestureZone {
+    SEND,
+    CANCEL,
+    CONVERT_TEXT,
+}
+
 /**
  * 底部聊天输入区：支持文字输入、微信式按住说话/上滑取消语音录制、@提及选择、引用回复与多模态附件面板。
  */
@@ -129,7 +136,7 @@ fun Composer(
     inputFocusRequester: FocusRequester,
     replyingTo: ReplyQuote?,
     vm: BayChatViewModel,
-    onVoiceCancellingChanged: (Boolean) -> Unit,
+    onVoiceZoneChanged: (VoiceGestureZone) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val colors = BayTheme.colors
@@ -153,13 +160,13 @@ fun Composer(
         peers.filter { q.isEmpty() || it.name.contains(q, ignoreCase = true) }
     }
 
-    // 语音按住/取消态（供按钮视觉与底层指针循环共享）
+    // 语音按住/三段手势态（SEND / CANCEL / CONVERT_TEXT，供按钮视觉与底层指针循环共享）
     var isPressingVoice by remember { mutableStateOf(false) }
-    var isCancellingVoice by remember { mutableStateOf(false) }
+    var voiceZone by remember { mutableStateOf(VoiceGestureZone.SEND) }
     val latestIsRecording by rememberUpdatedState(state.isRecordingVoice)
     val latestHapticEnabled by rememberUpdatedState(state.prefs.hapticEnabled)
-    val latestOnCancellingChanged by rememberUpdatedState(onVoiceCancellingChanged)
-    val cancelThresholdPx = remember(density) { with(density) { 80.dp.toPx() } }
+    val latestOnZoneChanged by rememberUpdatedState(onVoiceZoneChanged)
+    val upThresholdPx = remember(density) { with(density) { 72.dp.toPx() } }
 
     // 1. 多文件选择器（SAF 零权限）
     val filePicker = rememberLauncherForActivityResult(
@@ -424,19 +431,22 @@ fun Composer(
             if (voiceMode) {
                 val activeRecordingUi = isPressingVoice || state.isRecordingVoice
                 val holdBg = when {
-                    activeRecordingUi && isCancellingVoice -> colors.danger.copy(
+                    activeRecordingUi && voiceZone == VoiceGestureZone.CANCEL -> colors.danger.copy(
                         alpha = if (colors.isDark) 0.26f else 0.14f,
                     )
+                    activeRecordingUi && voiceZone == VoiceGestureZone.CONVERT_TEXT -> colors.accentSoft
                     activeRecordingUi -> colors.fillStrong
                     else -> colors.fill
                 }
                 val holdLabel = when {
-                    activeRecordingUi && isCancellingVoice -> "松开 取消"
-                    activeRecordingUi -> "松开 结束"
+                    activeRecordingUi && voiceZone == VoiceGestureZone.CANCEL -> "松开 取消"
+                    activeRecordingUi && voiceZone == VoiceGestureZone.CONVERT_TEXT -> "松开 转文字"
+                    activeRecordingUi -> "松开 发送"
                     else -> "按住 说话"
                 }
                 val holdTextColor = when {
-                    activeRecordingUi && isCancellingVoice -> colors.danger
+                    activeRecordingUi && voiceZone == VoiceGestureZone.CANCEL -> colors.danger
+                    activeRecordingUi && voiceZone == VoiceGestureZone.CONVERT_TEXT -> colors.accent
                     else -> colors.textPrimary
                 }
 
@@ -446,7 +456,7 @@ fun Composer(
                         .height(48.dp)
                         .clip(BayShapes.smShape)
                         .background(holdBg)
-                        .pointerInput(cancelThresholdPx) {
+                        .pointerInput(upThresholdPx) {
                             awaitEachGesture {
                                 val down = awaitFirstDown(requireUnconsumed = false)
                                 val granted = ContextCompat.checkSelfPermission(
@@ -461,17 +471,18 @@ fun Composer(
                                 down.consume()
                                 BayHaptic.heavy(haptic, latestHapticEnabled)
                                 isPressingVoice = true
-                                isCancellingVoice = false
-                                latestOnCancellingChanged(false)
+                                voiceZone = VoiceGestureZone.SEND
+                                latestOnZoneChanged(VoiceGestureZone.SEND)
 
                                 val started = vm.startVoiceRecording()
                                 if (!started) {
                                     isPressingVoice = false
-                                    isCancellingVoice = false
-                                    latestOnCancellingChanged(false)
+                                    voiceZone = VoiceGestureZone.SEND
+                                    latestOnZoneChanged(VoiceGestureZone.SEND)
                                     return@awaitEachGesture
                                 }
 
+                                var switchedToLive = false
                                 try {
                                     while (true) {
                                         val event = awaitPointerEvent()
@@ -487,10 +498,12 @@ fun Composer(
                                             val normalRelease = (event.type == PointerEventType.Release ||
                                                 change.changedToUpIgnoreConsumed()) && !change.isConsumed
                                             change.consume()
-                                            if (!normalRelease || isCancellingVoice) {
+                                            if (!normalRelease || voiceZone == VoiceGestureZone.CANCEL) {
                                                 if (latestIsRecording) {
                                                     vm.cancelVoiceRecording()
                                                 }
+                                            } else if (voiceZone == VoiceGestureZone.CONVERT_TEXT && latestIsRecording) {
+                                                vm.finishVoiceGestureToTranscribe()
                                             } else if (latestIsRecording) {
                                                 // 若 60 秒已到期自动发送使 isRecordingVoice 变为 false，此处不再重复发送
                                                 vm.stopVoiceRecording(send = true)
@@ -499,12 +512,26 @@ fun Composer(
                                         }
 
                                         val dyUp = down.position.y - change.position.y
-                                        val nextCancel = dyUp > cancelThresholdPx
-                                        if (nextCancel != isCancellingVoice) {
-                                            isCancellingVoice = nextCancel
-                                            latestOnCancellingChanged(nextCancel)
-                                            // UX-29：进出取消阈值均触发一次轻触感提示
+                                        val nextZone = if (dyUp > upThresholdPx) {
+                                            if (change.position.x >= size.width * 0.5f) {
+                                                VoiceGestureZone.CONVERT_TEXT
+                                            } else {
+                                                VoiceGestureZone.CANCEL
+                                            }
+                                        } else {
+                                            VoiceGestureZone.SEND
+                                        }
+                                        if (nextZone != voiceZone) {
+                                            voiceZone = nextZone
+                                            latestOnZoneChanged(nextZone)
                                             BayHaptic.tap(haptic, latestHapticEnabled)
+                                            if (nextZone == VoiceGestureZone.CONVERT_TEXT &&
+                                                !switchedToLive &&
+                                                vm.isVoiceRecordingWithinEarlySwitchWindow()
+                                            ) {
+                                                switchedToLive = true
+                                                vm.switchRecordingToLiveTranscribe()
+                                            }
                                         }
                                         change.consume()
                                     }
@@ -515,8 +542,8 @@ fun Composer(
                                     throw e
                                 } finally {
                                     isPressingVoice = false
-                                    isCancellingVoice = false
-                                    latestOnCancellingChanged(false)
+                                    voiceZone = VoiceGestureZone.SEND
+                                    latestOnZoneChanged(VoiceGestureZone.SEND)
                                 }
                             }
                         },

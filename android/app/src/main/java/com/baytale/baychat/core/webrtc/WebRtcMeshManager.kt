@@ -60,7 +60,7 @@ interface MeshCallbacks {
     fun onLinkStatusChange(status: PeerLinkStatus)
     fun onTextMessage(peerId: String, id: String, text: String, replyTo: ReplyQuote?, timestamp: Long)
     fun onRecallMessage(peerId: String, msgId: String)
-    fun onTyping(peerId: String, isTyping: Boolean)
+    fun onTyping(peerId: String, isTyping: Boolean, mode: String = "text")
     fun onReaction(peerId: String, msgId: String, emoji: String)
     fun onFileOffer(peerId: String, info: FileTransferInfo, msgId: String, caption: String?, timestamp: Long)
     fun onTransferUpdate(info: FileTransferInfo)
@@ -497,10 +497,11 @@ class WebRtcMeshManager(
         })
     }
 
-    fun broadcastTyping(isTyping: Boolean) {
+    fun broadcastTyping(isTyping: Boolean, mode: String = "text") {
         broadcastChatJson(buildJsonObject {
             put("kind", "typing")
             put("isTyping", isTyping)
+            put("mode", mode)
         })
     }
 
@@ -868,7 +869,8 @@ class WebRtcMeshManager(
 
             "typing" -> {
                 val isTyping = obj["isTyping"]?.jsonPrimitive?.content?.toBooleanStrictOrNull() ?: false
-                callbacks.onTyping(session.peerId, isTyping)
+                val mode = obj["mode"]?.jsonPrimitive?.content?.takeIf { it == "voice" || it == "text" } ?: "text"
+                callbacks.onTyping(session.peerId, isTyping, mode)
             }
 
             "reaction" -> {

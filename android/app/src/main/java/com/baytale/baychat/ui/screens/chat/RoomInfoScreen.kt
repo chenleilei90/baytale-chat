@@ -161,6 +161,8 @@ fun RoomInfoScreen(
     var draftPassword by remember(room.password) { mutableStateOf(room.password) }
     var showHistorySearch by remember(room.roomCode) { mutableStateOf(false) }
     var showClearConfirm by remember { mutableStateOf(false) }
+    var showOwnerClearSheet by remember { mutableStateOf(false) }
+    var showClearAttachmentConfirm by remember { mutableStateOf(false) }
     var showDestroyConfirm by remember { mutableStateOf(false) }
     var peerActionTarget by remember { mutableStateOf<PeerProfile?>(null) }
 
@@ -645,14 +647,34 @@ fun RoomInfoScreen(
                         }
                     }
 
-                    // 6. 清空聊天记录
-                    BayGroup {
+                    // 6. 聊天记录与附件清理
+                    val attachCacheBytes = state.storageStats.receivedMediaBytes +
+                        state.storageStats.coilCacheBytes +
+                        state.storageStats.exportsBytes
+                    BayGroup(header = "聊天记录与附件清理") {
                         BayListRow(
                             icon = Icons.Rounded.DeleteOutline,
-                            title = "清空聊天记录",
-                            subtitle = if (room.isOwner) "删除服务器缓存与当前记录" else "仅清空本机记录",
+                            title = "清理聊天记录",
+                            subtitle = if (room.isOwner) "可选仅清空本机或同步清空服务器记录" else "清空当前设备上的聊天消息记录",
                             destructive = true,
-                            onClick = { showClearConfirm = true },
+                            onClick = {
+                                if (room.isOwner) showOwnerClearSheet = true else showClearConfirm = true
+                            },
+                            showDivider = true,
+                        )
+                        BayListRow(
+                            icon = Icons.Rounded.FolderZip,
+                            title = "清理本机附件缓存",
+                            subtitle = "清除媒体预览与临时附件，已保存至系统相册/Download 不受影响",
+                            value = if (attachCacheBytes > 0L) FormatUtils.formatBytes(attachCacheBytes) else "已清理",
+                            destructive = attachCacheBytes > 0L,
+                            onClick = {
+                                if (attachCacheBytes > 0L) {
+                                    showClearAttachmentConfirm = true
+                                } else {
+                                    vm.clearRoomAttachmentCache()
+                                }
+                            },
                         )
                     }
 
@@ -781,6 +803,49 @@ fun RoomInfoScreen(
                 destructive = true,
             )
         }
+    }
+
+    if (showOwnerClearSheet) {
+        BayActionSheet(
+            onDismiss = { showOwnerClearSheet = false },
+            title = "选择清理范围",
+            actions = listOf(
+                SheetAction(
+                    label = "仅清空本机聊天记录",
+                    icon = Icons.Rounded.DeleteOutline,
+                    onClick = {
+                        onDismiss()
+                        vm.clearLocalMessages()
+                    },
+                ),
+                SheetAction(
+                    label = "清空本机并删除服务器记录",
+                    icon = Icons.Rounded.DeleteOutline,
+                    destructive = true,
+                    onClick = {
+                        showClearConfirm = true
+                    },
+                ),
+            ),
+        )
+    }
+
+    if (showClearAttachmentConfirm) {
+        val attachBytes = state.storageStats.receivedMediaBytes +
+            state.storageStats.coilCacheBytes +
+            state.storageStats.exportsBytes
+        BayDialog(
+            title = "清理本机附件缓存？",
+            message = "将清理约 ${FormatUtils.formatBytes(attachBytes)} 本地预览媒体与临时附件缓存，已保存至系统 Download/BayChat 或相册的文件不受影响。",
+            confirmText = "确认清理",
+            onConfirm = {
+                showClearAttachmentConfirm = false
+                vm.clearRoomAttachmentCache()
+            },
+            dismissText = "取消",
+            onDismiss = { showClearAttachmentConfirm = false },
+            destructive = true,
+        )
     }
 
     if (showDestroyConfirm) {

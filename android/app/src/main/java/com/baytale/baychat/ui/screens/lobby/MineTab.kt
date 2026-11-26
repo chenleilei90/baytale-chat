@@ -63,6 +63,7 @@ import com.baytale.baychat.BuildConfig
 import com.baytale.baychat.core.model.AppThemeMode
 import com.baytale.baychat.core.model.AppearanceMode
 import com.baytale.baychat.core.util.FormatUtils
+import com.baytale.baychat.service.IncomingNotificationHelper
 import com.baytale.baychat.service.OtaUpdateStatus
 import com.baytale.baychat.ui.BayChatUiState
 import com.baytale.baychat.ui.BayChatViewModel
@@ -535,7 +536,14 @@ fun MineTab(
                         lifecycleOwner.lifecycle.addObserver(observer)
                         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
                     }
-                    fun openAppNotificationSettings() {
+                    fun openAppNotificationSettings(openChannelDetail: Boolean = false) {
+                        val channelIntent = if (openChannelDetail) {
+                            Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS).apply {
+                                putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                                putExtra(Settings.EXTRA_CHANNEL_ID, IncomingNotificationHelper.CHANNEL_ID)
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                        } else null
                         val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
                             putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
                             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -544,6 +552,9 @@ fun MineTab(
                             Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
                             Uri.fromParts("package", context.packageName, null),
                         ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        if (channelIntent != null && runCatching { context.startActivity(channelIntent) }.isSuccess) {
+                            return
+                        }
                         runCatching { context.startActivity(intent) }.onFailure {
                             runCatching { context.startActivity(fallback) }
                         }
@@ -556,7 +567,7 @@ fun MineTab(
                             vm.refreshForegroundBanner()
                             vm.showToast("消息与后台通知已开启")
                         } else {
-                            openAppNotificationSettings()
+                            openAppNotificationSettings(openChannelDetail = false)
                         }
                     }
                     BayListRow(
@@ -564,17 +575,17 @@ fun MineTab(
                         iconTint = if (notificationsEnabled) colors.success else colors.danger,
                         title = "消息与后台通知",
                         subtitle = if (notificationsEnabled) {
-                            "用于切后台与锁屏时接收新消息及待确认文件提醒"
+                            "点击前往「新消息与文件提醒」渠道，可开启锁屏与顶部悬浮横幅弹窗"
                         } else {
                             "当前系统未开启通知权限，后台消息与来件将无法弹出提醒"
                         },
-                        value = if (notificationsEnabled) "已开启" else "去开启",
+                        value = if (notificationsEnabled) "横幅设置" else "去开启",
                         trailing = RowTrailing.Chevron,
                         onClick = {
                             if (!notificationsEnabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                                 notifyLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                             } else {
-                                openAppNotificationSettings()
+                                openAppNotificationSettings(openChannelDetail = notificationsEnabled)
                             }
                         },
                     )
