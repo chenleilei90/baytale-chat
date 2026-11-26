@@ -22,24 +22,34 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.Backspace
 import androidx.compose.material.icons.automirrored.rounded.Reply
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.BookmarkBorder
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ContentPaste
+import androidx.compose.material.icons.rounded.EmojiEmotions
 import androidx.compose.material.icons.rounded.FolderZip
 import androidx.compose.material.icons.rounded.InsertDriveFile
 import androidx.compose.material.icons.rounded.Keyboard
@@ -93,6 +103,7 @@ import com.baytale.baychat.ui.theme.BayShapes
 import com.baytale.baychat.ui.theme.BaySpacing
 import com.baytale.baychat.ui.theme.BayTheme
 import com.baytale.baychat.ui.theme.BayType
+import java.text.BreakIterator
 import kotlin.coroutines.cancellation.CancellationException
 
 /**
@@ -109,6 +120,9 @@ fun Composer(
     onVoiceModeChange: (Boolean) -> Unit,
     showAttachmentPanel: Boolean,
     onShowAttachmentPanelChange: (Boolean) -> Unit,
+    showEmojiPanel: Boolean,
+    onShowEmojiPanelChange: (Boolean) -> Unit,
+    onOpenFavoritesPicker: () -> Unit,
     inputFocusRequester: FocusRequester,
     replyingTo: ReplyQuote?,
     vm: BayChatViewModel,
@@ -372,6 +386,7 @@ fun Composer(
                     onVoiceModeChange(next)
                     if (next) {
                         onShowAttachmentPanelChange(false)
+                        onShowEmojiPanelChange(false)
                         focusManager.clearFocus()
                         keyboardController?.hide()
                     }
@@ -507,10 +522,37 @@ fun Composer(
                         .weight(1f)
                         .focusRequester(inputFocusRequester)
                         .onFocusChanged { focusState ->
-                            if (focusState.isFocused && showAttachmentPanel) {
-                                onShowAttachmentPanelChange(false)
+                            if (focusState.isFocused) {
+                                if (showAttachmentPanel) onShowAttachmentPanelChange(false)
+                                if (showEmojiPanel) onShowEmojiPanelChange(false)
                             }
                         },
+                )
+            }
+
+            // 表情按钮（仅键盘文本模式下展示，与软键盘和附件面板严格互斥）
+            if (!voiceMode) {
+                BayIconButton(
+                    icon = if (showEmojiPanel) Icons.Rounded.Keyboard else Icons.Rounded.EmojiEmotions,
+                    contentDescription = if (showEmojiPanel) "切回键盘输入" else "打开表情面板",
+                    onClick = {
+                        val nextEmoji = !showEmojiPanel
+                        onShowAttachmentPanelChange(false)
+                        if (nextEmoji) {
+                            focusManager.clearFocus()
+                            keyboardController?.hide()
+                        } else {
+                            runCatching { inputFocusRequester.requestFocus() }
+                            keyboardController?.show()
+                        }
+                        onShowEmojiPanelChange(nextEmoji)
+                    },
+                    style = if (showEmojiPanel) BayIconStyle.Accent else BayIconStyle.Filled,
+                    size = 40.dp,
+                    enabled = !state.isRecordingVoice,
+                    modifier = Modifier
+                        .defaultMinSize(minWidth = 44.dp, minHeight = 44.dp)
+                        .padding(bottom = 2.dp),
                 )
             }
 
@@ -524,6 +566,7 @@ fun Composer(
                             val textToSend = inputText
                             onInputTextChange("")
                             onShowAttachmentPanelChange(false)
+                            onShowEmojiPanelChange(false)
                             vm.sendTextMessage(textToSend)
                         },
                     contentAlignment = Alignment.Center,
@@ -550,6 +593,7 @@ fun Composer(
                     onClick = {
                         val nextPanel = !showAttachmentPanel
                         onVoiceModeChange(false)
+                        onShowEmojiPanelChange(false)
                         if (nextPanel) {
                             focusManager.clearFocus()
                             keyboardController?.hide()
@@ -637,7 +681,156 @@ fun Composer(
                         },
                         modifier = Modifier.weight(1f),
                     )
-                    Spacer(modifier = Modifier.weight(3f))
+                    AttachmentGridItem(
+                        icon = Icons.Rounded.BookmarkBorder,
+                        label = "收藏",
+                        tint = colors.warning,
+                        onClick = {
+                            onShowAttachmentPanelChange(false)
+                            onOpenFavoritesPicker()
+                        },
+                        modifier = Modifier.weight(1f),
+                    )
+                    Spacer(modifier = Modifier.weight(2f))
+                }
+            }
+        }
+
+        // 微信风格表情选择面板（最近使用 + 8 列网格 + 右下角退格/发送操作栏，纯码点渲染零字面量 Emoji）
+        val catalogEmojis = remember { EMOJI_CODEPOINTS.map(::emojiString) }
+        AnimatedVisibility(
+            visible = showEmojiPanel && !voiceMode && !state.isRecordingVoice,
+            enter = expandVertically() + fadeIn(),
+            exit = shrinkVertically() + fadeOut(),
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(260.dp)
+                    .background(colors.bg),
+            ) {
+                Column(modifier = Modifier.fillMaxSize()) {
+                    if (state.recentEmojis.isNotEmpty()) {
+                        Text(
+                            text = "最近使用",
+                            style = BayType.caption,
+                            color = colors.textSecondary,
+                            modifier = Modifier.padding(
+                                start = BaySpacing.lg,
+                                top = BaySpacing.sm,
+                                bottom = BaySpacing.xs,
+                            ),
+                        )
+                        LazyRow(
+                            contentPadding = PaddingValues(horizontal = BaySpacing.md),
+                            horizontalArrangement = Arrangement.spacedBy(BaySpacing.xs),
+                        ) {
+                            items(state.recentEmojis, key = { "rec_$it" }) { emoji ->
+                                Box(
+                                    modifier = Modifier
+                                        .defaultMinSize(minWidth = 44.dp, minHeight = 44.dp)
+                                        .clip(BayShapes.xsShape)
+                                        .bayClickable {
+                                            val updated = inputText + emoji
+                                            onInputTextChange(updated)
+                                            vm.updateDraft(roomCode, updated)
+                                            vm.onDraftTypingChanged(updated.isNotBlank())
+                                            vm.recordEmojiUsed(emoji)
+                                        },
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Text(text = emoji, style = BayType.title2)
+                                }
+                            }
+                        }
+                    }
+
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(8),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                        contentPadding = PaddingValues(
+                            start = BaySpacing.md,
+                            end = BaySpacing.md,
+                            top = BaySpacing.sm,
+                            bottom = 60.dp,
+                        ),
+                        horizontalArrangement = Arrangement.spacedBy(2.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        items(catalogEmojis, key = { it }) { emoji ->
+                            Box(
+                                modifier = Modifier
+                                    .defaultMinSize(minWidth = 44.dp, minHeight = 44.dp)
+                                    .clip(BayShapes.xsShape)
+                                    .bayClickable {
+                                        val updated = inputText + emoji
+                                        onInputTextChange(updated)
+                                        vm.updateDraft(roomCode, updated)
+                                        vm.onDraftTypingChanged(updated.isNotBlank())
+                                        vm.recordEmojiUsed(emoji)
+                                    },
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(text = emoji, style = BayType.title2)
+                            }
+                        }
+                    }
+                }
+
+                // 右下角浮动删除与发送栏
+                val hasText = inputText.isNotBlank()
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(end = BaySpacing.md, bottom = BaySpacing.md)
+                        .clip(BayShapes.mdShape)
+                        .background(colors.surface)
+                        .padding(horizontal = BaySpacing.xs, vertical = BaySpacing.xs),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(BaySpacing.xs),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .defaultMinSize(minWidth = 44.dp, minHeight = 40.dp)
+                            .clip(BayShapes.smShape)
+                            .background(colors.fill)
+                            .bayClickable(enabled = inputText.isNotEmpty()) {
+                                val next = deleteLastGraphemeCluster(inputText)
+                                onInputTextChange(next)
+                                vm.updateDraft(roomCode, next)
+                                vm.onDraftTypingChanged(next.isNotBlank())
+                            }
+                            .padding(horizontal = BaySpacing.md),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Rounded.Backspace,
+                            contentDescription = "删除",
+                            tint = if (inputText.isNotEmpty()) colors.textPrimary else colors.textTertiary,
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
+                    Box(
+                        modifier = Modifier
+                            .defaultMinSize(minWidth = 56.dp, minHeight = 40.dp)
+                            .clip(BayShapes.smShape)
+                            .background(if (hasText) colors.accent else colors.fill)
+                            .bayClickable(enabled = hasText) {
+                                val textToSend = inputText
+                                onInputTextChange("")
+                                vm.sendTextMessage(textToSend)
+                            }
+                            .padding(horizontal = BaySpacing.md),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = "发送",
+                            style = BayType.callout.copy(fontWeight = FontWeight.Medium),
+                            color = if (hasText) colors.onAccent else colors.textTertiary,
+                        )
+                    }
                 }
             }
         }
@@ -737,4 +930,13 @@ private fun replaceTrailingMention(text: String, peerName: String): String {
     val atIndex = text.lastIndexOf('@')
     if (atIndex < 0) return text
     return text.substring(0, atIndex) + "@$peerName "
+}
+
+private fun deleteLastGraphemeCluster(text: String): String {
+    if (text.isEmpty()) return text
+    val iter = BreakIterator.getCharacterInstance()
+    iter.setText(text)
+    val end = iter.last()
+    val prev = iter.previous()
+    return if (prev != BreakIterator.DONE && prev < end) text.substring(0, prev) else ""
 }

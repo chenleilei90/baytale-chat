@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Block
+import androidx.compose.material.icons.rounded.BookmarkBorder
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.CloudUpload
@@ -62,6 +63,7 @@ import com.baytale.baychat.ui.design.RowTrailing
 import com.baytale.baychat.ui.design.bayClickable
 import com.baytale.baychat.ui.sheets.AboutDialog
 import com.baytale.baychat.ui.sheets.BlockedListSheet
+import com.baytale.baychat.ui.sheets.FavoritesSheet
 import com.baytale.baychat.ui.sheets.ProfileEditSheet
 import com.baytale.baychat.ui.sheets.ServerSheet
 import com.baytale.baychat.ui.sheets.StorageSheet
@@ -93,6 +95,7 @@ fun MineTab(
     val colors = BayTheme.colors
 
     var showProfileSheet by remember { mutableStateOf(false) }
+    var showFavoritesSheet by remember { mutableStateOf(false) }
     var showBlockedSheet by remember { mutableStateOf(false) }
     var showStorageSheet by remember { mutableStateOf(false) }
     var showServerSheet by remember { mutableStateOf(false) }
@@ -178,6 +181,20 @@ fun MineTab(
                             modifier = Modifier.size(20.dp),
                         )
                     }
+                }
+            }
+
+            // 分组零：我的收藏
+            item(key = "favorites_group") {
+                BayGroup {
+                    BayListRow(
+                        icon = Icons.Rounded.BookmarkBorder,
+                        iconTint = colors.accent,
+                        title = "我的收藏",
+                        value = "${state.favorites.size} 条",
+                        trailing = RowTrailing.Chevron,
+                        onClick = { showFavoritesSheet = true },
+                    )
                 }
             }
 
@@ -554,6 +571,19 @@ fun MineTab(
                 }
             }
         }
+    }
+
+    if (showFavoritesSheet) {
+        FavoritesSheet(
+            favorites = state.favorites,
+            hasActiveRoom = state.hasActiveRoom,
+            hapticEnabled = state.prefs.hapticEnabled,
+            pickerMode = false,
+            onSendFavorite = if (state.hasActiveRoom) { fav -> vm.sendFavorite(fav) } else null,
+            onDeleteFavorite = { vm.removeFavorite(it) },
+            onShowToast = { vm.showToast(it) },
+            onDismiss = { showFavoritesSheet = false },
+        )
     }
 
     if (showProfileSheet) {

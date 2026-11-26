@@ -15,10 +15,10 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.MoreHoriz
 import androidx.compose.material.icons.rounded.NotificationsOff
 import androidx.compose.material.icons.rounded.QrCode2
 import androidx.compose.material.icons.rounded.Search
-import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.UnfoldMore
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -97,7 +97,7 @@ fun ChatTopBar(
                     horizontalArrangement = Arrangement.spacedBy(BaySpacing.xs),
                 ) {
                     Text(
-                        text = if (hasTopic) topic else "#${room.roomCode}",
+                        text = if (hasTopic) "$topic ($peerCount)" else "#${room.roomCode} ($peerCount)",
                         style = BayType.headline,
                         color = colors.textPrimary,
                         maxLines = 1,
@@ -189,8 +189,8 @@ fun ChatTopBar(
                     size = 36.dp,
                 )
                 BayIconButton(
-                    icon = Icons.Rounded.Tune,
-                    contentDescription = "房间设置",
+                    icon = Icons.Rounded.MoreHoriz,
+                    contentDescription = "聊天信息",
                     onClick = onOpenSettings,
                     style = BayIconStyle.Plain,
                     size = 36.dp,

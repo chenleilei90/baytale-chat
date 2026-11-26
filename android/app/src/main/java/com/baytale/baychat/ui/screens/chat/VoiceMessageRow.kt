@@ -27,15 +27,20 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.contentDescription
@@ -66,7 +71,7 @@ fun VoiceMessageRow(
     isUnread: Boolean,
     hapticEnabled: Boolean,
     onTogglePlayback: () -> Unit,
-    onLongPress: () -> Unit,
+    onLongPress: (Rect) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val colors = BayTheme.colors
@@ -123,6 +128,7 @@ fun VoiceMessageRow(
     }
 
     val clickInteraction = remember { MutableInteractionSource() }
+    var bubbleBounds by remember { mutableStateOf(Rect.Zero) }
     val semanticDesc = remember(item.isSelf, item.senderName, durationSec, isPlaying, isUnread) {
         val owner = if (item.isSelf) "我发送的" else "${item.senderName}发送的"
         val status = when {
@@ -149,6 +155,7 @@ fun VoiceMessageRow(
             Column(
                 modifier = Modifier
                     .width(bubbleWidth)
+                    .onGloballyPositioned { coords -> bubbleBounds = coords.boundsInWindow() }
                     .clip(BayShapes.mdShape)
                     .background(bubbleBg)
                     .combinedClickable(
@@ -160,7 +167,7 @@ fun VoiceMessageRow(
                         },
                         onLongClick = {
                             BayHaptic.heavy(haptic, hapticEnabled)
-                            onLongPress()
+                            onLongPress(bubbleBounds)
                         },
                     )
                     .padding(horizontal = BaySpacing.md, vertical = 10.dp),

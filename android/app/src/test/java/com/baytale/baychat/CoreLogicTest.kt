@@ -3,6 +3,7 @@ package com.baytale.baychat
 import com.baytale.baychat.core.model.CachedMessage
 import com.baytale.baychat.core.model.SignalEnvelope
 import com.baytale.baychat.core.network.OutboundSignalQueue
+import com.baytale.baychat.core.util.FormatUtils
 import com.baytale.baychat.core.util.TransferResumeUtils
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -171,5 +172,29 @@ class CoreLogicTest {
         val allFresh = queue.drainValid()
         assertEquals("m_6", allFresh.readyToSend.first().message?.id)
         assertEquals("m_205", allFresh.readyToSend.last().message?.id)
+    }
+
+    @Test
+    fun testFormatNudgeTextAllBranches() {
+        assertEquals(
+            "我拍了拍自己",
+            FormatUtils.formatNudgeText("我", "我", isSelfSender = true, isSelfTarget = true),
+        )
+        assertEquals(
+            "我拍了拍\"小明\"",
+            FormatUtils.formatNudgeText("我", "小明", isSelfSender = true, isSelfTarget = false),
+        )
+        assertEquals(
+            "\"小红\" 拍了拍我",
+            FormatUtils.formatNudgeText("小红", "我", isSelfSender = false, isSelfTarget = true),
+        )
+        assertEquals(
+            "\"小红\" 拍了拍自己",
+            FormatUtils.formatNudgeText("小红", "小红", isSelfSender = false, isSelfTarget = false, isSenderTargetSelf = true),
+        )
+        assertEquals(
+            "\"小红\" 拍了拍 \"小刚\"",
+            FormatUtils.formatNudgeText("小红", "小刚", isSelfSender = false, isSelfTarget = false, isSenderTargetSelf = false),
+        )
     }
 }

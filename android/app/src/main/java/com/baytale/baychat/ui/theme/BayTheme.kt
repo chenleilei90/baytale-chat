@@ -66,6 +66,8 @@ data class BayColors(
     val warning: Color,
     val danger: Color,
     val toastBg: Color,
+    val popupSurface: Color,
+    val popupContent: Color,
     val isDark: Boolean,
     val fileTypeColors: BayFileTypeColors,
 ) {
@@ -127,6 +129,8 @@ fun bayColorsFor(accentMode: AppThemeMode, isDark: Boolean): BayColors {
             warning = Color(0xFFFF9F0A),
             danger = Color(0xFFFF453A),
             toastBg = Color(0xFF3A3A3C),
+            popupSurface = Color(0xFF3A3A3C),
+            popupContent = Color(0xFFFFFFFF),
             isDark = true,
             fileTypeColors = DarkFileTypeColors,
         )
@@ -148,6 +152,8 @@ fun bayColorsFor(accentMode: AppThemeMode, isDark: Boolean): BayColors {
             warning = Color(0xFFFF9500),
             danger = Color(0xFFFF3B30),
             toastBg = Color(0xEB1C1C1E),
+            popupSurface = Color(0xFF4C4C4C),
+            popupContent = Color(0xFFFFFFFF),
             isDark = false,
             fileTypeColors = LightFileTypeColors,
         )

@@ -45,10 +45,13 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.Forward
 import androidx.compose.material.icons.rounded.Block
+import androidx.compose.material.icons.rounded.BookmarkBorder
 import androidx.compose.material.icons.rounded.Casino
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ContentCopy
+import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Flag
 import androidx.compose.material.icons.rounded.FolderZip
@@ -81,6 +84,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
@@ -96,12 +100,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.baytale.baychat.core.model.ChatItem
 import com.baytale.baychat.core.model.ChatKind
 import com.baytale.baychat.core.model.RoomMode
 import com.baytale.baychat.core.util.BayHaptic
 import com.baytale.baychat.core.util.FormatUtils
 import com.baytale.baychat.ui.BayChatUiState
 import com.baytale.baychat.ui.BayChatViewModel
+import com.baytale.baychat.ui.ForwardPayload
 import com.baytale.baychat.ui.design.BayActionSheet
 import com.baytale.baychat.ui.design.BayButton
 import com.baytale.baychat.ui.design.BayButtonSize
@@ -114,6 +120,7 @@ import com.baytale.baychat.ui.design.BayIconStyle
 import com.baytale.baychat.ui.design.BayTextField
 import com.baytale.baychat.ui.design.SheetAction
 import com.baytale.baychat.ui.design.bayClickable
+import com.baytale.baychat.ui.sheets.FavoritesSheet
 import com.baytale.baychat.ui.theme.BayShapes
 import com.baytale.baychat.ui.theme.BaySpacing
 import com.baytale.baychat.ui.theme.BayTheme
@@ -145,12 +152,20 @@ fun ChatRoomScreen(
     // UX-10：全部局部界面状态采用 rememberSaveable 保持，确保旋转屏幕不丢失
     var showSearchBar by rememberSaveable(room.roomCode) { mutableStateOf(false) }
     var showInviteSheet by rememberSaveable(room.roomCode) { mutableStateOf(false) }
-    var showSettingsSheet by rememberSaveable(room.roomCode) { mutableStateOf(false) }
+    var showRoomInfo by rememberSaveable(room.roomCode) { mutableStateOf(false) }
     var showQuickSwitchSheet by rememberSaveable(room.roomCode) { mutableStateOf(false) }
     var showAttachmentPanel by rememberSaveable(room.roomCode) { mutableStateOf(false) }
+    var showEmojiPanel by rememberSaveable(room.roomCode) { mutableStateOf(false) }
+    var showFavoritesPicker by rememberSaveable(room.roomCode) { mutableStateOf(false) }
     var voiceMode by rememberSaveable(room.roomCode) { mutableStateOf(false) }
     var actionTargetMessageId by rememberSaveable(room.roomCode) { mutableStateOf<String?>(null) }
+    var actionTargetAnchorRect by remember { mutableStateOf(Rect.Zero) }
     var pendingDeleteMessageId by rememberSaveable(room.roomCode) { mutableStateOf<String?>(null) }
+    var selectionMode by rememberSaveable(room.roomCode) { mutableStateOf(false) }
+    var selectedIds by remember(room.roomCode) { mutableStateOf<Set<String>>(emptySet()) }
+    var showBatchDeleteConfirm by remember { mutableStateOf(false) }
+    var showLeaveRoomConfirm by remember { mutableStateOf(false) }
+    var forwardPayloadItems by remember { mutableStateOf<List<ChatItem>?>(null) }
     var previewImageItemId by rememberSaveable(room.roomCode) { mutableStateOf<String?>(null) }
     var fullscreenReaderText by rememberSaveable(room.roomCode) { mutableStateOf<String?>(null) }
     var peerQuickTargetId by rememberSaveable(room.roomCode) { mutableStateOf<String?>(null) }
@@ -160,12 +175,19 @@ fun ChatRoomScreen(
     var isVoiceCancelling by remember { mutableStateOf(false) }
     var highlightedMessageId by remember { mutableStateOf<String?>(null) }
 
-    // UX-3：返回键逐层退回（先关闭附件面板，再关闭搜索栏，避免直接触发退房确认弹窗）
-    BackHandler(enabled = showSearchBar && !showAttachmentPanel) {
+    // UX-3：返回键逐层退回（先退出多选/表情面板/附件面板，再关闭搜索栏，避免直接触发退房确认弹窗）
+    BackHandler(enabled = selectionMode) {
+        selectionMode = false
+        selectedIds = emptySet()
+    }
+    BackHandler(enabled = showEmojiPanel && !selectionMode) {
+        showEmojiPanel = false
+    }
+    BackHandler(enabled = showSearchBar && !showAttachmentPanel && !showEmojiPanel && !selectionMode) {
         vm.setSearchFilter("", "all")
         showSearchBar = false
     }
-    BackHandler(enabled = showAttachmentPanel) {
+    BackHandler(enabled = showAttachmentPanel && !selectionMode) {
         showAttachmentPanel = false
     }
 
@@ -175,14 +197,28 @@ fun ChatRoomScreen(
         if (showAttachmentPanel) {
             showAttachmentPanel = false
         }
+        if (showEmojiPanel) {
+            showEmojiPanel = false
+        }
     }
 
     LaunchedEffect(room.roomCode) {
+        selectionMode = false
+        selectedIds = emptySet()
+        showEmojiPanel = false
+        showRoomInfo = false
+        forwardPayloadItems = null
         val saved = vm.draftFor(room.roomCode)
         if (inputText != saved) {
             inputText = saved
         }
         vm.onDraftTypingChanged(saved.isNotBlank())
+    }
+
+    LaunchedEffect(state.nudgeNonce) {
+        if (state.nudgeNonce > 0L && state.nudgedPeerId == room.selfPeerId) {
+            BayHaptic.heavy(view, state.prefs.hapticEnabled)
+        }
     }
 
     LaunchedEffect(highlightedMessageId) {
@@ -291,15 +327,27 @@ fun ChatRoomScreen(
         }
     }
 
-    // UX-2：滑动消息列表时自动收起软键盘并关闭附件面板
+    // UX-2：滑动消息列表时自动收起软键盘并关闭附件/表情面板（多选模式屏蔽收起手势）
     val listScrollDismissConnection = remember {
         object : NestedScrollConnection {
             override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
-                if (source == NestedScrollSource.UserInput && available.y != 0f) {
+                if (!selectionMode && source == NestedScrollSource.UserInput && available.y != 0f) {
                     dismissKeyboardAndPanel()
                 }
                 return Offset.Zero
             }
+        }
+    }
+
+    val jumpAndHighlightMessage: (String) -> Unit = { targetId ->
+        val idx = visibleMessages.indexOfFirst { it.id == targetId }
+        if (idx >= 0) {
+            highlightedMessageId = targetId
+            scope.launch {
+                listState.animateScrollToItem(idx)
+            }
+        } else {
+            vm.showToast("原消息已不可见")
         }
     }
 
@@ -314,23 +362,68 @@ fun ChatRoomScreen(
                 .statusBarsPadding()
                 .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars)),
         ) {
-            // 1. 顶部房间导航栏
-            ChatTopBar(
-                room = room,
-                isMuted = isRoomMuted,
-                searchActive = showSearchBar,
-                hasQuickSwitchTargets = otherRecentRooms.isNotEmpty(),
-                onMinimize = { vm.minimizeRoom() },
-                onOpenQuickSwitch = { showQuickSwitchSheet = true },
-                onToggleSearch = {
-                    if (showSearchBar) {
-                        vm.setSearchFilter("", "all")
+            // 1. 顶部房间导航栏（多选模式下切换为取消与已选择数量）
+            if (selectionMode) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(colors.surface),
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = BaySpacing.md, vertical = BaySpacing.sm),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = "取消",
+                            style = BayType.callout.copy(fontWeight = FontWeight.Medium),
+                            color = colors.accent,
+                            modifier = Modifier
+                                .defaultMinSize(minWidth = 44.dp, minHeight = 40.dp)
+                                .bayClickable {
+                                    selectionMode = false
+                                    selectedIds = emptySet()
+                                }
+                                .padding(horizontal = BaySpacing.xs, vertical = BaySpacing.sm),
+                        )
+                        Text(
+                            text = "已选择 ${selectedIds.size} 条",
+                            style = BayType.headline,
+                            color = colors.textPrimary,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Spacer(modifier = Modifier.width(44.dp))
                     }
-                    showSearchBar = !showSearchBar
-                },
-                onOpenInvite = { showInviteSheet = true },
-                onOpenSettings = { showSettingsSheet = true },
-            )
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(0.5.dp)
+                            .background(colors.separator),
+                    )
+                }
+            } else {
+                ChatTopBar(
+                    room = room,
+                    isMuted = isRoomMuted,
+                    searchActive = showSearchBar,
+                    hasQuickSwitchTargets = otherRecentRooms.isNotEmpty(),
+                    onMinimize = { vm.minimizeRoom() },
+                    onOpenQuickSwitch = { showQuickSwitchSheet = true },
+                    onToggleSearch = {
+                        if (showSearchBar) {
+                            vm.setSearchFilter("", "all")
+                        }
+                        showSearchBar = !showSearchBar
+                    },
+                    onOpenInvite = { showInviteSheet = true },
+                    onOpenSettings = {
+                        dismissKeyboardAndPanel()
+                        showRoomInfo = true
+                    },
+                )
+            }
 
             // UX-14：房内断网 / 信令重连紧凑提示条
             AnimatedVisibility(
@@ -579,9 +672,10 @@ fun ChatRoomScreen(
                     if (state.pendingShare.uris.isNotEmpty()) {
                         append("${state.pendingShare.uris.size} 个附件")
                     }
-                    if (!state.pendingShare.sharedText.isNullOrBlank()) {
+                    val textCount = state.pendingShare.texts.size + if (!state.pendingShare.sharedText.isNullOrBlank()) 1 else 0
+                    if (textCount > 0) {
                         if (isNotEmpty()) append(" + ")
-                        append("文本内容")
+                        append("${textCount} 条文本")
                     }
                 }
                 Row(
@@ -751,14 +845,27 @@ fun ChatRoomScreen(
                                         snapshotSpeedBps = progressSnap?.speedBps,
                                         snapshotEtaSeconds = progressSnap?.etaSeconds,
                                         isHighlighted = highlightedMessageId == item.id,
-                                        onLongPress = {
-                                            if (item.kind != ChatKind.SYSTEM) {
+                                        selectionMode = selectionMode,
+                                        isSelected = item.id in selectedIds,
+                                        onToggleSelect = {
+                                            selectedIds = if (item.id in selectedIds) {
+                                                selectedIds - item.id
+                                            } else {
+                                                selectedIds + item.id
+                                            }
+                                        },
+                                        isAvatarShaking = state.nudgedPeerId == item.senderId,
+                                        nudgeShakeNonce = state.nudgeNonce,
+                                        onLongPress = { anchor ->
+                                            if (!selectionMode && item.kind != ChatKind.SYSTEM) {
+                                                actionTargetAnchorRect = anchor
                                                 actionTargetMessageId = item.id
                                             }
                                         },
                                         onReEditRecall = { recalled ->
                                             voiceMode = false
                                             showAttachmentPanel = false
+                                            showEmojiPanel = false
                                             inputText = recalled
                                             vm.updateDraft(room.roomCode, recalled)
                                             vm.onDraftTypingChanged(recalled.isNotBlank())
@@ -768,22 +875,44 @@ fun ChatRoomScreen(
                                             }
                                         },
                                         onJumpToReply = { replyId ->
-                                            val targetIdx = visibleMessages.indexOfFirst { it.id == replyId }
-                                            if (targetIdx >= 0) {
-                                                highlightedMessageId = replyId
-                                                scope.launch {
-                                                    listState.animateScrollToItem(targetIdx)
-                                                }
-                                            } else {
-                                                vm.showToast("原消息已不可见")
+                                            if (!selectionMode) {
+                                                jumpAndHighlightMessage(replyId)
                                             }
                                         },
                                         onDoubleClickText = { text ->
-                                            fullscreenReaderText = text
+                                            if (!selectionMode) {
+                                                fullscreenReaderText = text
+                                            }
                                         },
                                         onPeerClick = { pid, name ->
-                                            peerQuickTargetId = pid
-                                            peerQuickTargetName = name
+                                            if (!selectionMode) {
+                                                peerQuickTargetId = pid
+                                                peerQuickTargetName = name
+                                            }
+                                        },
+                                        onAvatarDoubleTap = { pid, name ->
+                                            if (!selectionMode) {
+                                                vm.nudgePeer(pid, name)
+                                            }
+                                        },
+                                        onAvatarLongPress = { _, name ->
+                                            if (!selectionMode) {
+                                                voiceMode = false
+                                                showAttachmentPanel = false
+                                                showEmojiPanel = false
+                                                val nextText = if (inputText.isNotEmpty() && !inputText.endsWith(" ")) {
+                                                    "$inputText @$name "
+                                                } else {
+                                                    "$inputText@$name "
+                                                }
+                                                inputText = nextText
+                                                vm.updateDraft(room.roomCode, nextText)
+                                                vm.onDraftTypingChanged(true)
+                                                scope.launch {
+                                                    runCatching { inputFocusRequester.requestFocus() }
+                                                    keyboardController?.show()
+                                                }
+                                            }
                                         },
                                         onRetrySend = { msgId -> vm.retrySend(msgId) },
                                         onReact = { emoji -> vm.reactMessage(item.id, emoji) },
@@ -939,22 +1068,113 @@ fun ChatRoomScreen(
                 }
             }
 
-            // 7. 底部输入与多模态附件面板
-            Composer(
-                state = state,
-                roomCode = room.roomCode,
-                peers = room.peers.values.toList(),
-                inputText = inputText,
-                onInputTextChange = { inputText = it },
-                voiceMode = voiceMode,
-                onVoiceModeChange = { voiceMode = it },
-                showAttachmentPanel = showAttachmentPanel,
-                onShowAttachmentPanelChange = { showAttachmentPanel = it },
-                inputFocusRequester = inputFocusRequester,
-                replyingTo = room.replyingTo,
-                vm = vm,
-                onVoiceCancellingChanged = { isVoiceCancelling = it },
-            )
+            // 7. 底部输入与多模态附件/表情面板，或多选模式下的批量操作栏
+            if (selectionMode) {
+                val hasSelection = selectedIds.isNotEmpty()
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(colors.surface),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(0.5.dp)
+                            .background(colors.separator),
+                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = BaySpacing.md, vertical = BaySpacing.sm),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        val actionTint = if (hasSelection) colors.textPrimary else colors.textTertiary
+                        val dangerTint = if (hasSelection) colors.danger else colors.textTertiary
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .defaultMinSize(minHeight = 48.dp)
+                                .bayClickable(enabled = hasSelection) {
+                                    val chosen = room.messages.filter { it.id in selectedIds }
+                                    val (payloads, _) = vm.resolveForwardPayloads(chosen)
+                                    if (payloads.isEmpty()) {
+                                        vm.showToast("所选消息暂不支持转发")
+                                    } else {
+                                        forwardPayloadItems = chosen
+                                    }
+                                },
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center,
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Rounded.Forward,
+                                contentDescription = "转发",
+                                tint = actionTint,
+                                modifier = Modifier.size(22.dp),
+                            )
+                            Text(text = "转发", style = BayType.caption, color = actionTint)
+                        }
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .defaultMinSize(minHeight = 48.dp)
+                                .bayClickable(enabled = hasSelection) {
+                                    val chosen = room.messages.filter { it.id in selectedIds }
+                                    vm.addFavorites(chosen)
+                                    selectionMode = false
+                                    selectedIds = emptySet()
+                                },
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center,
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.BookmarkBorder,
+                                contentDescription = "收藏",
+                                tint = actionTint,
+                                modifier = Modifier.size(22.dp),
+                            )
+                            Text(text = "收藏", style = BayType.caption, color = actionTint)
+                        }
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .defaultMinSize(minHeight = 48.dp)
+                                .bayClickable(enabled = hasSelection) {
+                                    showBatchDeleteConfirm = true
+                                },
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center,
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.DeleteOutline,
+                                contentDescription = "删除",
+                                tint = dangerTint,
+                                modifier = Modifier.size(22.dp),
+                            )
+                            Text(text = "删除", style = BayType.caption, color = dangerTint)
+                        }
+                    }
+                }
+            } else {
+                Composer(
+                    state = state,
+                    roomCode = room.roomCode,
+                    peers = room.peers.values.toList(),
+                    inputText = inputText,
+                    onInputTextChange = { inputText = it },
+                    voiceMode = voiceMode,
+                    onVoiceModeChange = { voiceMode = it },
+                    showAttachmentPanel = showAttachmentPanel,
+                    onShowAttachmentPanelChange = { showAttachmentPanel = it },
+                    showEmojiPanel = showEmojiPanel,
+                    onShowEmojiPanelChange = { showEmojiPanel = it },
+                    onOpenFavoritesPicker = { showFavoritesPicker = true },
+                    inputFocusRequester = inputFocusRequester,
+                    replyingTo = room.replyingTo,
+                    vm = vm,
+                    onVoiceCancellingChanged = { isVoiceCancelling = it },
+                )
+            }
         }
 
         // 8. 微信式录音居中浮层（纯视觉遮罩穿透指针事件，绝不阻断底层按住说话手势）
@@ -963,6 +1183,21 @@ fun ChatRoomScreen(
             isCancelling = isVoiceCancelling,
             durationMs = state.voiceRecordDurationMs,
             amplitude = state.voiceAmplitude,
+        )
+
+        // 9. 微信式全屏「聊天信息」房间页（从右侧滑入覆盖当前聊天视图）
+        RoomInfoScreen(
+            visible = showRoomInfo,
+            state = state,
+            room = room,
+            vm = vm,
+            onOpenInvite = {
+                showRoomInfo = false
+                showInviteSheet = true
+            },
+            onJumpToMessage = { msgId -> jumpAndHighlightMessage(msgId) },
+            onRequestLeaveRoom = { showLeaveRoomConfirm = true },
+            onDismiss = { showRoomInfo = false },
         )
     }
 
@@ -974,12 +1209,58 @@ fun ChatRoomScreen(
         actionTargetMessageId?.let { id -> room.messages.firstOrNull { it.id == id } }
     }
     actionTargetMessage?.let { targetMsg ->
-        MessageActionSheet(
+        MessagePopupMenu(
             item = targetMsg,
+            anchor = actionTargetAnchorRect,
             selfPeerId = room.selfPeerId,
             hapticEnabled = state.prefs.hapticEnabled,
             vm = vm,
-            onRequestDelete = { pendingDeleteMessageId = targetMsg.id },
+            onAction = { action ->
+                when (action) {
+                    MessageMenuAction.COPY -> {
+                        copyTextToClipboard(context, targetMsg.text.orEmpty())
+                        BayHaptic.confirm(view, state.prefs.hapticEnabled)
+                        vm.showToast("已复制到剪贴板")
+                    }
+                    MessageMenuAction.FORWARD -> {
+                        val (payloads, _) = vm.resolveForwardPayloads(listOf(targetMsg))
+                        if (payloads.isEmpty()) {
+                            vm.showToast("该消息暂无可转发的本地文件")
+                        } else {
+                            forwardPayloadItems = listOf(targetMsg)
+                        }
+                    }
+                    MessageMenuAction.FAVORITE -> {
+                        vm.addFavorites(listOf(targetMsg))
+                    }
+                    MessageMenuAction.DELETE -> {
+                        pendingDeleteMessageId = targetMsg.id
+                    }
+                    MessageMenuAction.MULTI_SELECT -> {
+                        dismissKeyboardAndPanel()
+                        selectionMode = true
+                        selectedIds = setOf(targetMsg.id)
+                    }
+                    MessageMenuAction.REPLY -> {
+                        vm.setReplyingTo(targetMsg)
+                    }
+                    MessageMenuAction.RECALL -> {
+                        vm.recallMessage(targetMsg.id)
+                    }
+                    MessageMenuAction.SAVE_IMAGE -> {
+                        if (vm.saveImageToGallery(targetMsg)) {
+                            BayHaptic.confirm(view, state.prefs.hapticEnabled)
+                        }
+                    }
+                    MessageMenuAction.SHARE -> {
+                        vm.shareChatItem(targetMsg)
+                    }
+                    MessageMenuAction.REPORT -> {
+                        vm.reportPeer(targetMsg.senderId, targetMsg.senderName, targetMsg.id)
+                    }
+                }
+                actionTargetMessageId = null
+            },
             onDismiss = { actionTargetMessageId = null },
         )
     }
@@ -1002,21 +1283,98 @@ fun ChatRoomScreen(
         )
     }
 
+    if (showBatchDeleteConfirm && selectedIds.isNotEmpty()) {
+        val deleteCount = selectedIds.size
+        BayDialog(
+            title = "删除 $deleteCount 条消息？",
+            message = "删除后将不会出现在你的本机消息记录中",
+            confirmText = "删除",
+            onConfirm = {
+                val idsToDelete = selectedIds.toList()
+                showBatchDeleteConfirm = false
+                selectionMode = false
+                selectedIds = emptySet()
+                idsToDelete.forEach { vm.deleteMessageLocally(it) }
+            },
+            dismissText = "取消",
+            onDismiss = { showBatchDeleteConfirm = false },
+            destructive = true,
+        )
+    }
+
+    forwardPayloadItems?.let { sourceItems ->
+        val (payloads, skippedCount) = remember(sourceItems, room.messages) {
+            vm.resolveForwardPayloads(sourceItems)
+        }
+        val payloadSummary = remember(payloads) {
+            if (payloads.size == 1) {
+                when (val only = payloads.first()) {
+                    is ForwardPayload.Text -> only.text.take(60)
+                    is ForwardPayload.FileUri -> {
+                        if (only.mime.startsWith("image/")) "[图片]" else "[文件] ${only.fileName}"
+                    }
+                }
+            } else {
+                val preview = payloads.firstOrNull()?.let { first ->
+                    when (first) {
+                        is ForwardPayload.Text -> first.text.take(40)
+                        is ForwardPayload.FileUri -> if (first.mime.startsWith("image/")) "[图片]" else "[文件] ${first.fileName}"
+                    }
+                }.orEmpty()
+                if (preview.isNotEmpty()) "共 ${payloads.size} 条：$preview" else "共 ${payloads.size} 条内容"
+            }
+        }
+        ForwardTargetSheet(
+            currentRoomCode = room.roomCode,
+            currentRoomTopic = room.roomInfo?.topic.orEmpty(),
+            savedRooms = state.savedRooms,
+            recentRooms = state.recentRooms,
+            payloadSummary = payloadSummary,
+            skippedCount = skippedCount,
+            onConfirmTarget = { targetCode ->
+                forwardPayloadItems = null
+                selectionMode = false
+                selectedIds = emptySet()
+                vm.forwardToRoom(targetCode, payloads)
+            },
+            onDismiss = { forwardPayloadItems = null },
+        )
+    }
+
+    if (showFavoritesPicker) {
+        FavoritesSheet(
+            favorites = state.favorites,
+            hasActiveRoom = true,
+            hapticEnabled = state.prefs.hapticEnabled,
+            pickerMode = true,
+            onSendFavorite = { fav -> vm.sendFavorite(fav) },
+            onDeleteFavorite = { vm.removeFavorite(it) },
+            onShowToast = { vm.showToast(it) },
+            onDismiss = { showFavoritesPicker = false },
+        )
+    }
+
+    if (showLeaveRoomConfirm) {
+        BayDialog(
+            title = "确认退出房间 #${room.roomCode}？",
+            message = "退出后将断开当前房间的直连通道。",
+            confirmText = "退出房间",
+            onConfirm = {
+                showLeaveRoomConfirm = false
+                vm.leaveRoom()
+            },
+            dismissText = "取消",
+            onDismiss = { showLeaveRoomConfirm = false },
+            destructive = true,
+        )
+    }
+
     if (showInviteSheet) {
         InviteSheet(
             room = room,
             hapticEnabled = state.prefs.hapticEnabled,
             vm = vm,
             onDismiss = { showInviteSheet = false },
-        )
-    }
-
-    if (showSettingsSheet) {
-        RoomSettingsSheet(
-            state = state,
-            room = room,
-            vm = vm,
-            onDismiss = { showSettingsSheet = false },
         )
     }
 

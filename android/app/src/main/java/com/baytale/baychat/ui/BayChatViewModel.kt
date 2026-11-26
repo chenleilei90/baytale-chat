@@ -28,6 +28,7 @@ import com.baytale.baychat.core.model.ChatItem
 import com.baytale.baychat.core.model.ChatKind
 import com.baytale.baychat.core.model.CloudUploadStatus
 import com.baytale.baychat.core.model.CreateRoomRequest
+import com.baytale.baychat.core.model.FavoriteItem
 import com.baytale.baychat.core.model.FileTransferInfo
 import com.baytale.baychat.core.model.HistoryMeta
 import com.baytale.baychat.core.model.LastActiveRoom
@@ -92,6 +93,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -203,11 +205,22 @@ data class ActiveRoomSession(
         get() = roomInfo?.mode == RoomMode.EPHEMERAL.wireValue
 }
 
+/**
+ * 逐条转发载荷：支持纯文本消息与本地可读图片/文件。
+ */
+sealed interface ForwardPayload {
+    data class Text(val text: String) : ForwardPayload
+    data class FileUri(val uri: Uri, val fileName: String, val mime: String) : ForwardPayload
+}
+
 data class PendingExternalShare(
     val uris: List<Uri> = emptyList(),
     val sharedText: String? = null,
+    val texts: List<String> = emptyList(),
+    val autoSendRoomCode: String = "",
 ) {
-    val hasContent: Boolean get() = uris.isNotEmpty() || !sharedText.isNullOrBlank()
+    val hasContent: Boolean
+        get() = uris.isNotEmpty() || !sharedText.isNullOrBlank() || texts.isNotEmpty()
 }
 
 data class BayChatUiState(
@@ -273,6 +286,11 @@ data class BayChatUiState(
     val nearbyNetworkType: String = "unknown",
     val outgoingNearbyInvite: OutgoingNearbyInvite? = null,
     val transferProgress: Map<String, TransferProgressSnapshot> = emptyMap(),
+    // v1.3.0 本地收藏、最近使用表情及拍一拍头像抖动状态
+    val favorites: List<FavoriteItem> = emptyList(),
+    val recentEmojis: List<String> = emptyList(),
+    val nudgedPeerId: String? = null,
+    val nudgeNonce: Long = 0L,
 ) {
     // B12：供 Activity 与导航判断当前是否保有活跃或后台挂起的房间会话
     val hasActiveRoom: Boolean
@@ -307,6 +325,8 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
             myPickups = store.loadMyPickups(),
             draftsByRoom = store.loadRoomDrafts(),
             mutedRooms = store.loadMutedRooms(),
+            favorites = store.loadFavorites(),
+            recentEmojis = store.loadRecentEmojis(),
         )
     )
     val uiState: StateFlow<BayChatUiState> = _uiState.asStateFlow()
@@ -337,6 +357,8 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     private var draftIdleTypingJob: Job? = null
     private var nearbyPollingJob: Job? = null
     private var outgoingInvitePollingJob: Job? = null
+    private var lastNudgeAt: Long = 0L
+    private val seenNudgeIds = LinkedHashSet<String>()
 
     // 语音录制与播放控制器
     private var mediaRecorder: MediaRecorder? = null
@@ -663,6 +685,10 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         val share = _uiState.value.pendingShare
         if (!share.hasContent || _uiState.value.activeRoom == null) return
         clearPendingShare()
+        updateRoom { it.copy(replyingTo = null) }
+        share.texts.forEach { text ->
+            if (text.isNotBlank()) sendTextMessage(text)
+        }
         share.sharedText?.let { sendTextMessage(it) }
         if (share.uris.isNotEmpty()) {
             sendUris(share.uris)
@@ -1837,6 +1863,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                                 lobbyError = "房间 #$code 设有暗号密码，请输入密码后进入",
                                 lobbyNeedPassword = true,
                                 pendingJoinCode = code,
+                                pendingShare = it.pendingShare.copy(autoSendRoomCode = ""),
                             )
                         }
                         return@launch
@@ -1870,10 +1897,16 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                         lobbyError = e.message,
                         lobbyNeedPassword = e.errorCode == "WRONG_PASSWORD" || it.lobbyNeedPassword,
                         pendingJoinCode = code,
+                        pendingShare = it.pendingShare.copy(autoSendRoomCode = ""),
                     )
                 }
             } catch (e: Exception) {
-                _uiState.update { it.copy(lobbyError = e.message ?: "无法连接到服务器") }
+                _uiState.update {
+                    it.copy(
+                        lobbyError = e.message ?: "无法连接到服务器",
+                        pendingShare = it.pendingShare.copy(autoSendRoomCode = ""),
+                    )
+                }
             } finally {
                 _uiState.update { it.copy(lobbyBusy = false) }
             }
@@ -2109,6 +2142,18 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                 override fun onReaction(peerId: String, msgId: String, emoji: String) {
                     if (isPeerBlockedInternal(peerId)) return
                     toggleReactionLocal(msgId, emoji, peerId)
+                }
+
+                override fun onNudge(
+                    peerId: String,
+                    id: String,
+                    targetPeerId: String,
+                    targetName: String,
+                    fromName: String,
+                    timestamp: Long,
+                ) {
+                    if (isPeerBlockedInternal(peerId)) return
+                    handleIncomingNudge(peerId, id, targetPeerId, targetName, fromName, timestamp)
                 }
 
                 override fun onFileOffer(
@@ -2451,6 +2496,19 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                     newMesh.syncPeers(peerMap.keys.toList())
                     refreshForegroundBanner()
                     maybeRecoverPendingCameraCapture(code)
+                    val autoTarget = _uiState.value.pendingShare.autoSendRoomCode
+                    if (autoTarget.isNotBlank() && autoTarget.equals(code, ignoreCase = true)) {
+                        viewModelScope.launch {
+                            delay(800L)
+                            val curRoom = _uiState.value.activeRoom
+                            if (curRoom != null &&
+                                curRoom.roomCode.equals(code, ignoreCase = true) &&
+                                _uiState.value.pendingShare.hasContent
+                            ) {
+                                sendPendingShareNow()
+                            }
+                        }
+                    }
                 }
 
                 override fun onPeerJoined(profile: PeerProfile) {
@@ -4597,6 +4655,371 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                 emptyList()
             }
             st.copy(unreadMentionMessageIds = next)
+        }
+    }
+
+    // 仅清理本机内存中的消息流（不触碰服务端缓存，适用于普通成员与房主本地整理）
+    fun clearLocalMessages() {
+        stopVoicePlayback()
+        updateRoom { r ->
+            r.copy(
+                messages = emptyList(),
+                replyingTo = null,
+            )
+        }
+        _uiState.update {
+            it.copy(
+                firstUnreadMessageId = null,
+                unreadMentionMessageIds = emptyList(),
+                unreadCount = 0,
+            )
+        }
+        showToast("已清空本机记录")
+    }
+
+    // 解析选中消息中的可转发载荷（保持时间顺序，语音/系统/撤回/未下载云端文件跳过）
+    fun resolveForwardPayloads(items: List<ChatItem>): Pair<List<ForwardPayload>, Int> {
+        val payloads = mutableListOf<ForwardPayload>()
+        var skipped = 0
+        items.sortedBy { it.timestamp }.forEach { item ->
+            when {
+                item.isSelfRecall || item.kind == ChatKind.SYSTEM || item.kind == ChatKind.AUDIO -> {
+                    skipped++
+                }
+                item.kind == ChatKind.TEXT || item.kind == ChatKind.CLIP -> {
+                    val txt = item.text?.trim().orEmpty()
+                    if (txt.isNotEmpty()) {
+                        payloads.add(ForwardPayload.Text(txt))
+                    } else {
+                        skipped++
+                    }
+                }
+                item.kind == ChatKind.IMAGE || item.kind == ChatKind.FILE -> {
+                    val src = resolveLocalSourceForItem(item)
+                    val uri = src?.let { MediaDownloadHelper.resolveShareableUri(appContext, it) }
+                    if (uri != null) {
+                        val fileName = item.transfer?.fileName?.takeIf { it.isNotBlank() }
+                            ?: "baychat_${item.timestamp}"
+                        val mime = item.transfer?.mimeType?.takeIf { it.isNotBlank() }
+                            ?: if (item.kind == ChatKind.IMAGE) "image/*" else "*/*"
+                        payloads.add(ForwardPayload.FileUri(uri, fileName, mime))
+                    } else {
+                        skipped++
+                    }
+                }
+                else -> skipped++
+            }
+        }
+        return payloads to skipped
+    }
+
+    // 逐条转发至当前房间或切换加入指定历史房间后自动发出
+    fun forwardToRoom(targetCode: String, payloads: List<ForwardPayload>) {
+        if (payloads.isEmpty()) {
+            showToast("所选消息暂不支持转发")
+            return
+        }
+        val cleanCode = targetCode.trim().uppercase()
+        if (cleanCode.isEmpty()) return
+        val texts = payloads.filterIsInstance<ForwardPayload.Text>().map { it.text }
+        val uris = payloads.filterIsInstance<ForwardPayload.FileUri>().map { it.uri }
+        val currentCode = _uiState.value.activeRoom?.roomCode
+
+        if (currentCode != null && currentCode.equals(cleanCode, ignoreCase = true)) {
+            updateRoom { it.copy(replyingTo = null) }
+            texts.forEach { txt ->
+                if (txt.isNotBlank()) sendTextMessage(txt)
+            }
+            if (uris.isNotEmpty()) {
+                sendUris(uris)
+            }
+            showToast("已转发")
+            return
+        }
+
+        val matchedSaved = _uiState.value.savedRooms.firstOrNull { it.code.equals(cleanCode, ignoreCase = true) }
+        val matchedRecent = _uiState.value.recentRooms.firstOrNull { it.code.equals(cleanCode, ignoreCase = true) }
+        val pwd = matchedSaved?.password?.takeIf { it.isNotBlank() } ?: matchedRecent?.password.orEmpty()
+        val ownerToken = matchedSaved?.ownerToken?.takeIf { it.isNotBlank() } ?: matchedRecent?.ownerToken.orEmpty()
+
+        leaveRoom()
+        _uiState.update {
+            it.copy(
+                pendingShare = PendingExternalShare(
+                    uris = uris,
+                    texts = texts,
+                    autoSendRoomCode = cleanCode,
+                )
+            )
+        }
+        joinRoomInternal(cleanCode, pwd, overrideOwnerToken = ownerToken)
+    }
+
+    private fun resolveLocalSourceForItem(item: ChatItem): String? =
+        item.transfer?.contentUri?.takeIf { it.isNotBlank() }
+            ?: item.localFilePath?.takeIf { it.isNotBlank() }
+            ?: item.transfer?.localPath?.takeIf { it.isNotBlank() }
+            ?: item.imageUrl?.takeIf {
+                it.startsWith("content://") || it.startsWith("file://") || it.startsWith("/")
+            }
+
+    // 批量或单条添加到本地收藏（文件异步拷贝至 filesDir/favorites，避免缓存清理误删）
+    fun addFavorites(items: List<ChatItem>) {
+        val roomCode = _uiState.value.activeRoom?.roomCode.orEmpty().uppercase()
+        val candidates = items
+            .filter { it.kind != ChatKind.SYSTEM && !it.isSelfRecall }
+            .sortedBy { it.timestamp }
+        if (candidates.isEmpty()) {
+            showToast("暂无可收藏内容")
+            return
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            val currentList = _uiState.value.favorites.toMutableList()
+            val existingKeys = currentList.mapNotNull { it.sourceKey.takeIf(String::isNotBlank) }.toMutableSet()
+            val favDir = File(appContext.filesDir, "favorites").apply { mkdirs() }
+            val added = mutableListOf<FavoriteItem>()
+            var duplicateCount = 0
+            var skippedCount = 0
+
+            for (item in candidates) {
+                val sourceKey = "$roomCode:${item.id}"
+                if (sourceKey in existingKeys) {
+                    duplicateCount++
+                    continue
+                }
+                when (item.kind) {
+                    ChatKind.TEXT, ChatKind.CLIP -> {
+                        val txt = item.text?.trim().orEmpty()
+                        if (txt.isEmpty()) {
+                            skippedCount++
+                            continue
+                        }
+                        val fav = FavoriteItem(
+                            id = "fav_${System.currentTimeMillis()}_${(1000..9999).random()}",
+                            kind = "text",
+                            text = txt,
+                            senderName = item.senderName,
+                            roomCode = roomCode,
+                            savedAt = System.currentTimeMillis(),
+                            sourceKey = sourceKey,
+                        )
+                        added.add(fav)
+                        existingKeys.add(sourceKey)
+                    }
+                    ChatKind.IMAGE, ChatKind.FILE, ChatKind.AUDIO -> {
+                        val src = resolveLocalSourceForItem(item)
+                        val shareUri = src?.let { MediaDownloadHelper.resolveShareableUri(appContext, it) }
+                        if (shareUri == null) {
+                            skippedCount++
+                            continue
+                        }
+                        val favId = "fav_${System.currentTimeMillis()}_${(1000..9999).random()}"
+                        val defaultExt = when (item.kind) {
+                            ChatKind.IMAGE -> "jpg"
+                            ChatKind.AUDIO -> "m4a"
+                            else -> "bin"
+                        }
+                        val rawName = item.transfer?.fileName?.takeIf { it.isNotBlank() }
+                            ?: "baychat_${item.timestamp}.$defaultExt"
+                        val safeName = rawName.replace(Regex("[^a-zA-Z0-9._\\-\\u4e00-\\u9fa5]"), "_")
+                        val destFile = File(favDir, "${favId}_$safeName")
+                        val copied = runCatching {
+                            appContext.contentResolver.openInputStream(shareUri)?.use { input ->
+                                FileOutputStream(destFile).use { output ->
+                                    input.copyTo(output)
+                                }
+                            }
+                            destFile.exists() && destFile.length() > 0L
+                        }.getOrDefault(false)
+                        if (!copied) {
+                            runCatching { destFile.delete() }
+                            skippedCount++
+                            continue
+                        }
+                        val favKind = when (item.kind) {
+                            ChatKind.IMAGE -> "image"
+                            ChatKind.AUDIO -> "audio"
+                            else -> "file"
+                        }
+                        val favMime = item.transfer?.mimeType?.takeIf { it.isNotBlank() } ?: when (item.kind) {
+                            ChatKind.IMAGE -> "image/jpeg"
+                            ChatKind.AUDIO -> "audio/mp4"
+                            else -> "application/octet-stream"
+                        }
+                        val fav = FavoriteItem(
+                            id = favId,
+                            kind = favKind,
+                            filePath = destFile.absolutePath,
+                            fileName = rawName,
+                            mime = favMime,
+                            size = destFile.length(),
+                            senderName = item.senderName,
+                            roomCode = roomCode,
+                            savedAt = System.currentTimeMillis(),
+                            sourceKey = sourceKey,
+                        )
+                        added.add(fav)
+                        existingKeys.add(sourceKey)
+                    }
+                    else -> skippedCount++
+                }
+            }
+
+            if (added.isNotEmpty()) {
+                val merged = (added.reversed() + currentList).take(300)
+                store.saveFavorites(merged)
+                _uiState.update { it.copy(favorites = merged) }
+            }
+
+            withContext(Dispatchers.Main) {
+                val msg = when {
+                    added.isNotEmpty() && skippedCount > 0 ->
+                        "已收藏 ${added.size} 条（${skippedCount} 条无本地文件已跳过）"
+                    added.size == 1 -> "已收藏"
+                    added.size > 1 -> "已收藏 ${added.size} 条"
+                    duplicateCount > 0 -> "内容已在收藏中"
+                    else -> "暂无可收藏的本地文件"
+                }
+                showToast(msg)
+            }
+        }
+    }
+
+    fun removeFavorite(id: String) {
+        val current = _uiState.value.favorites
+        val target = current.firstOrNull { it.id == id } ?: return
+        val next = current.filterNot { it.id == id }
+        store.saveFavorites(next)
+        _uiState.update { it.copy(favorites = next) }
+        target.filePath?.let { path ->
+            viewModelScope.launch(Dispatchers.IO) {
+                runCatching { File(path).delete() }
+            }
+        }
+        showToast("已删除收藏")
+    }
+
+    fun sendFavorite(fav: FavoriteItem) {
+        if (_uiState.value.activeRoom == null) {
+            showToast("请先加入房间后再发送")
+            return
+        }
+        if (fav.kind == "text") {
+            val txt = fav.text?.trim().orEmpty()
+            if (txt.isEmpty()) return
+            sendTextMessage(txt)
+            showToast("已发送到当前房间")
+            return
+        }
+        val file = fav.filePath?.let { File(it) }?.takeIf { it.exists() }
+        if (file == null) {
+            showToast("收藏文件已损坏或被移除")
+            return
+        }
+        val uri = runCatching {
+            FileProvider.getUriForFile(appContext, "${appContext.packageName}.fileprovider", file)
+        }.getOrNull()
+        if (uri == null) {
+            showToast("无法读取收藏文件")
+            return
+        }
+        sendUris(listOf(uri))
+        showToast("已发送到当前房间")
+    }
+
+    fun recordEmojiUsed(emoji: String) {
+        if (emoji.isBlank()) return
+        val next = (listOf(emoji) + _uiState.value.recentEmojis.filterNot { it == emoji }).take(24)
+        store.saveRecentEmojis(next)
+        _uiState.update { it.copy(recentEmojis = next) }
+    }
+
+    // 微信式「拍一拍」：3 秒节流，仅本地提示 + P2P 广播，不落服务端历史
+    fun nudgePeer(targetPeerId: String, targetName: String) {
+        val room = _uiState.value.activeRoom ?: return
+        val now = System.currentTimeMillis()
+        if (now - lastNudgeAt < 3_000L) {
+            showToast("操作太频繁")
+            return
+        }
+        lastNudgeAt = now
+        val isSelfTarget = targetPeerId == selfPeerId || targetPeerId == room.selfPeerId
+        val resolvedTargetName = if (isSelfTarget) _uiState.value.profile.name else targetName
+        val nudgeId = "nudge_${now}_${(1000..9999).random()}"
+        seenNudgeIds.add(nudgeId)
+        val text = FormatUtils.formatNudgeText(
+            fromName = _uiState.value.profile.name,
+            targetName = resolvedTargetName,
+            isSelfSender = true,
+            isSelfTarget = isSelfTarget,
+        )
+        appendMessageIfAbsent(
+            ChatItem(
+                id = nudgeId,
+                kind = ChatKind.SYSTEM,
+                senderId = "system",
+                senderName = "系统",
+                isSelf = false,
+                timestamp = now,
+                text = text,
+            )
+        )
+        _uiState.update { it.copy(nudgedPeerId = targetPeerId, nudgeNonce = it.nudgeNonce + 1) }
+        mesh?.broadcastNudge(
+            id = nudgeId,
+            targetPeerId = targetPeerId,
+            targetName = resolvedTargetName,
+            fromName = _uiState.value.profile.name,
+            timestamp = now,
+        )
+    }
+
+    private fun handleIncomingNudge(
+        peerId: String,
+        id: String,
+        targetPeerId: String,
+        targetName: String,
+        fromName: String,
+        timestamp: Long,
+    ) {
+        if (!seenNudgeIds.add(id)) return
+        if (seenNudgeIds.size > 500) {
+            val trim = seenNudgeIds.take(100)
+            seenNudgeIds.removeAll(trim.toSet())
+        }
+        val room = _uiState.value.activeRoom ?: return
+        val isSelfTarget = targetPeerId == room.selfPeerId || targetPeerId == selfPeerId
+        val isSenderTargetSelf = targetPeerId == peerId
+        val senderLabel = room.peers[peerId]?.name ?: fromName.ifBlank { "伙伴" }
+        val targetLabel = if (isSelfTarget) {
+            _uiState.value.profile.name
+        } else {
+            room.peers[targetPeerId]?.name ?: targetName.ifBlank { "伙伴" }
+        }
+        val text = FormatUtils.formatNudgeText(
+            fromName = senderLabel,
+            targetName = targetLabel,
+            isSelfSender = false,
+            isSelfTarget = isSelfTarget,
+            isSenderTargetSelf = isSenderTargetSelf,
+        )
+        val inserted = appendMessageIfAbsent(
+            ChatItem(
+                id = id,
+                kind = ChatKind.SYSTEM,
+                senderId = "system",
+                senderName = "系统",
+                isSelf = false,
+                timestamp = timestamp,
+                text = text,
+            )
+        )
+        if (inserted) {
+            _uiState.update { it.copy(nudgedPeerId = targetPeerId, nudgeNonce = it.nudgeNonce + 1) }
+            if (isSelfTarget && !isRoomMuted(room.roomCode)) {
+                playSoundIfEnabled { playMessageIn() }
+            }
         }
     }
 

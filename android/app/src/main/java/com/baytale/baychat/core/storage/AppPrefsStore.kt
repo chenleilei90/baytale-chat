@@ -5,6 +5,7 @@ import com.baytale.baychat.BuildConfig
 import com.baytale.baychat.core.model.AppThemeMode
 import com.baytale.baychat.core.model.AppearanceMode
 import com.baytale.baychat.core.model.BlockedPeer
+import com.baytale.baychat.core.model.FavoriteItem
 import com.baytale.baychat.core.model.LastActiveRoom
 import com.baytale.baychat.core.model.PartialFileMeta
 import com.baytale.baychat.core.model.RecentRoom
@@ -493,8 +494,53 @@ class AppPrefsStore(context: Context) {
         sp.edit().remove(KEY_PENDING_CAMERA_CAPTURE).apply()
     }
 
+    // 加载本地收藏列表（最多保留 300 条，最新在前）
+    fun loadFavorites(): List<FavoriteItem> {
+        val raw = sp.getString(KEY_FAVORITES, null) ?: return emptyList()
+        return runCatching {
+            json.decodeFromString(ListSerializer(FavoriteItem.serializer()), raw).take(MAX_FAVORITES)
+        }.getOrDefault(emptyList())
+    }
+
+    // 保存本地收藏列表（最多保留 300 条，最新在前）
+    fun saveFavorites(list: List<FavoriteItem>) {
+        val capped = list.take(MAX_FAVORITES)
+        if (capped.isEmpty()) {
+            sp.edit().remove(KEY_FAVORITES).apply()
+        } else {
+            sp.edit()
+                .putString(KEY_FAVORITES, json.encodeToString(ListSerializer(FavoriteItem.serializer()), capped))
+                .apply()
+        }
+    }
+
+    // 加载最近使用的表情列表（最多 24 个）
+    fun loadRecentEmojis(): List<String> {
+        val raw = sp.getString(KEY_RECENT_EMOJIS, null) ?: return emptyList()
+        return runCatching {
+            json.decodeFromString(ListSerializer(String.serializer()), raw)
+                .filter { it.isNotBlank() }
+                .distinct()
+                .take(MAX_RECENT_EMOJIS)
+        }.getOrDefault(emptyList())
+    }
+
+    // 保存最近使用的表情列表（最多 24 个）
+    fun saveRecentEmojis(list: List<String>) {
+        val capped = list.filter { it.isNotBlank() }.distinct().take(MAX_RECENT_EMOJIS)
+        if (capped.isEmpty()) {
+            sp.edit().remove(KEY_RECENT_EMOJIS).apply()
+        } else {
+            sp.edit()
+                .putString(KEY_RECENT_EMOJIS, json.encodeToString(ListSerializer(String.serializer()), capped))
+                .apply()
+        }
+    }
+
     companion object {
         private const val MAX_ROOM_DRAFTS = 20
+        private const val MAX_FAVORITES = 300
+        private const val MAX_RECENT_EMOJIS = 24
         private const val PENDING_CAMERA_TTL_MS = 30L * 60L * 1000L
         private const val KEY_PRIVACY_ACCEPTED = "privacy_accepted_v1"
         private const val KEY_PROFILE = "user_profile"
@@ -523,6 +569,8 @@ class AppPrefsStore(context: Context) {
         private const val KEY_LAST_ACTIVE_ROOM = "last_active_room_v1"
         private const val KEY_ROOM_DRAFTS = "room_drafts_v1"
         private const val KEY_MUTED_ROOMS = "muted_rooms_v1"
+        private const val KEY_FAVORITES = "favorites_v1"
+        private const val KEY_RECENT_EMOJIS = "recent_emojis_v1"
         private const val KEY_PENDING_CAMERA_CAPTURE = "pending_camera_capture_v1"
     }
 }

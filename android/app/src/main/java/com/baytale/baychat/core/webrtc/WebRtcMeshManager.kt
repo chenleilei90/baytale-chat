@@ -71,6 +71,14 @@ interface MeshCallbacks {
     fun onResumeRequested(peerId: String, resumeKey: String, fileName: String, fileSize: Long) {}
     fun onResumeUnavailable(peerId: String, resumeKey: String, fileName: String, reason: String) {}
     fun onPartExpired(partFileName: String) {}
+    fun onNudge(
+        peerId: String,
+        id: String,
+        targetPeerId: String,
+        targetName: String,
+        fromName: String,
+        timestamp: Long,
+    ) {}
 }
 
 data class OutgoingFileSource(
@@ -504,6 +512,24 @@ class WebRtcMeshManager(
         })
     }
 
+    // 广播 P2P「拍一拍」提示（仅在房间直连成员间瞬时透传，不落服务端历史缓存）
+    fun broadcastNudge(
+        id: String,
+        targetPeerId: String,
+        targetName: String,
+        fromName: String,
+        timestamp: Long,
+    ): Int {
+        return broadcastChatJson(buildJsonObject {
+            put("kind", "nudge")
+            put("id", id)
+            put("targetPeerId", targetPeerId)
+            put("targetName", targetName)
+            put("fromName", fromName)
+            put("timestamp", timestamp)
+        })
+    }
+
     fun broadcastClipboard(text: String, updatedAt: Long = System.currentTimeMillis()): Int {
         return broadcastChatJson(buildJsonObject {
             put("kind", "clip-sync")
@@ -849,6 +875,16 @@ class WebRtcMeshManager(
                 val msgId = obj["msgId"]?.jsonPrimitive?.content ?: return
                 val emoji = obj["emoji"]?.jsonPrimitive?.content ?: return
                 callbacks.onReaction(session.peerId, msgId, emoji)
+            }
+
+            "nudge" -> {
+                val id = obj["id"]?.jsonPrimitive?.content ?: return
+                val targetPeerId = obj["targetPeerId"]?.jsonPrimitive?.content ?: return
+                val targetName = obj["targetName"]?.jsonPrimitive?.content.orEmpty()
+                val fromName = obj["fromName"]?.jsonPrimitive?.content.orEmpty()
+                val timestamp = obj["timestamp"]?.jsonPrimitive?.content?.toLongOrNull()
+                    ?: System.currentTimeMillis()
+                callbacks.onNudge(session.peerId, id, targetPeerId, targetName, fromName, timestamp)
             }
 
             "clip-sync" -> {

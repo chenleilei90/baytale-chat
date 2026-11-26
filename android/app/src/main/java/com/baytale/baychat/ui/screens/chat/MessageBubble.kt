@@ -1,9 +1,11 @@
 package com.baytale.baychat.ui.screens.chat
 
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -22,23 +24,40 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedback
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withLink
 import androidx.compose.ui.unit.dp
 import com.baytale.baychat.core.model.ChatItem
 import com.baytale.baychat.core.model.ChatKind
@@ -72,11 +91,18 @@ fun MessageBubble(
     snapshotSpeedBps: Long? = null,
     snapshotEtaSeconds: Int? = null,
     isHighlighted: Boolean = false,
-    onLongPress: () -> Unit,
+    selectionMode: Boolean = false,
+    isSelected: Boolean = false,
+    onToggleSelect: () -> Unit = {},
+    isAvatarShaking: Boolean = false,
+    nudgeShakeNonce: Long = 0L,
+    onLongPress: (Rect) -> Unit,
     onReEditRecall: (String) -> Unit,
     onJumpToReply: (String) -> Unit,
     onDoubleClickText: (String) -> Unit,
     onPeerClick: (peerId: String, peerName: String) -> Unit,
+    onAvatarDoubleTap: (peerId: String, peerName: String) -> Unit = { _, _ -> },
+    onAvatarLongPress: (peerId: String, peerName: String) -> Unit = { _, _ -> },
     onRetrySend: (messageId: String) -> Unit,
     onReact: (emoji: String) -> Unit,
     onPreviewImage: () -> Unit,
@@ -143,41 +169,98 @@ fun MessageBubble(
     )
 
     val topGap = if (isFirstInGroup) BaySpacing.sm else 2.dp
+    val selectable = !item.isSelfRecall
     val rowHighlightColor by animateColorAsState(
-        targetValue = if (isHighlighted) colors.accentSoft else Color.Transparent,
+        targetValue = when {
+            selectionMode && isSelected -> colors.accentSoft.copy(alpha = 0.7f)
+            isHighlighted -> colors.accentSoft
+            else -> Color.Transparent
+        },
         animationSpec = tween(durationMillis = 320),
         label = "messageJumpHighlight",
     )
 
-    Row(
+    Box(
         modifier = modifier
             .fillMaxWidth()
             .padding(top = topGap)
             .clip(BayShapes.mdShape)
-            .background(rowHighlightColor)
-            .padding(horizontal = 2.dp, vertical = 1.dp),
-        horizontalArrangement = if (item.isSelf) Arrangement.End else Arrangement.Start,
-        verticalAlignment = Alignment.Top,
+            .background(rowHighlightColor),
     ) {
-        // 他人消息左侧头像列（连贯消息保留对齐空白，点击热区 >= 44.dp）
-        if (!item.isSelf) {
-            if (isFirstInGroup) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 2.dp, vertical = 1.dp),
+            verticalAlignment = Alignment.Top,
+        ) {
+            if (selectionMode) {
                 Box(
                     modifier = Modifier
-                        .defaultMinSize(minWidth = 44.dp, minHeight = 44.dp)
-                        .bayClickable { onPeerClick(item.senderId, item.senderName) },
-                    contentAlignment = Alignment.TopCenter,
+                        .padding(top = 6.dp, end = BaySpacing.xs)
+                        .size(36.dp),
+                    contentAlignment = Alignment.Center,
                 ) {
-                    BayAvatar(
-                        emojiId = item.senderAvatar,
-                        size = 34.dp,
-                    )
+                    if (selectable) {
+                        if (isSelected) {
+                            Box(
+                                modifier = Modifier
+                                    .size(22.dp)
+                                    .clip(CircleShape)
+                                    .background(colors.accent),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Check,
+                                    contentDescription = "已选择",
+                                    tint = colors.onAccent,
+                                    modifier = Modifier.size(14.dp),
+                                )
+                            }
+                        } else {
+                            Box(
+                                modifier = Modifier
+                                    .size(22.dp)
+                                    .clip(CircleShape)
+                                    .background(colors.fillStrong),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(18.dp)
+                                        .clip(CircleShape)
+                                        .background(colors.bg),
+                                )
+                            }
+                        }
+                    }
                 }
-            } else {
-                Spacer(modifier = Modifier.width(44.dp))
             }
-            Spacer(modifier = Modifier.width(BaySpacing.xs))
-        }
+
+            Row(
+                modifier = Modifier.weight(1f),
+                horizontalArrangement = if (item.isSelf) Arrangement.End else Arrangement.Start,
+                verticalAlignment = Alignment.Top,
+            ) {
+                // 他人消息左侧头像列（连贯消息保留对齐空白；支持单击操作、双击拍一拍、长按@提及）
+                if (!item.isSelf) {
+                    if (isFirstInGroup) {
+                        MessageSenderAvatar(
+                            avatarId = item.senderAvatar,
+                            isShaking = isAvatarShaking,
+                            shakeNonce = nudgeShakeNonce,
+                            enabled = !selectionMode,
+                            onClick = { onPeerClick(item.senderId, item.senderName) },
+                            onDoubleClick = { onAvatarDoubleTap(item.senderId, item.senderName) },
+                            onLongClick = {
+                                BayHaptic.tap(haptic, hapticEnabled)
+                                onAvatarLongPress(item.senderId, item.senderName)
+                            },
+                        )
+                    } else {
+                        Spacer(modifier = Modifier.width(44.dp))
+                    }
+                    Spacer(modifier = Modifier.width(BaySpacing.xs))
+                }
 
         Column(
             horizontalAlignment = if (item.isSelf) Alignment.End else Alignment.Start,
@@ -235,10 +318,12 @@ fun MessageBubble(
                 }
 
                 val longPressInteraction = remember { MutableInteractionSource() }
+                var bubbleBounds by remember { mutableStateOf(Rect.Zero) }
                 val textBody = item.text.orEmpty()
                 Box(
                     modifier = Modifier
                         .widthIn(max = 304.dp)
+                        .onGloballyPositioned { coords -> bubbleBounds = coords.boundsInWindow() }
                         .combinedClickable(
                             interactionSource = longPressInteraction,
                             indication = null,
@@ -250,7 +335,7 @@ fun MessageBubble(
                             },
                             onLongClick = {
                                 BayHaptic.heavy(haptic, hapticEnabled)
-                                onLongPress()
+                                onLongPress(bubbleBounds)
                             },
                         ),
                 ) {
@@ -329,8 +414,12 @@ fun MessageBubble(
                                     }
                                 }
 
+                                val linkColor = if (item.isSelf) colors.onAccent else colors.accent
+                                val linkedText = remember(textBody, linkColor) {
+                                    buildClickableUrlText(textBody, linkColor)
+                                }
                                 Text(
-                                    text = textBody,
+                                    text = linkedText,
                                     style = BayType.callout,
                                     color = textColor,
                                 )
@@ -450,6 +539,120 @@ fun MessageBubble(
                 }
             }
         }
+
+                // 自己消息右侧头像列（首条展示头像支持双击拍自己，连贯消息保留对齐空白）
+                if (item.isSelf) {
+                    Spacer(modifier = Modifier.width(BaySpacing.xs))
+                    if (isFirstInGroup) {
+                        MessageSenderAvatar(
+                            avatarId = item.senderAvatar,
+                            isShaking = isAvatarShaking,
+                            shakeNonce = nudgeShakeNonce,
+                            enabled = !selectionMode,
+                            onClick = {},
+                            onDoubleClick = { onAvatarDoubleTap(item.senderId, item.senderName) },
+                            onLongClick = null,
+                        )
+                    } else {
+                        Spacer(modifier = Modifier.width(44.dp))
+                    }
+                }
+            }
+        }
+
+        // 多选模式下全行透明拦截层：停用内部所有点击/双击/长按/链接跳转，点击整行即切换勾选
+        if (selectionMode) {
+            val selectInteraction = remember(item.id) { MutableInteractionSource() }
+            Spacer(
+                modifier = Modifier
+                    .matchParentSize()
+                    .clickable(
+                        interactionSource = selectInteraction,
+                        indication = null,
+                        enabled = selectable,
+                        onClick = onToggleSelect,
+                    ),
+            )
+        }
+    }
+}
+
+private val CHAT_URL_REGEX = Regex(
+    "https?://[^\\s\\u3000-\\u303F\\u4e00-\\u9fa5，。！？、；：（）【】《》\"'<>]+",
+    RegexOption.IGNORE_CASE,
+)
+
+private fun buildClickableUrlText(text: String, linkColor: Color): AnnotatedString {
+    val matches = CHAT_URL_REGEX.findAll(text).toList()
+    if (matches.isEmpty()) return AnnotatedString(text)
+    return buildAnnotatedString {
+        var cursor = 0
+        val linkStyle = TextLinkStyles(
+            style = SpanStyle(
+                color = linkColor,
+                textDecoration = TextDecoration.Underline,
+            )
+        )
+        matches.forEach { match ->
+            val start = match.range.first
+            val end = match.range.last + 1
+            if (start > cursor) {
+                append(text.substring(cursor, start))
+            }
+            val url = text.substring(start, end)
+            withLink(LinkAnnotation.Url(url = url, styles = linkStyle)) {
+                append(url)
+            }
+            cursor = end
+        }
+        if (cursor < text.length) {
+            append(text.substring(cursor))
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun MessageSenderAvatar(
+    avatarId: String?,
+    isShaking: Boolean,
+    shakeNonce: Long,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    onDoubleClick: () -> Unit,
+    onLongClick: (() -> Unit)?,
+) {
+    val shakeDeg = remember { Animatable(0f) }
+    LaunchedEffect(shakeNonce, isShaking) {
+        if (isShaking && shakeNonce > 0L) {
+            shakeDeg.snapTo(0f)
+            val frames = listOf(-12f, 12f, -8f, 8f, 0f)
+            frames.forEach { target ->
+                shakeDeg.animateTo(target, animationSpec = tween(durationMillis = 115))
+            }
+        }
+    }
+    val interaction = remember { MutableInteractionSource() }
+    Box(
+        modifier = Modifier
+            .defaultMinSize(minWidth = 44.dp, minHeight = 44.dp)
+            .combinedClickable(
+                interactionSource = interaction,
+                indication = null,
+                enabled = enabled,
+                onClick = onClick,
+                onDoubleClick = onDoubleClick,
+                onLongClick = onLongClick,
+            ),
+        contentAlignment = Alignment.TopCenter,
+    ) {
+        BayAvatar(
+            emojiId = avatarId,
+            size = 34.dp,
+            modifier = Modifier.graphicsLayer {
+                rotationZ = shakeDeg.value
+            },
+        )
     }
 }
 

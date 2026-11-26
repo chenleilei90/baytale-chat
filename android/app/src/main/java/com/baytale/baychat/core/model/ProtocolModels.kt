@@ -577,3 +577,21 @@ data class ChatItem(
     // 文本消息是否 @ 提及了当前用户
     val mentionedMe: Boolean = false,
 )
+
+/**
+ * 本地收藏条目模型（支持文本、图片、普通文件与语音）。
+ */
+@Serializable
+data class FavoriteItem(
+    val id: String,
+    val kind: String, // text | image | file | audio
+    val text: String? = null,
+    val filePath: String? = null,
+    val fileName: String? = null,
+    val mime: String? = null,
+    val size: Long = 0L,
+    val senderName: String = "",
+    val roomCode: String = "",
+    val savedAt: Long = System.currentTimeMillis(),
+    val sourceKey: String = "",
+)

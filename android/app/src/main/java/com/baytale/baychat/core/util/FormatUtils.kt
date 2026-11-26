@@ -195,4 +195,21 @@ object FormatUtils {
         }
         return String(chars)
     }
+
+    /**
+     * 格式化「拍一拍」系统提示文案。
+     */
+    fun formatNudgeText(
+        fromName: String,
+        targetName: String,
+        isSelfSender: Boolean,
+        isSelfTarget: Boolean,
+        isSenderTargetSelf: Boolean = false,
+    ): String = when {
+        isSelfSender && isSelfTarget -> "我拍了拍自己"
+        isSelfSender -> "我拍了拍\"$targetName\""
+        isSelfTarget -> "\"$fromName\" 拍了拍我"
+        isSenderTargetSelf -> "\"$fromName\" 拍了拍自己"
+        else -> "\"$fromName\" 拍了拍 \"$targetName\""
+    }
 }
