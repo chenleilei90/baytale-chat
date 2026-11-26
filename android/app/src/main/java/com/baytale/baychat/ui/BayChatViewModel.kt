@@ -18,6 +18,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.baytale.baychat.AppForegroundTracker
 import com.baytale.baychat.BuildConfig
 import com.baytale.baychat.core.model.AppReleaseInfo
 import com.baytale.baychat.core.model.AppThemeMode
@@ -363,6 +364,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     private var lastOtaStartRequestMs: Long = 0L
     private var dismissedUpdateVersionInSession: Int = 0
     private var autoReenterAttempted: Boolean = false
+    private var observedForegroundState: Boolean? = null
     // 记录 peerId -> effectiveClientId 映射，避免成员离线后解除屏蔽仍残留拦截
     private val blockedPeerIdToClientId = ConcurrentHashMap<String, String>()
     private var lastForegroundBannerAt: Long = 0L
@@ -399,6 +401,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         refreshTransferCenter()
         refreshStorageStats()
         observeOtaUpdateCenter()
+        observeAppForegroundState()
         observeIncomingNotificationActions()
         registerNetworkMonitor()
         if (_uiState.value.privacyAccepted) {
@@ -533,6 +536,29 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
             }
         }
     }
+
+    // 在 viewModelScope 中直接监听 App 级真实前后台切换（不依赖 Compose 重组，切后台 ON_STOP 暂停帧率后仍毫秒级生效）
+    private fun observeAppForegroundState() {
+        viewModelScope.launch {
+            AppForegroundTracker.isForeground.collect { fg ->
+                if (observedForegroundState == fg) return@collect
+                if (observedForegroundState == null && !fg) {
+                    observedForegroundState = false
+                    _uiState.update { it.copy(isAppForeground = false) }
+                    return@collect
+                }
+                observedForegroundState = fg
+                if (fg) {
+                    onAppForegrounded()
+                } else {
+                    onAppBackgrounded()
+                }
+            }
+        }
+    }
+
+    private fun isAppInBackgroundNow(): Boolean =
+        !AppForegroundTracker.isForeground.value || !_uiState.value.isAppForeground
 
     private fun observeOtaUpdateCenter() {
         viewModelScope.launch {
@@ -2518,7 +2544,8 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                             // 例外规则：需要手动确认的文件传输请求在免打扰房间及挂起态均保持提醒与系统通知
                             playSoundIfEnabled { playMessageIn() }
                             recordUnreadArrival(itemId = incomingItem.id, mentionedMe = false)
-                            if (!_uiState.value.isAppForeground || _uiState.value.roomMinimized) {
+                            val bgNow = isAppInBackgroundNow()
+                            if (bgNow || _uiState.value.roomMinimized) {
                                 IncomingNotificationHelper.showIncomingOfferNotification(
                                     context = appContext,
                                     roomCode = roomCode,
@@ -2529,7 +2556,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                                     fileSize = info.fileSize,
                                 )
                             }
-                            if (_uiState.value.isAppForeground && _uiState.value.roomMinimized) {
+                            if (!bgNow && _uiState.value.roomMinimized) {
                                 showToast("${sender?.name ?: "伙伴"} 发来文件「${info.fileName}」，请点击恢复房间确认接收")
                             }
                         } else {
@@ -2712,7 +2739,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                                     "已保存至 ${info.savedDisplayPath ?: "下载目录"}"
                                 }
                                 showToast(savedText)
-                                if (!_uiState.value.isAppForeground && roomCode.isNotBlank()) {
+                                if (isAppInBackgroundNow() && roomCode.isNotBlank()) {
                                     IncomingNotificationHelper.showFileTransferResultNotification(
                                         context = appContext,
                                         roomCode = roomCode,
@@ -3036,7 +3063,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     // 记录后台/挂起期间的未读数、首条未读定位标记与待跳转 @我 消息
     private fun recordUnreadArrival(itemId: String, mentionedMe: Boolean) {
         _uiState.update { st ->
-            val awayFromRoom = !st.isAppForeground || st.roomMinimized
+            val awayFromRoom = !AppForegroundTracker.isForeground.value || !st.isAppForeground || st.roomMinimized
             val nextUnread = if (awayFromRoom) st.unreadCount + 1 else st.unreadCount
             val nextFirstUnread = if (awayFromRoom && st.firstUnreadMessageId == null) itemId else st.firstUnreadMessageId
             val nextMentions = if (mentionedMe && itemId !in st.unreadMentionMessageIds) {
@@ -3066,7 +3093,8 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         }
         recordUnreadArrival(itemId = item.id, mentionedMe = item.mentionedMe)
         val allowNotify = !muted || item.mentionedMe
-        if (!_uiState.value.isAppForeground && allowNotify && roomCode.isNotBlank()) {
+        val bgNow = isAppInBackgroundNow()
+        if (bgNow && allowNotify && roomCode.isNotBlank()) {
             val unread = _uiState.value.unreadCount.coerceAtLeast(1)
             IncomingNotificationHelper.showBackgroundMessageNotification(
                 context = appContext,
@@ -3076,7 +3104,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                 previewText = previewText,
                 mentionedMe = item.mentionedMe,
             )
-        } else if (_uiState.value.isAppForeground && _uiState.value.roomMinimized && item.mentionedMe && roomCode.isNotBlank()) {
+        } else if (!bgNow && _uiState.value.roomMinimized && item.mentionedMe && roomCode.isNotBlank()) {
             showToast("${item.senderName} 在 #${roomCode} @了你：${previewText.take(24)}")
         }
     }
@@ -4705,7 +4733,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         val ok = mesh?.acceptIncomingTransfer(peerId, transferId, resumeIfAvailable) == true
         if (!ok) {
             showToast("发送方已离线或传输已失效，请让对方重新发送")
-            if (!_uiState.value.isAppForeground) {
+            if (isAppInBackgroundNow()) {
                 IncomingNotificationHelper.showFileTransferResultNotification(
                     context = appContext,
                     roomCode = _uiState.value.activeRoom?.roomCode.orEmpty(),
@@ -5349,7 +5377,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                 recordUnreadArrival(itemId = id, mentionedMe = false)
                 if (!isRoomMuted(room.roomCode)) {
                     playSoundIfEnabled { playMessageIn() }
-                    if (!_uiState.value.isAppForeground) {
+                    if (isAppInBackgroundNow()) {
                         IncomingNotificationHelper.showBackgroundMessageNotification(
                             context = appContext,
                             roomCode = room.roomCode,

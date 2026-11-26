@@ -184,17 +184,7 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            // App 级真实前后台同步：避免启动扫码/文件选择器/相机时误触发退后台通知与轮询中断
-            val appForeground by AppForegroundTracker.isForeground.collectAsState()
-            LaunchedEffect(appForeground) {
-                if (appForeground) {
-                    viewModel.onAppForegrounded()
-                } else {
-                    viewModel.onAppBackgrounded()
-                }
-            }
-
-            // UX-9：协调附近设备轮询（仅在已同意隐私且处于前台时保持轮询，退后台由 onAppBackgrounded 停止）
+            // UX-9：协调附近设备轮询（仅在已同意隐私且处于前台时保持轮询，退后台由 ViewModel 直接监听 AppForegroundTracker 停止）
             LaunchedEffect(uiState.privacyAccepted, uiState.isAppForeground, uiState.prefs.nearbyDiscoverable) {
                 if (uiState.privacyAccepted && uiState.isAppForeground && uiState.prefs.nearbyDiscoverable) {
                     viewModel.startNearbyPolling()
