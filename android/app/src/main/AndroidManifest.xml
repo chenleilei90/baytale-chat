@@ -11,9 +11,11 @@
     <!-- 允许申请系统电池优化白名单，避免国产机型切后台冻结网络与断流 -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
-    <!-- 前台保活传输服务与 Android 13+ 通知权限 -->
+    <!-- 前台传输与远程消息服务、开机自启及 Android 13+ 通知权限 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- 语音对讲消息录制（按需在用户长按/点击录音时请求） -->
@@ -104,13 +106,14 @@
             android:theme="@style/zxing_CaptureTheme"
             android:windowSoftInputMode="stateAlwaysHidden" />
 
-        <!-- 前台保活传输服务：切后台/锁屏时保持 WebSocket 与 P2P 大文件传输不断线 -->
+        <!-- 前台远程消息与传输服务：切后台/锁屏及划掉卡片时保持 WebSocket 与 P2P 通道稳定运行 -->
         <service
             android:name=".service.TransferForegroundService"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
+            android:stopWithTask="false"
+            android:foregroundServiceType="remoteMessaging|dataSync" />
 
-        <!-- 企业级 OTA 应用自动更新前台服务：支持断点续传、切后台保活与通知栏暂停/继续 -->
+        <!-- 企业级 OTA 应用自动更新前台服务：支持断点续传、切后台保持运行与通知栏暂停/继续 -->
         <service
             android:name=".service.AppUpdateService"
             android:exported="false"
@@ -120,6 +123,17 @@
         <receiver
             android:name=".service.IncomingActionReceiver"
             android:exported="false" />
+
+        <!-- 后台常驻看门狗与开机/升级后自动恢复未退出房间的接收器 -->
+        <receiver
+            android:name=".service.RoomResidentReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="com.baytale.baychat.action.RESIDENT_HEARTBEAT" />
+            </intent-filter>
+        </receiver>
 
         <!-- 安全打开本地下载文件的 FileProvider -->
         <provider

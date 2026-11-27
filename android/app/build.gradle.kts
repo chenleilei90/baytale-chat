@@ -23,8 +23,8 @@ android {
         applicationId = "com.baytale.baychat"
         minSdk = 26
         targetSdk = 35
-        versionCode = 34
-        versionName = "1.8.7"
+        versionCode = 35
+        versionName = "1.8.8"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "DEFAULT_SERVER_URL", "\"https://chat.baytale.com\"")

@@ -399,6 +399,8 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     private var lastOtaStartRequestMs: Long = 0L
     private var dismissedUpdateVersionInSession: Int = 0
     private var autoReenterAttempted: Boolean = false
+    @Volatile
+    private var autoReenterInFlight: Boolean = false
     private var observedForegroundState: Boolean? = null
     // 记录 peerId -> effectiveClientId 映射，避免成员离线后解除屏蔽仍残留拦截
     private val blockedPeerIdToClientId = ConcurrentHashMap<String, String>()
@@ -464,53 +466,72 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    // 只要用户未主动退房，冷启动或系统强杀重建后自动无感回到原房间（全程静默，不弹窗、不播放提示音、不弹过期 Toast）
-    private fun autoReenterLastRoomIfNeeded() {
-        if (autoReenterAttempted) return
+    // 只要用户未主动退房，冷启动或看门狗唤醒后自动无感回到原房间（全程静默，不弹窗、不播放提示音、不弹过期 Toast）
+    private fun autoReenterLastRoomIfNeeded(forceRetry: Boolean = false) {
+        if ((!forceRetry && autoReenterAttempted) || autoReenterInFlight) return
+        if (_uiState.value.activeRoom != null) return
+        val initialTarget = _uiState.value.lastRecoverableRoom ?: loadValidRecoverableRoom() ?: return
         autoReenterAttempted = true
-        if (_uiState.value.lastRecoverableRoom == null) return
+        autoReenterInFlight = true
         viewModelScope.launch {
-            // 留出 180ms 让冷启动深链、系统分享或通知直达 Intent 优先路由，避免抢占目标房间
-            delay(180L)
-            val snap = _uiState.value
-            if (snap.activeRoom != null) return@launch
-            if (snap.pendingShare.hasContent || snap.pendingJoinCode != null || snap.pendingAppAction != null) {
-                _uiState.update { it.copy(lastRecoverableRoom = null) }
-                return@launch
-            }
-            val target = snap.lastRecoverableRoom ?: return@launch
-            runCatching { api.fetchRoomInfo(target.code) }
-                .onSuccess { info ->
-                    if (_uiState.value.activeRoom != null) return@onSuccess
-                    if (info.hasPassword) {
-                        if (target.password.isBlank()) {
-                            _uiState.update { it.copy(lastRecoverableRoom = null) }
-                            return@onSuccess
-                        }
-                        runCatching { api.verifyRoomPassword(info.code, target.password) }
-                            .onFailure { err ->
-                                if (err is ApiException && err.errorCode == "WRONG_PASSWORD") {
-                                    store.clearLastActiveRoom()
-                                }
+            try {
+                // 仅冷启动首次进入时留出 180ms 让深链、系统分享或通知直达 Intent 优先路由
+                if (!forceRetry) {
+                    delay(180L)
+                }
+                val snap = _uiState.value
+                if (snap.activeRoom != null) return@launch
+                if (snap.pendingShare.hasContent || snap.pendingJoinCode != null || snap.pendingAppAction != null) {
+                    _uiState.update { it.copy(lastRecoverableRoom = null) }
+                    return@launch
+                }
+                val target = snap.lastRecoverableRoom ?: loadValidRecoverableRoom() ?: initialTarget
+                runCatching { api.fetchRoomInfo(target.code) }
+                    .onSuccess { info ->
+                        if (_uiState.value.activeRoom != null) return@onSuccess
+                        if (info.hasPassword) {
+                            if (target.password.isBlank()) {
                                 _uiState.update { it.copy(lastRecoverableRoom = null) }
                                 return@onSuccess
                             }
+                            runCatching { api.verifyRoomPassword(info.code, target.password) }
+                                .onFailure { err ->
+                                    if (err is ApiException && err.errorCode == "WRONG_PASSWORD") {
+                                        store.clearLastActiveRoom()
+                                    }
+                                    _uiState.update { it.copy(lastRecoverableRoom = null) }
+                                    return@onSuccess
+                                }
+                        }
+                        _uiState.update { it.copy(lastRecoverableRoom = null) }
+                        enterRoomInternal(
+                            code = info.code,
+                            password = target.password,
+                            initialInfo = info,
+                            ownerToken = target.ownerToken,
+                            playJoinSound = false,
+                        )
                     }
-                    _uiState.update { it.copy(lastRecoverableRoom = null) }
-                    enterRoomInternal(
-                        code = info.code,
-                        password = target.password,
-                        initialInfo = info,
-                        ownerToken = target.ownerToken,
-                        playJoinSound = false,
-                    )
-                }
-                .onFailure { err ->
-                    if (err is ApiException && (err.errorCode == "ROOM_NOT_FOUND" || err.errorCode == "ROOM_EXPIRED")) {
-                        store.clearLastActiveRoom()
+                    .onFailure { err ->
+                        if (err is ApiException && (err.errorCode == "ROOM_NOT_FOUND" || err.errorCode == "ROOM_EXPIRED")) {
+                            store.clearLastActiveRoom()
+                        }
+                        _uiState.update { it.copy(lastRecoverableRoom = null) }
                     }
-                    _uiState.update { it.copy(lastRecoverableRoom = null) }
-                }
+            } finally {
+                autoReenterInFlight = false
+            }
+        }
+    }
+
+    // 供后台常驻服务与看门狗广播调用：维护房间信令活跃，或进程重建后静默拉起未退出房间
+    fun ensureActiveRoomConnectedFromService() {
+        val snap = _uiState.value
+        if (snap.activeRoom != null) {
+            signaling?.notifyNetworkAvailable(forceReconnectIfStale = true)
+            mesh?.refreshIceIfNeeded()
+        } else if (snap.privacyAccepted) {
+            autoReenterLastRoomIfNeeded(forceRetry = true)
         }
     }
 
@@ -2795,6 +2816,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                                 title = title,
                                 text = "$pct% · $speedText",
                                 progress = pct,
+                                holdLocks = true,
                             )
                         }
                     } else if (info.status == TransferStatus.COMPLETED) {
@@ -3256,10 +3278,13 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun refreshForegroundBanner(allowStartService: Boolean = true) {
-        val room = _uiState.value.activeRoom ?: return
+        val snap = _uiState.value
+        val room = snap.activeRoom ?: return
         lastForegroundBannerPercent = -1
         lastForegroundBannerTitle = ""
         lastForegroundBannerAt = System.currentTimeMillis()
+        val hasActiveTransfer = room.messages.any { it.transfer?.status == TransferStatus.TRANSFERRING } ||
+            snap.transferProgress.isNotEmpty()
         val readyCount = room.linkStatuses.values.count { it.dataReady }
         val statusText = when {
             room.peers.isEmpty() -> "等待伙伴扫码加入 · 口令 ${room.roomCode}"
@@ -3273,6 +3298,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
             title = "湾聊房间 #${room.roomCode}",
             text = statusText,
             allowStartService = allowStartService,
+            holdLocks = hasActiveTransfer,
         )
     }
 

@@ -1,9 +1,11 @@
 package com.baytale.baychat.ui.screens.lobby
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.os.PowerManager
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -22,6 +24,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.BatteryChargingFull
 import androidx.compose.material.icons.rounded.Block
 import androidx.compose.material.icons.rounded.BookmarkBorder
 import androidx.compose.material.icons.rounded.Check
@@ -542,13 +545,21 @@ fun MineTab(
 
                     val context = LocalContext.current
                     val lifecycleOwner = LocalLifecycleOwner.current
+                    fun queryIgnoringBatteryOpt(): Boolean {
+                        val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+                        return pm?.isIgnoringBatteryOptimizations(context.packageName) == true
+                    }
                     var notificationsEnabled by remember {
                         mutableStateOf(NotificationManagerCompat.from(context).areNotificationsEnabled())
+                    }
+                    var ignoringBatteryOpt by remember {
+                        mutableStateOf(queryIgnoringBatteryOpt())
                     }
                     DisposableEffect(lifecycleOwner) {
                         val observer = LifecycleEventObserver { _, event ->
                             if (event == Lifecycle.Event.ON_RESUME) {
                                 notificationsEnabled = NotificationManagerCompat.from(context).areNotificationsEnabled()
+                                ignoringBatteryOpt = queryIgnoringBatteryOpt()
                             }
                         }
                         lifecycleOwner.lifecycle.addObserver(observer)
@@ -577,6 +588,28 @@ fun MineTab(
                             runCatching { context.startActivity(fallback) }
                         }
                     }
+                    fun openBatteryOptimizationSettings() {
+                        val detailsIntent = Intent(
+                            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            Uri.fromParts("package", context.packageName, null),
+                        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        if (ignoringBatteryOpt) {
+                            runCatching { context.startActivity(detailsIntent) }
+                            return
+                        }
+                        val requestIntent = Intent(
+                            Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                            Uri.parse("package:${context.packageName}"),
+                        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        if (runCatching { context.startActivity(requestIntent) }.isSuccess) {
+                            return
+                        }
+                        val listIntent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        runCatching { context.startActivity(listIntent) }.onFailure {
+                            runCatching { context.startActivity(detailsIntent) }
+                        }
+                    }
                     val notifyLauncher = rememberLauncherForActivityResult(
                         contract = ActivityResultContracts.RequestPermission(),
                     ) { granted ->
@@ -599,12 +632,29 @@ fun MineTab(
                         },
                         value = if (notificationsEnabled) "横幅设置" else "去开启",
                         trailing = RowTrailing.Chevron,
+                        showDivider = true,
                         onClick = {
                             if (!notificationsEnabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                                 notifyLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                             } else {
                                 openAppNotificationSettings(openChannelDetail = notificationsEnabled)
                             }
+                        },
+                    )
+
+                    BayListRow(
+                        icon = Icons.Rounded.BatteryChargingFull,
+                        iconTint = if (ignoringBatteryOpt) colors.success else colors.warning,
+                        title = "后台运行权限",
+                        subtitle = if (ignoringBatteryOpt) {
+                            "已允许后台无限制运行，切换应用或锁屏后可稳定保持房间在线与收发消息"
+                        } else {
+                            "系统当前可能清理后台连接，点击设为「无限制」以常驻后台收消息"
+                        },
+                        value = if (ignoringBatteryOpt) "已无限制" else "去开启",
+                        trailing = RowTrailing.Chevron,
+                        onClick = {
+                            openBatteryOptimizationSettings()
                         },
                     )
                 }
