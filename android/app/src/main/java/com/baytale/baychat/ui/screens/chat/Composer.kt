@@ -569,7 +569,7 @@ fun Composer(
                         .weight(1f)
                         .pointerInput(upThresholdPx, touchSlopPx) {
                             awaitEachGesture {
-                                if (!latestInputEmpty || latestIsRecording) return@awaitEachGesture
+                                // 必须先挂起等待真正按下事件再判断状态，避免非空/录音期间在无事件时主线程空转卡死
                                 val down = awaitFirstDown(
                                     requireUnconsumed = false,
                                     pass = PointerEventPass.Initial,

@@ -4270,12 +4270,13 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
             requestRecordAudioFocus()
             recorder.startRecording()
 
+            val pcmStream = ByteArrayOutputStream()
             audioRecord = recorder
             voiceOutputFile = outFile
             voicePcmDataBytes = 0L
             voiceAmplitudeScaled.set(0)
             synchronized(pcmLock) {
-                voicePcmHistoryStream = ByteArrayOutputStream()
+                voicePcmHistoryStream = pcmStream
             }
             streamingAsrClient?.cancel()
             streamingAsrClient = null
@@ -4307,9 +4308,8 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                         fos.write(readBuf, 0, read)
                         voicePcmDataBytes += read.toLong()
                         synchronized(pcmLock) {
-                            val hist = voicePcmHistoryStream
-                            if (hist != null && hist.size() < 2 * 1024 * 1024) {
-                                hist.write(readBuf, 0, read)
+                            if (voicePcmHistoryStream === pcmStream && pcmStream.size() < 2 * 1024 * 1024) {
+                                pcmStream.write(readBuf, 0, read)
                             }
                         }
                         streamingAsrClient?.sendPcmChunk(readBuf, read)
@@ -4332,6 +4332,22 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                     runCatching { fos.flush() }
                     runCatching { fos.close() }
                     writeWavHeader(outFile, voicePcmDataBytes)
+                    // 仅在采集循环彻底退出后由同一 IO 线程安全释放原生 AudioRecord，防止跨线程 release 并发崩溃
+                    runCatching { recorder.stop() }
+                    runCatching { recorder.release() }
+                    synchronized(pcmLock) {
+                        if (voicePcmHistoryStream === pcmStream) {
+                            pcmStream.reset()
+                            voicePcmHistoryStream = null
+                        }
+                    }
+                    if (audioRecord === recorder) {
+                        audioRecord = null
+                    }
+                    if (voiceOutputFile == outFile) {
+                        voiceOutputFile = null
+                    }
+                    abandonRecordAudioFocus()
                 }
             }
 
@@ -4402,17 +4418,22 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
 
         val elapsedMs = (System.currentTimeMillis() - voiceRecordStartAt).coerceAtLeast(0L)
         val file = voiceOutputFile
+        val rec = audioRecord
         val captureJob = voiceCaptureJob
         val activeAsr = streamingAsrClient
         streamingAsrClient = null
+        audioRecord = null
+        voiceCaptureJob = null
+        voiceOutputFile = null
 
         voiceRecordingLoopActive = false
-        releaseVoiceRecorder()
+        _uiState.update { it.copy(voiceAmplitude = 0f) }
 
         if (file == null || elapsedMs < MIN_VOICE_DURATION_MS) {
             _uiState.update { it.copy(isRecordingVoice = false, voiceRecordDurationMs = 0L, voiceAmplitude = 0f, voiceTranscribeText = "") }
             activeAsr?.cancel()
             viewModelScope.launch(Dispatchers.IO) {
+                runCatching { rec?.stop() }
                 runCatching { captureJob?.join() }
                 runCatching { file?.delete() }
             }
@@ -4437,6 +4458,8 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
 
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
+                // 先于后台唤醒 HAL 中的 recorder.read()，等待写入与 native release 安全落定后再终稿识别
+                runCatching { rec?.stop() }
                 runCatching { captureJob?.join() }
             }
             var finalText = activeAsr?.finishAndAwaitFinal(timeoutMs = 1_800L)?.trim().orEmpty()
@@ -4648,12 +4671,15 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
 
         val elapsedMs = (System.currentTimeMillis() - voiceRecordStartAt).coerceAtLeast(0L)
         val file = voiceOutputFile
+        val rec = audioRecord
         val captureJob = voiceCaptureJob
         val activeAsr = streamingAsrClient
         streamingAsrClient = null
+        audioRecord = null
+        voiceCaptureJob = null
+        voiceOutputFile = null
 
         voiceRecordingLoopActive = false
-        releaseVoiceRecorder()
         _uiState.update {
             it.copy(
                 isRecordingVoice = false,
@@ -4666,6 +4692,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
 
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
+                runCatching { rec?.stop() }
                 runCatching { captureJob?.join() }
             }
             if (!send || file == null || !file.exists() || file.length() <= 44L || elapsedMs < MIN_VOICE_DURATION_MS) {
@@ -4757,16 +4784,25 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     private fun releaseVoiceRecorder() {
         voiceRecordingLoopActive = false
         val rec = audioRecord
+        val captureJob = voiceCaptureJob
         audioRecord = null
         voiceCaptureJob = null
         voiceOutputFile = null
-        runCatching { rec?.stop() }
-        runCatching { rec?.release() }
-        synchronized(pcmLock) {
-            voicePcmHistoryStream?.reset()
-            voicePcmHistoryStream = null
+        if (captureJob == null || !captureJob.isActive) {
+            // 仅在采集协程尚未启动/已完全退出时直接释放，避免与 read() 并发冲突
+            runCatching { rec?.stop() }
+            runCatching { rec?.release() }
+            synchronized(pcmLock) {
+                voicePcmHistoryStream?.reset()
+                voicePcmHistoryStream = null
+            }
+            abandonRecordAudioFocus()
+        } else {
+            viewModelScope.launch(Dispatchers.IO) {
+                runCatching { rec?.stop() }
+                runCatching { captureJob.join() }
+            }
         }
-        abandonRecordAudioFocus()
         _uiState.update { it.copy(voiceAmplitude = 0f) }
     }
 
