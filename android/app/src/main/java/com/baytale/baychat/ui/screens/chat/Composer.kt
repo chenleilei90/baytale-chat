@@ -119,11 +119,12 @@ import java.text.BreakIterator
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.math.hypot
 
-// 新版微信式按住说话三段手势区域：松开发送 / 上滑左取消 / 上滑右转文字
+// 新版微信式按住说话四段手势区域：松开发送 / 左取消 / 转文字 / 右滑进入编辑
 enum class VoiceGestureZone {
     SEND,
     CANCEL,
     CONVERT_TEXT,
+    EDIT_TEXT,
 }
 
 /**
@@ -148,6 +149,7 @@ fun Composer(
     replyingTo: ReplyQuote?,
     vm: BayChatViewModel,
     onVoiceZoneChanged: (VoiceGestureZone) -> Unit,
+    onDirectTranscribeModeChanged: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val colors = BayTheme.colors
@@ -171,14 +173,18 @@ fun Composer(
         peers.filter { q.isEmpty() || it.name.contains(q, ignoreCase = true) }
     }
 
-    // 语音按住/三段手势态（SEND / CANCEL / CONVERT_TEXT，供按钮视觉与底层指针循环共享）
+    // 语音按住/手势态（SEND / CANCEL / CONVERT_TEXT / EDIT_TEXT，供按钮视觉与底层指针循环共享）
     var isPressingVoice by remember { mutableStateOf(false) }
     var voiceZone by remember { mutableStateOf(VoiceGestureZone.SEND) }
+    var isInputFocused by remember { mutableStateOf(false) }
     val latestIsRecording by rememberUpdatedState(state.isRecordingVoice)
     val latestHapticEnabled by rememberUpdatedState(state.prefs.hapticEnabled)
     val latestOnZoneChanged by rememberUpdatedState(onVoiceZoneChanged)
+    val latestOnDirectTranscribeModeChanged by rememberUpdatedState(onDirectTranscribeModeChanged)
     val latestInputEmpty by rememberUpdatedState(inputText.isEmpty())
+    val latestInputFocused by rememberUpdatedState(isInputFocused)
     val upThresholdPx = remember(density) { with(density) { 72.dp.toPx() } }
+    val horizThresholdPx = remember(density) { with(density) { 48.dp.toPx() } }
     val touchSlopPx = remember(density) { with(density) { 16.dp.toPx() } }
 
     // 1. 多文件选择器（SAF 零权限）
@@ -445,19 +451,20 @@ fun Composer(
                     activeRecordingUi && voiceZone == VoiceGestureZone.CANCEL -> colors.danger.copy(
                         alpha = if (colors.isDark) 0.26f else 0.14f,
                     )
-                    activeRecordingUi && voiceZone == VoiceGestureZone.CONVERT_TEXT -> colors.accentSoft
+                    activeRecordingUi && (voiceZone == VoiceGestureZone.CONVERT_TEXT || voiceZone == VoiceGestureZone.EDIT_TEXT) -> colors.accentSoft
                     activeRecordingUi -> colors.fillStrong
                     else -> colors.wechatPeerBubble
                 }
                 val holdLabel = when {
                     activeRecordingUi && voiceZone == VoiceGestureZone.CANCEL -> "松开 取消"
+                    activeRecordingUi && voiceZone == VoiceGestureZone.EDIT_TEXT -> "松开 编辑"
                     activeRecordingUi && voiceZone == VoiceGestureZone.CONVERT_TEXT -> "松开 转文字"
                     activeRecordingUi -> "松开 发送"
-                    else -> "按住 说话"
+                    else -> "按住说话"
                 }
                 val holdTextColor = when {
                     activeRecordingUi && voiceZone == VoiceGestureZone.CANCEL -> colors.danger
-                    activeRecordingUi && voiceZone == VoiceGestureZone.CONVERT_TEXT -> colors.accent
+                    activeRecordingUi && (voiceZone == VoiceGestureZone.CONVERT_TEXT || voiceZone == VoiceGestureZone.EDIT_TEXT) -> colors.accent
                     else -> colors.textPrimary
                 }
 
@@ -481,6 +488,7 @@ fun Composer(
 
                                 down.consume()
                                 BayHaptic.heavy(haptic, latestHapticEnabled)
+                                latestOnDirectTranscribeModeChanged(false)
                                 isPressingVoice = true
                                 voiceZone = VoiceGestureZone.SEND
                                 latestOnZoneChanged(VoiceGestureZone.SEND)
@@ -550,6 +558,7 @@ fun Composer(
                                     isPressingVoice = false
                                     voiceZone = VoiceGestureZone.SEND
                                     latestOnZoneChanged(VoiceGestureZone.SEND)
+                                    latestOnDirectTranscribeModeChanged(false)
                                 }
                             }
                         },
@@ -563,18 +572,18 @@ fun Composer(
                     )
                 }
             } else {
-                // 文字输入框：空内容时支持短按弹键盘输入、长按（>=280ms）直接触发流式语音转文字
+                // 文字输入框：未点击前显示“可按住 转文字”，短按直接弹键盘打字；未聚焦空内容时长按启动语音转文字（左滑取消、右滑编辑、原地松手直接发送文字）
                 Box(
                     modifier = Modifier
                         .weight(1f)
-                        .pointerInput(upThresholdPx, touchSlopPx) {
+                        .pointerInput(upThresholdPx, horizThresholdPx, touchSlopPx) {
                             awaitEachGesture {
                                 // 必须先挂起等待真正按下事件再判断状态，避免非空/录音期间在无事件时主线程空转卡死
                                 val down = awaitFirstDown(
                                     requireUnconsumed = false,
                                     pass = PointerEventPass.Initial,
                                 )
-                                if (!latestInputEmpty || latestIsRecording) return@awaitEachGesture
+                                if (!latestInputEmpty || latestIsRecording || latestInputFocused) return@awaitEachGesture
 
                                 val earlyExit = withTimeoutOrNull(280L) {
                                     while (true) {
@@ -607,6 +616,7 @@ fun Composer(
                                 onShowAttachmentPanelChange(false)
                                 onShowEmojiPanelChange(false)
                                 BayHaptic.heavy(haptic, latestHapticEnabled)
+                                latestOnDirectTranscribeModeChanged(true)
                                 isPressingVoice = true
                                 voiceZone = VoiceGestureZone.CONVERT_TEXT
                                 latestOnZoneChanged(VoiceGestureZone.CONVERT_TEXT)
@@ -616,6 +626,7 @@ fun Composer(
                                     isPressingVoice = false
                                     voiceZone = VoiceGestureZone.SEND
                                     latestOnZoneChanged(VoiceGestureZone.SEND)
+                                    latestOnDirectTranscribeModeChanged(false)
                                     return@awaitEachGesture
                                 }
                                 vm.onVoiceEnterConvertZone()
@@ -632,20 +643,29 @@ fun Composer(
                                         }
                                         if (!change.pressed) {
                                             change.consume()
-                                            if (voiceZone == VoiceGestureZone.CANCEL) {
-                                                if (latestIsRecording) {
+                                            when {
+                                                voiceZone == VoiceGestureZone.CANCEL && latestIsRecording -> {
                                                     vm.cancelVoiceRecording()
                                                 }
-                                            } else if (latestIsRecording) {
-                                                vm.finishVoiceGestureToTranscribe()
+                                                voiceZone == VoiceGestureZone.EDIT_TEXT && latestIsRecording -> {
+                                                    vm.finishVoiceGestureToTranscribe(autoSend = false)
+                                                }
+                                                latestIsRecording -> {
+                                                    vm.finishVoiceGestureToTranscribe(autoSend = true)
+                                                }
                                             }
                                             break
                                         }
+                                        val dx = change.position.x - down.position.x
                                         val dyUp = down.position.y - change.position.y
-                                        val nextZone = if (dyUp > upThresholdPx && change.position.x < size.width * 0.5f) {
-                                            VoiceGestureZone.CANCEL
-                                        } else {
-                                            VoiceGestureZone.CONVERT_TEXT
+                                        val nextZone = when {
+                                            dx < -horizThresholdPx || (dyUp > upThresholdPx && change.position.x < size.width * 0.42f) -> {
+                                                VoiceGestureZone.CANCEL
+                                            }
+                                            dx > horizThresholdPx || (dyUp > upThresholdPx && change.position.x > size.width * 0.58f) -> {
+                                                VoiceGestureZone.EDIT_TEXT
+                                            }
+                                            else -> VoiceGestureZone.CONVERT_TEXT
                                         }
                                         if (nextZone != voiceZone) {
                                             voiceZone = nextZone
@@ -663,6 +683,7 @@ fun Composer(
                                     isPressingVoice = false
                                     voiceZone = VoiceGestureZone.SEND
                                     latestOnZoneChanged(VoiceGestureZone.SEND)
+                                    latestOnDirectTranscribeModeChanged(false)
                                 }
                             }
                         },
@@ -674,7 +695,7 @@ fun Composer(
                             vm.updateDraft(roomCode, next)
                             vm.onDraftTypingChanged(next.isNotBlank())
                         },
-                        placeholder = "可按住 转文字",
+                        placeholder = if (isInputFocused) "" else "可按住 转文字",
                         singleLine = false,
                         maxLines = 4,
                         containerColor = colors.wechatPeerBubble,
@@ -685,6 +706,7 @@ fun Composer(
                             .fillMaxWidth()
                             .focusRequester(inputFocusRequester)
                             .onFocusChanged { focusState ->
+                                isInputFocused = focusState.isFocused
                                 if (focusState.isFocused) {
                                     if (showAttachmentPanel) onShowAttachmentPanelChange(false)
                                     if (showEmojiPanel) onShowEmojiPanelChange(false)
@@ -694,29 +716,28 @@ fun Composer(
                 }
             }
 
-            // 表情按钮（仅键盘文本模式下展示，与软键盘和附件面板严格互斥）
-            if (!voiceMode) {
-                BayIconButton(
-                    icon = if (showEmojiPanel) Icons.Rounded.Keyboard else Icons.Rounded.EmojiEmotions,
-                    contentDescription = if (showEmojiPanel) "切回键盘输入" else "打开表情面板",
-                    onClick = {
-                        val nextEmoji = !showEmojiPanel
-                        onShowAttachmentPanelChange(false)
-                        if (nextEmoji) {
-                            focusManager.clearFocus()
-                            keyboardController?.hide()
-                        } else {
-                            runCatching { inputFocusRequester.requestFocus() }
-                            keyboardController?.show()
-                        }
-                        onShowEmojiPanelChange(nextEmoji)
-                    },
-                    style = if (showEmojiPanel) BayIconStyle.Accent else BayIconStyle.Filled,
-                    size = 40.dp,
-                    enabled = !state.isRecordingVoice,
-                    modifier = Modifier.size(44.dp),
-                )
-            }
+            // 表情按钮（常驻固定 4 栏布局，与语音模式、软键盘和附件面板互斥切换）
+            BayIconButton(
+                icon = if (showEmojiPanel) Icons.Rounded.Keyboard else Icons.Rounded.EmojiEmotions,
+                contentDescription = if (showEmojiPanel) "切回键盘输入" else "打开表情面板",
+                onClick = {
+                    val nextEmoji = !showEmojiPanel
+                    onVoiceModeChange(false)
+                    onShowAttachmentPanelChange(false)
+                    if (nextEmoji) {
+                        focusManager.clearFocus()
+                        keyboardController?.hide()
+                    } else {
+                        runCatching { inputFocusRequester.requestFocus() }
+                        keyboardController?.show()
+                    }
+                    onShowEmojiPanelChange(nextEmoji)
+                },
+                style = if (showEmojiPanel) BayIconStyle.Accent else BayIconStyle.Filled,
+                size = 40.dp,
+                enabled = !state.isRecordingVoice,
+                modifier = Modifier.size(44.dp),
+            )
 
             // 发送按钮（文本非空）或加号附件展开按钮（键盘与附件面板严格互斥）
             if (!voiceMode && inputText.isNotBlank()) {
@@ -778,7 +799,7 @@ fun Composer(
                 rememberedImeHeightDp = imeBottomDp.coerceIn(240.dp, 380.dp)
             }
         }
-        val anyPanelVisible = (showAttachmentPanel || (showEmojiPanel && !voiceMode)) && !state.isRecordingVoice
+        val anyPanelVisible = (showAttachmentPanel || showEmojiPanel) && !state.isRecordingVoice
         val targetBottomHeightDp = maxOf(
             imeBottomDp,
             if (anyPanelVisible) rememberedImeHeightDp else navBarBottomDp,

@@ -262,6 +262,7 @@ fun ChatRoomScreen(
     var inputText by rememberSaveable(room.roomCode) { mutableStateOf(vm.draftFor(room.roomCode)) }
 
     var voiceGestureZone by remember { mutableStateOf(VoiceGestureZone.SEND) }
+    var isDirectTranscribeVoice by remember { mutableStateOf(false) }
     var highlightedMessageId by remember { mutableStateOf<String?>(null) }
 
     // UX-3：返回键逐层退回（先退出多选/表情面板/附件面板，再关闭搜索栏，避免直接触发退房确认弹窗）
@@ -320,6 +321,7 @@ fun ChatRoomScreen(
     LaunchedEffect(state.isRecordingVoice) {
         if (!state.isRecordingVoice) {
             voiceGestureZone = VoiceGestureZone.SEND
+            isDirectTranscribeVoice = false
         }
     }
 
@@ -1381,6 +1383,7 @@ fun ChatRoomScreen(
                     replyingTo = room.replyingTo,
                     vm = vm,
                     onVoiceZoneChanged = { voiceGestureZone = it },
+                    onDirectTranscribeModeChanged = { isDirectTranscribeVoice = it },
                 )
             }
         }
@@ -1389,6 +1392,7 @@ fun ChatRoomScreen(
         VoiceRecordingOverlay(
             visible = state.isRecordingVoice,
             zone = voiceGestureZone,
+            isDirectTranscribeMode = isDirectTranscribeVoice,
             durationMs = state.voiceRecordDurationMs,
             amplitude = state.voiceAmplitude,
             liveTranscribeText = state.voiceTranscribeText,
@@ -1854,6 +1858,7 @@ private val RECORD_METER_FACTORS = listOf(0.36f, 0.54f, 0.74f, 0.90f, 1.0f, 0.90
 private fun VoiceRecordingOverlay(
     visible: Boolean,
     zone: VoiceGestureZone,
+    isDirectTranscribeMode: Boolean = false,
     durationMs: Long,
     amplitude: Float,
     liveTranscribeText: String,
@@ -1863,6 +1868,8 @@ private fun VoiceRecordingOverlay(
     val remSec = ((60_000L - durationMs + 999L) / 1000L).coerceIn(1L, 10L)
     val isCancel = zone == VoiceGestureZone.CANCEL
     val isConvert = zone == VoiceGestureZone.CONVERT_TEXT
+    val isEdit = zone == VoiceGestureZone.EDIT_TEXT
+    val showLiveTranscript = !isCancel && (isConvert || isEdit || isDirectTranscribeMode)
     val waveBarWeights = remember {
         listOf(0.28f, 0.45f, 0.72f, 0.56f, 0.88f, 1.0f, 0.78f, 0.96f, 0.68f, 0.86f, 0.54f, 0.74f, 0.42f, 0.26f)
     }
@@ -1878,7 +1885,7 @@ private fun VoiceRecordingOverlay(
                 .background(Color.Black.copy(alpha = 0.62f))
                 .navigationBarsPadding(),
         ) {
-            // 1. 中央微信风格气泡（绿色常规声波 / 红色撤回 / 右滑「文」实时拉宽滚动出字）
+            // 1. 中央微信风格气泡（绿色常规声波 / 红色撤回 / 实时拉宽滚动出字）
             Column(
                 modifier = Modifier
                     .align(Alignment.Center)
@@ -1888,7 +1895,7 @@ private fun VoiceRecordingOverlay(
             ) {
                 val bubbleBg = if (isCancel) colors.danger else colors.wechatSelfBubble
                 val bubbleContentColor = if (isCancel) Color.White else colors.wechatSelfText
-                val bubbleModifier = if (isConvert) {
+                val bubbleModifier = if (showLiveTranscript) {
                     Modifier.fillMaxWidth()
                 } else {
                     Modifier.width(196.dp)
@@ -1899,7 +1906,7 @@ private fun VoiceRecordingOverlay(
                         .clip(BayShapes.lgShape)
                         .background(bubbleBg)
                         .padding(horizontal = BaySpacing.xl, vertical = BaySpacing.lg),
-                    horizontalAlignment = if (isConvert) Alignment.Start else Alignment.CenterHorizontally,
+                    horizontalAlignment = if (showLiveTranscript) Alignment.Start else Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(BaySpacing.sm),
                 ) {
                     when {
@@ -1917,7 +1924,7 @@ private fun VoiceRecordingOverlay(
                             )
                         }
 
-                        isConvert -> {
+                        showLiveTranscript -> {
                             val scrollState = rememberScrollState()
                             LaunchedEffect(liveTranscribeText) {
                                 scrollState.scrollTo(scrollState.maxValue)
@@ -2023,7 +2030,7 @@ private fun VoiceRecordingOverlay(
                 }
             }
 
-            // 2. 底部新版微信操作区：左「✕ 取消」+ 右「文 转文字」+ 最底端弧形发送托盘
+            // 2. 底部新版微信操作区：左「✕ 取消」+ 右「✎ 编辑 / 文 转文字」+ 最底端弧形发送托盘
             Column(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
@@ -2071,10 +2078,11 @@ private fun VoiceRecordingOverlay(
                         )
                     }
 
-                    val convertScale by animateFloatAsState(
-                        targetValue = if (isConvert) 1.22f else 1.0f,
+                    val rightHighlighted = if (isDirectTranscribeMode) isEdit else isConvert
+                    val rightScale by animateFloatAsState(
+                        targetValue = if (rightHighlighted) 1.22f else 1.0f,
                         animationSpec = tween(120),
-                        label = "wxConvertScale",
+                        label = "wxRightZoneScale",
                     )
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
@@ -2083,23 +2091,36 @@ private fun VoiceRecordingOverlay(
                         Box(
                             modifier = Modifier
                                 .size(64.dp)
-                                .scale(convertScale)
+                                .scale(rightScale)
                                 .clip(CircleShape)
                                 .background(
-                                    if (isConvert) Color.White else colors.surfaceElevated.copy(alpha = 0.82f),
+                                    if (rightHighlighted) Color.White else colors.surfaceElevated.copy(alpha = 0.82f),
                                 ),
                             contentAlignment = Alignment.Center,
                         ) {
-                            Text(
-                                text = "文",
-                                style = BayType.title2.copy(fontWeight = FontWeight.Bold),
-                                color = if (isConvert) colors.wechatSelfText else colors.textPrimary,
-                            )
+                            if (isDirectTranscribeMode) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Edit,
+                                    contentDescription = "编辑",
+                                    tint = if (rightHighlighted) colors.accent else colors.textPrimary,
+                                    modifier = Modifier.size(26.dp),
+                                )
+                            } else {
+                                Text(
+                                    text = "文",
+                                    style = BayType.title2.copy(fontWeight = FontWeight.Bold),
+                                    color = if (rightHighlighted) colors.wechatSelfText else colors.textPrimary,
+                                )
+                            }
                         }
                         Text(
-                            text = if (isConvert) "转文字" else "转文字",
+                            text = when {
+                                isDirectTranscribeMode && isEdit -> "松开编辑"
+                                isDirectTranscribeMode -> "编辑"
+                                else -> "转文字"
+                            },
                             style = BayType.caption.copy(fontWeight = FontWeight.Medium),
-                            color = Color.White.copy(alpha = if (isConvert) 1f else 0.72f),
+                            color = Color.White.copy(alpha = if (rightHighlighted) 1f else 0.72f),
                         )
                     }
                 }
@@ -2111,7 +2132,12 @@ private fun VoiceRecordingOverlay(
                         .height(104.dp),
                     contentAlignment = Alignment.Center,
                 ) {
-                    val trayColor = if (zone == VoiceGestureZone.SEND) {
+                    val trayActive = if (isDirectTranscribeMode) {
+                        zone == VoiceGestureZone.CONVERT_TEXT
+                    } else {
+                        zone == VoiceGestureZone.SEND
+                    }
+                    val trayColor = if (trayActive) {
                         colors.surfaceElevated
                     } else {
                         colors.surfaceElevated.copy(alpha = 0.42f)
@@ -2133,17 +2159,25 @@ private fun VoiceRecordingOverlay(
                         Icon(
                             imageVector = Icons.Rounded.Mic,
                             contentDescription = null,
-                            tint = if (zone == VoiceGestureZone.SEND) colors.textPrimary else colors.textSecondary,
+                            tint = if (trayActive) colors.textPrimary else colors.textSecondary,
                             modifier = Modifier.size(22.dp),
                         )
                         Text(
-                            text = when (zone) {
-                                VoiceGestureZone.SEND -> "松开 发送"
-                                VoiceGestureZone.CANCEL -> "松开 取消"
-                                VoiceGestureZone.CONVERT_TEXT -> "松开 转文字"
+                            text = if (isDirectTranscribeMode) {
+                                when (zone) {
+                                    VoiceGestureZone.CANCEL -> "松开 取消"
+                                    VoiceGestureZone.EDIT_TEXT -> "松开 编辑"
+                                    else -> "松开 发送文字"
+                                }
+                            } else {
+                                when (zone) {
+                                    VoiceGestureZone.SEND -> "松开 发送"
+                                    VoiceGestureZone.CANCEL -> "松开 取消"
+                                    else -> "松开 转文字"
+                                }
                             },
                             style = BayType.subhead.copy(fontWeight = FontWeight.SemiBold),
-                            color = if (zone == VoiceGestureZone.SEND) colors.textPrimary else colors.textSecondary,
+                            color = if (trayActive) colors.textPrimary else colors.textSecondary,
                         )
                     }
                 }

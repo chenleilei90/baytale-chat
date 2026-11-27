@@ -4409,14 +4409,15 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         client.connect(historySnapshot)
     }
 
-    // 在右侧「文 转文字」区松手：结束录音并无缝衔接流式终稿（极少数为空时自动调 HTTP ASR 兜底），0ms 切入微信绿气泡编辑态
-    fun finishVoiceGestureToTranscribe() {
+    // 在右侧「文 转文字」或输入框直接转文字区松手：支持原地松手直接发送文字，或右滑进入绿气泡编辑态
+    fun finishVoiceGestureToTranscribe(autoSend: Boolean = false) {
         if (!_uiState.value.isRecordingVoice) return
         voiceRecordTickerJob?.cancel()
         voiceRecordTickerJob = null
         mesh?.broadcastTyping(false, "voice")
 
         val elapsedMs = (System.currentTimeMillis() - voiceRecordStartAt).coerceAtLeast(0L)
+        val liveDraft = _uiState.value.voiceTranscribeText.trim()
         val file = voiceOutputFile
         val rec = audioRecord
         val captureJob = voiceCaptureJob
@@ -4439,6 +4440,40 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
             }
             if (elapsedMs < MIN_VOICE_DURATION_MS) {
                 showToast("说话时间太短")
+            }
+            return
+        }
+
+        if (autoSend) {
+            _uiState.update {
+                it.copy(
+                    isRecordingVoice = false,
+                    voiceRecordDurationMs = 0L,
+                    voiceAmplitude = 0f,
+                    voiceTranscribeText = "",
+                    isTranscribingDraft = true,
+                    showVoiceTranscribePanel = false,
+                )
+            }
+            viewModelScope.launch {
+                withContext(Dispatchers.IO) {
+                    runCatching { rec?.stop() }
+                    runCatching { captureJob?.join() }
+                }
+                var finalText = activeAsr?.finishAndAwaitFinal(timeoutMs = 1_800L)?.trim().orEmpty()
+                if (finalText.isBlank() && file.exists() && file.length() > 44L) {
+                    finalText = runCatching { api.transcribeAudio(file) }.getOrDefault("").trim()
+                }
+                val merged = finalText.ifBlank { liveDraft }.trim()
+                withContext(Dispatchers.IO) {
+                    runCatching { file.delete() }
+                }
+                _uiState.update { it.copy(isTranscribingDraft = false, voiceTranscribeText = "") }
+                if (merged.isNotBlank()) {
+                    sendTextMessage(merged)
+                } else {
+                    showToast("未识别到清晰语音")
+                }
             }
             return
         }
