@@ -504,12 +504,14 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                                 }
                         }
                         _uiState.update { it.copy(lastRecoverableRoom = null) }
+                        // 冷启动或看门狗恢复未退出的房间时默认静默挂起在后台（保留大厅首屏 + 悬浮球），绝不强行拉进聊天界面
                         enterRoomInternal(
                             code = info.code,
                             password = target.password,
                             initialInfo = info,
                             ownerToken = target.ownerToken,
                             playJoinSound = false,
+                            startMinimized = true,
                         )
                     }
                     .onFailure { err ->
@@ -2404,6 +2406,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         initialInfo: RoomSummary?,
         ownerToken: String = initialInfo?.ownerToken.orEmpty(),
         playJoinSound: Boolean = true,
+        startMinimized: Boolean = false,
     ) {
         tearDownSession(stopService = false)
         awaitingInitialHistorySync = true
@@ -2436,7 +2439,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                 pendingCreateConfirm = null,
                 pendingSwitchRoom = null,
                 lastRecoverableRoom = null,
-                roomMinimized = false,
+                roomMinimized = startMinimized,
                 unreadCount = 0,
                 playedVoiceIds = emptySet(),
                 firstUnreadMessageId = null,
