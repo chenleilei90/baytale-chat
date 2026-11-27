@@ -158,16 +158,15 @@ type SignalEnvelope struct {
 
 // Hub 统一协调房间生命周期、WebSocket 信令路由以及服务器聊天缓存
 type Hub struct {
-	mu             sync.RWMutex
-	cfg            *config.Config
-	fixedStore     *FixedStore
-	historyStore   *HistoryStore
-	rooms          map[string]*Room
-	burnedCodes    map[string]time.Time // 已销毁的一次性房间码记录，避免短时间误重用
-	upgrader       websocket.Upgrader
-	nowFunc        func() time.Time
-	onMessageSaved func(roomCode string, msg CachedMessage, onlinePeerIDs map[string]bool)
-	stopCh         chan struct{}
+	mu           sync.RWMutex
+	cfg          *config.Config
+	fixedStore   *FixedStore
+	historyStore *HistoryStore
+	rooms        map[string]*Room
+	burnedCodes  map[string]time.Time // 已销毁的一次性房间码记录，避免短时间误重用
+	upgrader     websocket.Upgrader
+	nowFunc      func() time.Time
+	stopCh       chan struct{}
 }
 
 // NewHub 创建房间与信令管理中心
@@ -244,13 +243,6 @@ func (h *Hub) SetNowFunc(fn func() time.Time) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.nowFunc = fn
-}
-
-// SetMessageSavedHook 注册消息持久化回调，用于向房间离线成员触发系统级离线推送
-func (h *Hub) SetMessageSavedHook(fn func(roomCode string, msg CachedMessage, onlinePeerIDs map[string]bool)) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.onMessageSaved = fn
 }
 
 func (h *Hub) now() time.Time {
@@ -1457,12 +1449,9 @@ func (h *Hub) handleCacheMessage(sender *peerConn, env SignalEnvelope) {
 	retentionDays := rm.RetentionDays
 	rm.LastActiveAt = time.Now().UnixMilli()
 	allPeers := make([]*peerConn, 0, len(rm.peers))
-	onlinePeerIDs := make(map[string]bool, len(rm.peers))
 	for _, p := range rm.peers {
 		allPeers = append(allPeers, p)
-		onlinePeerIDs[p.id] = true
 	}
-	hook := h.onMessageSaved
 	h.mu.Unlock()
 
 	meta, saved, err := h.historyStore.AppendMessage(rm.Code, retentionDays, msg)
@@ -1482,10 +1471,6 @@ func (h *Hub) handleCacheMessage(sender *peerConn, env SignalEnvelope) {
 		out.Message = &msg
 	}
 	h.broadcastToPeers(allPeers, out)
-
-	if saved && hook != nil {
-		go hook(rm.Code, msg, onlinePeerIDs)
-	}
 }
 
 func (h *Hub) updateRetentionInternal(sender *peerConn, retentionDays int) {

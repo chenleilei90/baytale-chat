@@ -114,6 +114,7 @@ import {
   triggerBlobDownload,
 } from '../lib/platform';
 import { decodeSecretText, launchScreenEffect } from '../lib/effects';
+import { decryptCachedMessage, decryptChatText, encryptChatText, isE2eeCiphertext } from '../lib/chatCrypto';
 import { showWebNotification, startTitleFlash, stopTitleFlash } from '../lib/notifications';
 import { EMOJI_LIST } from '../lib/emoji';
 import { classifyPlaneFileKind } from '../lib/planeKind';
@@ -1155,33 +1156,45 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       onTextMessage: (peerId, msg) => {
         if (isBlockedPeerId(peerId)) return;
         const sender = peersRef.current[peerId];
-        const decoded = decodeSecretText(msg.text);
-        setMessages((prev) => {
-          if (prev.some((m) => m.id === msg.id)) return prev;
-          return [
-            ...prev,
-            {
-              id: msg.id,
-              kind: 'text',
-              senderId: peerId,
-              senderName: sender?.name || '对方',
-              senderAvatar: sender?.avatar,
-              isSelf: false,
-              timestamp: msg.timestamp,
-              text: decoded.text,
-              isSecret: decoded.isSecret,
-              replyTo: msg.replyTo,
-            },
-          ];
-        });
-        const mentioned = checkMentionMe(decoded.text);
-        notifyIncomingArrival({
-          itemId: msg.id,
-          senderName: sender?.name || '伙伴',
-          previewText: decoded.isSecret ? '[防窥密信]' : decoded.text,
-          mentionedMe: mentioned,
-        });
-        if (prefsRef.current.soundEnabled && (!isMutedRoomRef.current || mentioned)) playNoticeTone();
+        void (async () => {
+          const rawText = isE2eeCiphertext(msg.text)
+            ? await decryptChatText(roomCode, passwordRef.current, msg.text)
+            : msg.text;
+          const decoded = decodeSecretText(rawText);
+          const decodedReply =
+            msg.replyTo && isE2eeCiphertext(msg.replyTo.preview)
+              ? {
+                  ...msg.replyTo,
+                  preview: await decryptChatText(roomCode, passwordRef.current, msg.replyTo.preview),
+                }
+              : msg.replyTo;
+          setMessages((prev) => {
+            if (prev.some((m) => m.id === msg.id)) return prev;
+            return [
+              ...prev,
+              {
+                id: msg.id,
+                kind: 'text',
+                senderId: peerId,
+                senderName: sender?.name || '对方',
+                senderAvatar: sender?.avatar,
+                isSelf: false,
+                timestamp: msg.timestamp,
+                text: decoded.text,
+                isSecret: decoded.isSecret,
+                replyTo: decodedReply,
+              },
+            ];
+          });
+          const mentioned = checkMentionMe(decoded.text);
+          notifyIncomingArrival({
+            itemId: msg.id,
+            senderName: sender?.name || '伙伴',
+            previewText: decoded.isSecret ? '[防窥密信]' : decoded.text,
+            mentionedMe: mentioned,
+          });
+          if (prefsRef.current.soundEnabled && (!isMutedRoomRef.current || mentioned)) playNoticeTone();
+        })();
       },
       onRecallMessage: (peerId, msgId) => {
         const sender = peersRef.current[peerId];
@@ -1496,7 +1509,12 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         setRemoteScreenStreams(pruneByActive);
 
         if (env.messages && env.messages.length > 0) {
-          env.messages.forEach((cm) => mergeCachedMessage(cm, true));
+          const pwdSnapshot = passwordRef.current;
+          void Promise.all(
+            env.messages.map((cm) => decryptCachedMessage(roomCode, pwdSnapshot, cm))
+          ).then((decryptedList) => {
+            decryptedList.forEach((cm) => mergeCachedMessage(cm, true));
+          });
         }
         // 同步清理重连期间已离开的僵尸会话，避免内存与定时器残留
         mesh.syncPeers(activeIds);
@@ -1562,24 +1580,26 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       onMessageCached: (env) => {
         if (env.history) setHistoryMeta(env.history);
         if (env.message && env.message.senderId !== selfPeerId) {
-          mergeCachedMessage(env.message, false);
-          const cm = env.message;
-          const previewText =
-            cm.kind === 'image'
-              ? '[图片]'
-              : cm.kind === 'audio'
-                ? '[语音消息]'
-                : cm.kind === 'file_notice'
-                  ? `[文件] ${cm.fileName || '附件'}`
-                  : cm.text || '[新消息]';
-          const mentioned = checkMentionMe(cm.text);
-          notifyIncomingArrival({
-            itemId: cm.id,
-            senderName: cm.senderName || '伙伴',
-            previewText,
-            mentionedMe: mentioned,
+          const pwdSnapshot = passwordRef.current;
+          void decryptCachedMessage(roomCode, pwdSnapshot, env.message).then((cm) => {
+            mergeCachedMessage(cm, false);
+            const previewText =
+              cm.kind === 'image'
+                ? '[图片]'
+                : cm.kind === 'audio'
+                  ? '[语音消息]'
+                  : cm.kind === 'file_notice'
+                    ? `[文件] ${cm.fileName || '附件'}`
+                    : cm.text || '[新消息]';
+            const mentioned = checkMentionMe(cm.text);
+            notifyIncomingArrival({
+              itemId: cm.id,
+              senderName: cm.senderName || '伙伴',
+              previewText,
+              mentionedMe: mentioned,
+            });
+            if (prefsRef.current.soundEnabled && (!isMutedRoomRef.current || mentioned)) playNoticeTone();
           });
-          if (prefsRef.current.soundEnabled && (!isMutedRoomRef.current || mentioned)) playNoticeTone();
         }
       },
       onMessageRecalled: (env) => {
@@ -2093,18 +2113,25 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     ]);
 
     if (historyMetaRef.current.retentionDays > 0) {
-      signalingRef.current?.cacheMessage({
-        id,
-        kind: 'text',
-        senderId: selfPeerId,
-        senderName: profile.name,
-        senderAvatar: profile.avatar,
-        text: clean,
-        replyToId: quote?.id,
-        replyToSender: quote?.senderName,
-        replyToPreview: quote?.preview,
-        timestamp,
-      });
+      const pwdSnapshot = passwordRef.current;
+      void (async () => {
+        const [encryptedText, encryptedPreview] = await Promise.all([
+          encryptChatText(roomCode, pwdSnapshot, clean),
+          quote?.preview ? encryptChatText(roomCode, pwdSnapshot, quote.preview) : Promise.resolve(undefined),
+        ]);
+        signalingRef.current?.cacheMessage({
+          id,
+          kind: 'text',
+          senderId: selfPeerId,
+          senderName: profile.name,
+          senderAvatar: profile.avatar,
+          text: encryptedText,
+          replyToId: quote?.id,
+          replyToSender: quote?.senderName,
+          replyToPreview: encryptedPreview,
+          timestamp,
+        });
+      })();
     } else if (p2pSent === 0 && Object.keys(peersRef.current).length === 0) {
       onToast('当前为阅后即焚模式且暂无他人在线，消息仅在本地展示');
     }

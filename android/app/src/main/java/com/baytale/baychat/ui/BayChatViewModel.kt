@@ -74,7 +74,6 @@ import com.baytale.baychat.core.network.PickupApi
 import com.baytale.baychat.core.network.SignalingCallbacks
 import com.baytale.baychat.core.network.SignalingClient
 import com.baytale.baychat.core.network.StreamingAsrClient
-import com.baytale.baychat.core.push.PushManager
 import com.baytale.baychat.core.storage.AppPrefsStore
 import com.baytale.baychat.core.storage.AppUserPrefs
 import com.baytale.baychat.core.storage.MediaDownloadHelper
@@ -453,59 +452,13 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         observeAppForegroundState()
         observeIncomingNotificationActions()
         observeLanDirectState()
-        observePushRegistration()
         registerNetworkMonitor()
         if (_uiState.value.privacyAccepted) {
-            PushManager.initIfConfigured(appContext)
             refreshServerConfig()
             refreshPublicRooms()
             checkForAppUpdate(manual = false, bypassThrottle = true)
             startNearbyPolling()
             autoReenterLastRoomIfNeeded()
-        }
-    }
-
-    // 监听极光系统级推送 RegistrationID 异步就绪回调，及时绑定到当前活跃房间
-    private fun observePushRegistration() {
-        viewModelScope.launch {
-            PushManager.registrationId.collect { regId ->
-                if (regId.isBlank()) return@collect
-                val room = _uiState.value.activeRoom ?: return@collect
-                syncPushRegistrationForRoom(room.roomCode, selfPeerId)
-            }
-        }
-    }
-
-    private fun syncPushRegistrationForRoom(roomCode: String, peerId: String) {
-        if (!PushManager.isConfigured()) return
-        val regId = PushManager.getRegistrationId(appContext)
-        if (regId.isBlank()) return
-        val clientId = _uiState.value.profile.clientId
-        if (clientId.isBlank()) return
-        val brand = listOf(Build.BRAND, Build.MANUFACTURER)
-            .map { it.trim() }
-            .filter { it.isNotEmpty() }
-            .distinct()
-            .joinToString("/")
-        viewModelScope.launch {
-            runCatching {
-                api.registerPushDevice(
-                    roomCode = roomCode,
-                    clientId = clientId,
-                    peerId = peerId,
-                    registrationId = regId,
-                    brand = brand,
-                )
-            }
-        }
-    }
-
-    private fun unregisterPushDeviceAsync(roomCode: String) {
-        if (!PushManager.isConfigured()) return
-        val clientId = _uiState.value.profile.clientId
-        if (clientId.isBlank()) return
-        viewModelScope.launch {
-            runCatching { api.unregisterPushDevice(roomCode = roomCode, clientId = clientId) }
         }
     }
 
@@ -701,7 +654,6 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     fun acceptPrivacyPolicy() {
         store.setPrivacyAccepted(true)
         _uiState.update { it.copy(privacyAccepted = true) }
-        PushManager.initIfConfigured(appContext)
         refreshServerConfig()
         refreshPublicRooms()
         checkForAppUpdate(manual = false, bypassThrottle = true)
@@ -3013,7 +2965,6 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                             }
                     }
                     newMesh.syncPeers(peerMap.keys.toList())
-                    syncPushRegistrationForRoom(code, selfPeerId)
                     refreshForegroundBanner()
                     maybeRecoverPendingCameraCapture(code)
                     val autoTarget = _uiState.value.pendingShare.autoSendRoomCode
@@ -6325,9 +6276,6 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     fun leaveRoom() {
         cancelVoiceRecording()
         val room = _uiState.value.activeRoom
-        if (room != null) {
-            unregisterPushDeviceAsync(room.roomCode)
-        }
         // B15：最后一人主动离开临时房时清理过期最近记录
         if (room != null && room.isEphemeral && room.peers.isEmpty()) {
             removeRecentRoom(room.roomCode)
@@ -6356,7 +6304,6 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         val room = requireRoomOwner() ?: return
         cancelVoiceRecording()
         val curCode = room.roomCode
-        unregisterPushDeviceAsync(curCode)
         store.clearLastActiveRoom()
         signaling?.destroyRoom()
         outgoingInvitePollingJob?.cancel()

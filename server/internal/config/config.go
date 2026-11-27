@@ -28,9 +28,6 @@ type Config struct {
 	PickupMaxFileMB      int    // 取件码单文件大小上限（MB），默认 200MB
 	PickupMaxTotalMB     int    // 单个取件码总大小上限（MB），默认 500MB
 	PickupDiskQuotaMB    int    // 取件码全局磁盘配额（MB），默认 5120MB
-	JPushAppKey          string // 极光推送 AppKey（留空表示暂未启用系统级离线推送）
-	JPushMasterSecret    string // 极光推送 MasterSecret
-	JPushEndpoint        string // 极光推送 REST API 地址
 }
 
 // Load 从环境变量加载服务端配置并提供合理默认值
@@ -61,9 +58,6 @@ func Load() *Config {
 		PickupMaxFileMB:      clampInt(getEnvInt("PICKUP_MAX_FILE_MB", 200), 1, 10240),
 		PickupMaxTotalMB:     clampInt(getEnvInt("PICKUP_MAX_TOTAL_MB", 500), 1, 51200),
 		PickupDiskQuotaMB:    clampInt(getEnvInt("PICKUP_DISK_QUOTA_MB", 5120), 10, 1048576),
-		JPushAppKey:          strings.TrimSpace(os.Getenv("JPUSH_APP_KEY")),
-		JPushMasterSecret:    strings.TrimSpace(os.Getenv("JPUSH_MASTER_SECRET")),
-		JPushEndpoint:        getEnv("JPUSH_ENDPOINT", "https://api.jpush.cn/v3/push"),
 	}
 }
 

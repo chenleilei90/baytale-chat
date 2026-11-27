@@ -7,14 +7,13 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
-// 读取本地签名配置与可选推送配置（绝不提交真实密钥库与密码至开源仓库）
+// 读取本地签名配置（绝不提交真实密钥库与密码至开源仓库）
 val keystoreProps = Properties().apply {
     val file = rootProject.file("keystore.properties")
     if (file.exists()) {
         file.inputStream().use { load(it) }
     }
 }
-val jpushAppKey = (System.getenv("JPUSH_APPKEY") ?: keystoreProps.getProperty("jpushAppKey") ?: "").trim()
 
 android {
     namespace = "com.baytale.baychat"
@@ -24,15 +23,11 @@ android {
         applicationId = "com.baytale.baychat"
         minSdk = 26
         targetSdk = 35
-        versionCode = 29
-        versionName = "1.8.2"
+        versionCode = 30
+        versionName = "1.8.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "DEFAULT_SERVER_URL", "\"https://chat.baytale.com\"")
-        buildConfigField("String", "JPUSH_APPKEY", "\"$jpushAppKey\"")
-        manifestPlaceholders["JPUSH_PKGNAME"] = "com.baytale.baychat"
-        manifestPlaceholders["JPUSH_APPKEY"] = jpushAppKey
-        manifestPlaceholders["JPUSH_CHANNEL"] = "default"
 
         vectorDrawables {
             useSupportLibrary = true
@@ -64,7 +59,6 @@ android {
         debug {
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
-            manifestPlaceholders["JPUSH_PKGNAME"] = "com.baytale.baychat.debug"
         }
         release {
             isMinifyEnabled = true
@@ -133,9 +127,6 @@ dependencies {
     // 无 GMS 依赖的原生扫码 + 离线二维码生成（同时兼容谷歌商店与小米等国内机型）
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
     implementation("com.google.zxing:core:3.5.3")
-
-    // 极光全机型系统级离线推送（自动适配华为/小米/OPPO/vivo/荣耀/FCM 底层通道，未配置 AppKey 时安全空转）
-    implementation("cn.jiguang.sdk:jpush:5.2.4")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")

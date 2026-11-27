@@ -20,7 +20,6 @@ import (
 	"baychat/server/internal/nearby"
 	"baychat/server/internal/pickup"
 	"baychat/server/internal/plane"
-	"baychat/server/internal/push"
 	"baychat/server/internal/ratelimit"
 	"baychat/server/internal/room"
 	"baychat/server/internal/static"
@@ -59,28 +58,6 @@ func main() {
 	planeSvc := plane.NewService(hub)
 	defer planeSvc.Close()
 
-	pushSvc := push.NewService(cfg.DataDir, cfg.JPushAppKey, cfg.JPushMasterSecret, cfg.JPushEndpoint)
-	hub.SetMessageSavedHook(func(roomCode string, msg room.CachedMessage, onlinePeerIDs map[string]bool) {
-		var preview string
-		switch msg.Kind {
-		case "text":
-			preview = msg.Text
-		case "image":
-			preview = "[图片]"
-		case "audio":
-			preview = "[语音消息]"
-		case "file_notice":
-			if strings.TrimSpace(msg.FileName) != "" {
-				preview = "[文件] " + strings.TrimSpace(msg.FileName)
-			} else {
-				preview = "[文件消息]"
-			}
-		default:
-			preview = "收到一条新消息"
-		}
-		pushSvc.NotifyOfflineRoomPeers(roomCode, msg.SenderID, msg.SenderName, preview, onlinePeerIDs)
-	})
-
 	limiter := ratelimit.New(map[string]ratelimit.Rule{
 		"POST /api/rooms":               {Capacity: 30, Window: 10 * time.Minute},
 		"GET /api/rooms/{code}":         {Capacity: 120, Window: time.Minute},
@@ -96,8 +73,6 @@ func main() {
 		"POST /api/report":              {Capacity: 10, Window: time.Hour},
 		"POST /api/asr":                 {Capacity: 30, Window: time.Minute},
 		"POST /api/asr/correct":         {Capacity: 30, Window: time.Minute},
-		"POST /api/push/register":       {Capacity: 60, Window: time.Minute},
-		"POST /api/push/unregister":     {Capacity: 60, Window: time.Minute},
 	})
 
 	// 定期清理限流器的空闲令牌桶
@@ -142,7 +117,6 @@ func main() {
 			"pickupMaxFileMB":      cfg.PickupMaxFileMB,
 			"pickupMaxTotalMB":     cfg.PickupMaxTotalMB,
 			"hasTurn":              hasTurn,
-			"pushEnabled":          pushSvc.Enabled(),
 			"iceServers":           iceServers,
 		})
 	})
@@ -450,46 +424,6 @@ func main() {
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
-	})
-
-	// 注册系统级离线推送设备凭证（极光 RegistrationID，支持覆盖全机型厂商系统底层通道）
-	mux.HandleFunc("POST /api/push/register", func(w http.ResponseWriter, r *http.Request) {
-		if !allowRate(limiter, "POST /api/push/register", w, r) {
-			return
-		}
-		var reg push.DeviceRegistration
-		if err := json.NewDecoder(io.LimitReader(r.Body, 16*1024)).Decode(&reg); err != nil {
-			writeError(w, http.StatusBadRequest, "INVALID_JSON", "请求体 JSON 格式错误")
-			return
-		}
-		if err := pushSvc.Register(reg); err != nil {
-			writeError(w, http.StatusBadRequest, "INVALID_PUSH_REG", err.Error())
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":          true,
-			"pushEnabled": pushSvc.Enabled(),
-		})
-	})
-
-	// 注销客户端在指定房间内的推送登记
-	mux.HandleFunc("POST /api/push/unregister", func(w http.ResponseWriter, r *http.Request) {
-		if !allowRate(limiter, "POST /api/push/unregister", w, r) {
-			return
-		}
-		var req struct {
-			RoomCode string `json:"roomCode"`
-			ClientID string `json:"clientId"`
-		}
-		if err := json.NewDecoder(io.LimitReader(r.Body, 8*1024)).Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, "INVALID_JSON", "请求体 JSON 格式错误")
-			return
-		}
-		if err := pushSvc.Unregister(req.RoomCode, req.ClientID); err != nil {
-			writeError(w, http.StatusInternalServerError, "UNREGISTER_FAILED", err.Error())
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
 
 	// ================= 取件码离线投递接口 =================
