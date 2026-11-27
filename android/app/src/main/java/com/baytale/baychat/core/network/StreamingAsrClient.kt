@@ -53,64 +53,71 @@ class StreamingAsrClient(
             }
         }
         val req = Request.Builder().url(wsUrl).build()
-        val ws = okHttpClient.newWebSocket(
-            req,
-            object : WebSocketListener() {
-                override fun onOpen(webSocket: WebSocket, response: Response) {
-                    if (closedManually.get()) {
-                        runCatching { webSocket.cancel() }
-                        return
-                    }
-                    val buffered: ByteArray
-                    val shouldSendEofNow: Boolean
-                    synchronized(lock) {
-                        wsOpen = true
-                        buffered = pendingBuffer.toByteArray()
-                        pendingBuffer.reset()
-                        shouldSendEofNow = eofSent.get()
-                    }
-                    // 分 3200B（100ms）帧发出已缓冲的历史音频，触发实时滚动出字
-                    var offset = 0
-                    while (offset < buffered.size && !closedManually.get()) {
-                        val chunkLen = minOf(STREAM_CHUNK_BYTES, buffered.size - offset)
-                        webSocket.send(buffered.toByteString(offset, chunkLen))
-                        offset += chunkLen
-                    }
-                    if (shouldSendEofNow && !closedManually.get()) {
-                        webSocket.send("eof")
-                    }
-                }
-
-                override fun onMessage(webSocket: WebSocket, text: String) {
-                    if (closedManually.get()) return
-                    val obj = runCatching { json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return
-                    val recognized = obj["text"]?.jsonPrimitive?.content?.trim() ?: return
-                    val isFinal = obj["final"]?.jsonPrimitive?.booleanOrNull == true
-                    latestText = recognized
-                    onTextUpdate(recognized, isFinal)
-                    if (isFinal) {
-                        if (!finalDeferred.isCompleted) {
-                            finalDeferred.complete(recognized)
+        val ws = runCatching {
+            okHttpClient.newWebSocket(
+                req,
+                object : WebSocketListener() {
+                    override fun onOpen(webSocket: WebSocket, response: Response) {
+                        if (closedManually.get()) {
+                            runCatching { webSocket.cancel() }
+                            return
+                        }
+                        val buffered: ByteArray
+                        val shouldSendEofNow: Boolean
+                        synchronized(lock) {
+                            wsOpen = true
+                            buffered = pendingBuffer.toByteArray()
+                            pendingBuffer.reset()
+                            shouldSendEofNow = eofSent.get()
+                        }
+                        // 分 3200B（100ms）帧发出已缓冲的历史音频，触发实时滚动出字
+                        var offset = 0
+                        while (offset < buffered.size && !closedManually.get()) {
+                            val chunkLen = minOf(STREAM_CHUNK_BYTES, buffered.size - offset)
+                            webSocket.send(buffered.toByteString(offset, chunkLen))
+                            offset += chunkLen
+                        }
+                        if (shouldSendEofNow && !closedManually.get()) {
+                            webSocket.send("eof")
                         }
                     }
-                }
 
-                override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                    if (!finalDeferred.isCompleted) {
-                        finalDeferred.complete(latestText.takeIf { it.isNotBlank() })
+                    override fun onMessage(webSocket: WebSocket, text: String) {
+                        if (closedManually.get()) return
+                        val obj = runCatching { json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return
+                        val recognized = obj["text"]?.jsonPrimitive?.content?.trim() ?: return
+                        val isFinal = obj["final"]?.jsonPrimitive?.booleanOrNull == true
+                        latestText = recognized
+                        onTextUpdate(recognized, isFinal)
+                        if (isFinal) {
+                            if (!finalDeferred.isCompleted) {
+                                finalDeferred.complete(recognized)
+                            }
+                        }
                     }
-                }
 
-                override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                    if (!closedManually.get()) {
-                        onError(t.message ?: "实时语音连接异常")
+                    override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                        if (!finalDeferred.isCompleted) {
+                            finalDeferred.complete(latestText.takeIf { it.isNotBlank() })
+                        }
                     }
-                    if (!finalDeferred.isCompleted) {
-                        finalDeferred.complete(latestText.takeIf { it.isNotBlank() })
+
+                    override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                        if (!closedManually.get()) {
+                            onError(t.message ?: "实时语音连接异常")
+                        }
+                        if (!finalDeferred.isCompleted) {
+                            finalDeferred.complete(latestText.takeIf { it.isNotBlank() })
+                        }
                     }
-                }
-            },
-        )
+                },
+            )
+        }.onFailure { err ->
+            onError(err.message ?: "无法建立实时语音转文字连接")
+            if (!finalDeferred.isCompleted) {
+                finalDeferred.complete(latestText.takeIf { it.isNotBlank() })
+            }
+        }.getOrNull()
         webSocket = ws
     }
 

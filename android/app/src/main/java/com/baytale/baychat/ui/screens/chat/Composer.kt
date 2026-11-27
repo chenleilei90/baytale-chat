@@ -116,6 +116,7 @@ import com.baytale.baychat.ui.theme.BaySpacing
 import com.baytale.baychat.ui.theme.BayTheme
 import com.baytale.baychat.ui.theme.BayType
 import java.text.BreakIterator
+import kotlinx.coroutines.delay
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.math.hypot
 
@@ -176,16 +177,31 @@ fun Composer(
     // 语音按住/手势态（SEND / CANCEL / CONVERT_TEXT / EDIT_TEXT，供按钮视觉与底层指针循环共享）
     var isPressingVoice by remember { mutableStateOf(false) }
     var voiceZone by remember { mutableStateOf(VoiceGestureZone.SEND) }
-    var isInputFocused by remember { mutableStateOf(false) }
+    var isTextInputActive by rememberSaveable(roomCode) { mutableStateOf(false) }
+    var textFieldHasFocused by remember { mutableStateOf(false) }
     val latestIsRecording by rememberUpdatedState(state.isRecordingVoice)
     val latestHapticEnabled by rememberUpdatedState(state.prefs.hapticEnabled)
     val latestOnZoneChanged by rememberUpdatedState(onVoiceZoneChanged)
     val latestOnDirectTranscribeModeChanged by rememberUpdatedState(onDirectTranscribeModeChanged)
     val latestInputEmpty by rememberUpdatedState(inputText.isEmpty())
-    val latestInputFocused by rememberUpdatedState(isInputFocused)
     val upThresholdPx = remember(density) { with(density) { 72.dp.toPx() } }
     val horizThresholdPx = remember(density) { with(density) { 48.dp.toPx() } }
     val touchSlopPx = remember(density) { with(density) { 16.dp.toPx() } }
+
+    LaunchedEffect(voiceMode, showAttachmentPanel, showEmojiPanel, inputText) {
+        if (voiceMode || ((showAttachmentPanel || showEmojiPanel) && inputText.isEmpty())) {
+            isTextInputActive = false
+            textFieldHasFocused = false
+        }
+    }
+
+    LaunchedEffect(isTextInputActive) {
+        if (isTextInputActive) {
+            delay(16L)
+            runCatching { inputFocusRequester.requestFocus() }
+            keyboardController?.show()
+        }
+    }
 
     // 1. 多文件选择器（SAF 零权限）
     val filePicker = rememberLauncherForActivityResult(
@@ -571,36 +587,58 @@ fun Composer(
                         maxLines = 1,
                     )
                 }
-            } else {
-                // 文字输入框：未点击前显示“可按住 转文字”，短按直接弹键盘打字；未聚焦空内容时长按启动语音转文字（左滑取消、右滑编辑、原地松手直接发送文字）
+            } else if (!isTextInputActive && inputText.isEmpty()) {
+                // 未点击态：纯手势隔离胶囊（不挂载 BasicTextField 且按下即消费事件），杜绝长按转文字时误抢焦点弹出输入法
                 Box(
                     modifier = Modifier
                         .weight(1f)
+                        .heightIn(min = 44.dp)
+                        .clip(BayShapes.smShape)
+                        .background(colors.wechatPeerBubble)
                         .pointerInput(upThresholdPx, horizThresholdPx, touchSlopPx) {
                             awaitEachGesture {
-                                // 必须先挂起等待真正按下事件再判断状态，避免非空/录音期间在无事件时主线程空转卡死
-                                val down = awaitFirstDown(
-                                    requireUnconsumed = false,
-                                    pass = PointerEventPass.Initial,
-                                )
-                                if (!latestInputEmpty || latestIsRecording || latestInputFocused) return@awaitEachGesture
+                                val down = awaitFirstDown(requireUnconsumed = false)
+                                down.consume()
+                                if (latestIsRecording || !latestInputEmpty) return@awaitEachGesture
 
-                                val earlyExit = withTimeoutOrNull(280L) {
+                                var liftedEarly = false
+                                var movedTooFar = false
+                                withTimeoutOrNull(240L) {
                                     while (true) {
-                                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                                        val event = awaitPointerEvent()
                                         val change = event.changes.firstOrNull { it.id == down.id }
-                                            ?: return@withTimeoutOrNull true
-                                        if (!change.pressed) return@withTimeoutOrNull true
+                                        if (change == null) {
+                                            movedTooFar = true
+                                            break
+                                        }
                                         val dist = hypot(
                                             (change.position.x - down.position.x).toDouble(),
                                             (change.position.y - down.position.y).toDouble(),
                                         ).toFloat()
-                                        if (dist > touchSlopPx) return@withTimeoutOrNull true
+                                        change.consume()
+                                        if (!change.pressed) {
+                                            if (dist <= touchSlopPx) {
+                                                liftedEarly = true
+                                            } else {
+                                                movedTooFar = true
+                                            }
+                                            break
+                                        }
+                                        if (dist > touchSlopPx) {
+                                            movedTooFar = true
+                                            break
+                                        }
                                     }
-                                    @Suppress("UNREACHABLE_CODE")
-                                    true
                                 }
-                                if (earlyExit != null) return@awaitEachGesture
+                                if (liftedEarly) {
+                                    // 短按点击：切换至纯原生 BayTextField 并弹出输入法打字
+                                    onShowAttachmentPanelChange(false)
+                                    onShowEmojiPanelChange(false)
+                                    textFieldHasFocused = false
+                                    isTextInputActive = true
+                                    return@awaitEachGesture
+                                }
+                                if (movedTooFar) return@awaitEachGesture
 
                                 val granted = ContextCompat.checkSelfPermission(
                                     context,
@@ -621,7 +659,7 @@ fun Composer(
                                 voiceZone = VoiceGestureZone.CONVERT_TEXT
                                 latestOnZoneChanged(VoiceGestureZone.CONVERT_TEXT)
 
-                                val started = vm.startVoiceRecording()
+                                val started = vm.startVoiceRecording(autoStartTranscribe = true)
                                 if (!started) {
                                     isPressingVoice = false
                                     voiceZone = VoiceGestureZone.SEND
@@ -629,11 +667,10 @@ fun Composer(
                                     latestOnDirectTranscribeModeChanged(false)
                                     return@awaitEachGesture
                                 }
-                                vm.onVoiceEnterConvertZone()
 
                                 try {
                                     while (true) {
-                                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                                        val event = awaitPointerEvent()
                                         val change = event.changes.firstOrNull { it.id == down.id }
                                         if (change == null) {
                                             if (latestIsRecording) {
@@ -686,34 +723,48 @@ fun Composer(
                                     latestOnDirectTranscribeModeChanged(false)
                                 }
                             }
-                        },
+                        }
+                        .padding(horizontal = BaySpacing.md, vertical = 10.dp),
+                    contentAlignment = Alignment.CenterStart,
                 ) {
-                    BayTextField(
-                        value = inputText,
-                        onValueChange = { next ->
-                            onInputTextChange(next)
-                            vm.updateDraft(roomCode, next)
-                            vm.onDraftTypingChanged(next.isNotBlank())
-                        },
-                        placeholder = if (isInputFocused) "" else "可按住 转文字",
-                        singleLine = false,
-                        maxLines = 4,
-                        containerColor = colors.wechatPeerBubble,
-                        focusedContainerColor = colors.wechatPeerBubble,
-                        minHeightDp = 44.dp,
-                        verticalPadding = 10.dp,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .focusRequester(inputFocusRequester)
-                            .onFocusChanged { focusState ->
-                                isInputFocused = focusState.isFocused
-                                if (focusState.isFocused) {
-                                    if (showAttachmentPanel) onShowAttachmentPanelChange(false)
-                                    if (showEmojiPanel) onShowEmojiPanelChange(false)
-                                }
-                            },
+                    Text(
+                        text = "可按住 转文字",
+                        style = BayType.body,
+                        color = colors.textTertiary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
+            } else {
+                // 打字激活态：纯原生 BayTextField（外层零手势拦截），失焦且内容为空时自动还原为「可按住 转文字」
+                BayTextField(
+                    value = inputText,
+                    onValueChange = { next ->
+                        onInputTextChange(next)
+                        vm.updateDraft(roomCode, next)
+                        vm.onDraftTypingChanged(next.isNotBlank())
+                    },
+                    placeholder = "",
+                    singleLine = false,
+                    maxLines = 4,
+                    containerColor = colors.wechatPeerBubble,
+                    focusedContainerColor = colors.wechatPeerBubble,
+                    minHeightDp = 44.dp,
+                    verticalPadding = 10.dp,
+                    modifier = Modifier
+                        .weight(1f)
+                        .focusRequester(inputFocusRequester)
+                        .onFocusChanged { focusState ->
+                            if (focusState.isFocused) {
+                                textFieldHasFocused = true
+                                if (showAttachmentPanel) onShowAttachmentPanelChange(false)
+                                if (showEmojiPanel) onShowEmojiPanelChange(false)
+                            } else if (textFieldHasFocused && inputText.isEmpty()) {
+                                textFieldHasFocused = false
+                                isTextInputActive = false
+                            }
+                        },
+                )
             }
 
             // 表情按钮（常驻固定 4 栏布局，与语音模式、软键盘和附件面板互斥切换）
@@ -728,6 +779,8 @@ fun Composer(
                         focusManager.clearFocus()
                         keyboardController?.hide()
                     } else {
+                        textFieldHasFocused = false
+                        isTextInputActive = true
                         runCatching { inputFocusRequester.requestFocus() }
                         keyboardController?.show()
                     }

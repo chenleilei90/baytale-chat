@@ -94,6 +94,7 @@ import com.baytale.baychat.service.OtaUiEvent
 import com.baytale.baychat.service.OtaUpdateState
 import com.baytale.baychat.service.OtaUpdateStatus
 import com.baytale.baychat.service.TransferForegroundService
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -417,6 +418,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
     // 语音双轨录制（AudioRecord PCM + WAV 原声）与实时流式转文字控制器
     private var audioRecord: AudioRecord? = null
     private var voiceOutputFile: File? = null
+    private var voiceFileDeferred: CompletableDeferred<File?>? = null
     private var voiceRecordStartAt: Long = 0L
     private var voiceRecordTickerJob: Job? = null
     private var voiceCaptureJob: Job? = null
@@ -4228,8 +4230,8 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         runCatching { am.abandonAudioFocusRequest(req) }
     }
 
-    // G10：AudioRecord 双轨语音对讲（同步落盘 16kHz WAV 原声 + 随时滑入流式转文字 + 语音输入态广播）
-    fun startVoiceRecording(): Boolean {
+    // G10：AudioRecord 双轨语音对讲（硬件初始化与写盘全部运行于 Dispatchers.IO，确保主线程 0ms 零阻塞）
+    fun startVoiceRecording(autoStartTranscribe: Boolean = false): Boolean {
         if (_uiState.value.activeRoom == null) {
             showToast("请先进入房间")
             return false
@@ -4241,124 +4243,162 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
             return false
         }
         stopVoicePlayback()
-        if (_uiState.value.isRecordingVoice) return false
+        if (_uiState.value.isRecordingVoice || voiceRecordingLoopActive) return false
 
-        return runCatching {
-            val sampleRate = 16_000
-            val minBuf = AudioRecord.getMinBufferSize(
-                sampleRate,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
+        streamingAsrClient?.cancel()
+        streamingAsrClient = null
+        voicePcmDataBytes = 0L
+        voiceAmplitudeScaled.set(0)
+        voiceRecordStartAt = System.currentTimeMillis()
+        lastVoiceTypingSentAt = voiceRecordStartAt
+        voiceRecordingLoopActive = true
+        val fileDeferred = CompletableDeferred<File?>()
+        voiceFileDeferred = fileDeferred
+
+        mesh?.broadcastTyping(true, "voice")
+        _uiState.update {
+            it.copy(
+                isRecordingVoice = true,
+                voiceRecordDurationMs = 0L,
+                voiceAmplitude = 0f,
+                voiceTranscribeText = "",
+                isTranscribingDraft = false,
             )
-            require(minBuf > 0) { "设备暂不支持 16kHz 麦克风采集" }
-            val bufSize = maxOf(minBuf * 2, 6400)
-            val recorder = AudioRecord(
-                MediaRecorder.AudioSource.MIC,
-                sampleRate,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
-                bufSize,
-            )
-            check(recorder.state == AudioRecord.STATE_INITIALIZED) { "麦克风初始化失败" }
-
-            val dir = File(appContext.cacheDir, "voice_rec").apply { mkdirs() }
-            val outFile = File(dir, "voice_${System.currentTimeMillis()}.wav")
-            val fos = FileOutputStream(outFile)
-            // 先预留 44 字节 RIFF/WAV 文件头，录音结束再回写准确字节长度
-            fos.write(ByteArray(44))
-
-            requestRecordAudioFocus()
-            recorder.startRecording()
-
-            val pcmStream = ByteArrayOutputStream()
-            audioRecord = recorder
-            voiceOutputFile = outFile
-            voicePcmDataBytes = 0L
-            voiceAmplitudeScaled.set(0)
-            synchronized(pcmLock) {
-                voicePcmHistoryStream = pcmStream
-            }
-            streamingAsrClient?.cancel()
-            streamingAsrClient = null
-
-            voiceRecordStartAt = System.currentTimeMillis()
-            lastVoiceTypingSentAt = voiceRecordStartAt
-            voiceRecordingLoopActive = true
-            mesh?.broadcastTyping(true, "voice")
-
-            _uiState.update {
-                it.copy(
-                    isRecordingVoice = true,
-                    voiceRecordDurationMs = 0L,
-                    voiceAmplitude = 0f,
-                    voiceTranscribeText = "",
-                    isTranscribingDraft = false,
-                )
-            }
-
-            voiceCaptureJob = viewModelScope.launch(Dispatchers.IO) {
-                val readBuf = ByteArray(3200) // 100ms 16kHz 16-bit mono PCM
-                try {
-                    while (isActive && voiceRecordingLoopActive) {
-                        val read = runCatching { recorder.read(readBuf, 0, readBuf.size) }.getOrDefault(-1)
-                        if (read <= 0) {
-                            if (!voiceRecordingLoopActive || read < 0) break
-                            continue
-                        }
-                        fos.write(readBuf, 0, read)
-                        voicePcmDataBytes += read.toLong()
-                        synchronized(pcmLock) {
-                            if (voicePcmHistoryStream === pcmStream && pcmStream.size() < 2 * 1024 * 1024) {
-                                pcmStream.write(readBuf, 0, read)
-                            }
-                        }
-                        streamingAsrClient?.sendPcmChunk(readBuf, read)
-                        // 计算单帧 PCM RMS 振幅驱动声波跳动
-                        var sumSq = 0.0
-                        val sampleCount = read / 2
-                        var i = 0
-                        while (i + 1 < read) {
-                            val lo = readBuf[i].toInt() and 0xFF
-                            val hi = readBuf[i + 1].toInt()
-                            val sample = (hi shl 8) or lo
-                            sumSq += sample.toDouble() * sample.toDouble()
-                            i += 2
-                        }
-                        val rms = if (sampleCount > 0) sqrt(sumSq / sampleCount) / 32768.0 else 0.0
-                        val norm = (rms.toFloat() * 4.2f).coerceIn(0f, 1f)
-                        voiceAmplitudeScaled.set((norm * 1000f).toInt())
-                    }
-                } finally {
-                    runCatching { fos.flush() }
-                    runCatching { fos.close() }
-                    writeWavHeader(outFile, voicePcmDataBytes)
-                    // 仅在采集循环彻底退出后由同一 IO 线程安全释放原生 AudioRecord，防止跨线程 release 并发崩溃
-                    runCatching { recorder.stop() }
-                    runCatching { recorder.release() }
-                    synchronized(pcmLock) {
-                        if (voicePcmHistoryStream === pcmStream) {
-                            pcmStream.reset()
-                            voicePcmHistoryStream = null
-                        }
-                    }
-                    if (audioRecord === recorder) {
-                        audioRecord = null
-                    }
-                    if (voiceOutputFile == outFile) {
-                        voiceOutputFile = null
-                    }
-                    abandonRecordAudioFocus()
-                }
-            }
-
-            startVoiceTickerLoop()
-            true
-        }.getOrElse { err ->
-            releaseVoiceRecorder()
-            mesh?.broadcastTyping(false, "voice")
-            showToast("无法启动录音：${err.message}")
-            false
         }
+        startVoiceTickerLoop()
+
+        voiceCaptureJob = viewModelScope.launch(Dispatchers.IO) {
+            var recorder: AudioRecord? = null
+            var fos: FileOutputStream? = null
+            var outFile: File? = null
+            val pcmStream = ByteArrayOutputStream()
+            try {
+                if (!voiceRecordingLoopActive) return@launch
+
+                val sampleRate = 16_000
+                val minBuf = AudioRecord.getMinBufferSize(
+                    sampleRate,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                )
+                require(minBuf > 0) { "设备暂不支持 16kHz 麦克风采集" }
+                val bufSize = maxOf(minBuf * 2, 6400)
+                val created = AudioRecord(
+                    MediaRecorder.AudioSource.MIC,
+                    sampleRate,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                    bufSize,
+                )
+                recorder = created
+                check(created.state == AudioRecord.STATE_INITIALIZED) { "麦克风初始化失败" }
+
+                if (!voiceRecordingLoopActive) return@launch
+
+                val dir = File(appContext.cacheDir, "voice_rec").apply { mkdirs() }
+                val targetFile = File(dir, "voice_${System.currentTimeMillis()}.wav")
+                outFile = targetFile
+                val stream = FileOutputStream(targetFile)
+                fos = stream
+                // 先预留 44 字节 RIFF/WAV 文件头，录音结束再回写准确字节长度
+                stream.write(ByteArray(44))
+
+                audioRecord = created
+                voiceOutputFile = targetFile
+                synchronized(pcmLock) {
+                    voicePcmHistoryStream = pcmStream
+                }
+                fileDeferred.complete(targetFile)
+
+                requestRecordAudioFocus()
+                if (!voiceRecordingLoopActive) return@launch
+                created.startRecording()
+
+                if (autoStartTranscribe && voiceRecordingLoopActive) {
+                    onVoiceEnterConvertZone()
+                }
+
+                val readBuf = ByteArray(3200) // 100ms 16kHz 16-bit mono PCM
+                while (isActive && voiceRecordingLoopActive) {
+                    val read = runCatching { created.read(readBuf, 0, readBuf.size) }.getOrDefault(-1)
+                    if (read <= 0) {
+                        if (!voiceRecordingLoopActive || read < 0) break
+                        continue
+                    }
+                    stream.write(readBuf, 0, read)
+                    voicePcmDataBytes += read.toLong()
+                    synchronized(pcmLock) {
+                        if (voicePcmHistoryStream === pcmStream && pcmStream.size() < 2 * 1024 * 1024) {
+                            pcmStream.write(readBuf, 0, read)
+                        }
+                    }
+                    streamingAsrClient?.sendPcmChunk(readBuf, read)
+                    // 计算单帧 PCM RMS 振幅驱动声波跳动
+                    var sumSq = 0.0
+                    val sampleCount = read / 2
+                    var i = 0
+                    while (i + 1 < read) {
+                        val lo = readBuf[i].toInt() and 0xFF
+                        val hi = readBuf[i + 1].toInt()
+                        val sample = (hi shl 8) or lo
+                        sumSq += sample.toDouble() * sample.toDouble()
+                        i += 2
+                    }
+                    val rms = if (sampleCount > 0) sqrt(sumSq / sampleCount) / 32768.0 else 0.0
+                    val norm = (rms.toFloat() * 4.2f).coerceIn(0f, 1f)
+                    voiceAmplitudeScaled.set((norm * 1000f).toInt())
+                }
+            } catch (err: Throwable) {
+                if (!fileDeferred.isCompleted) {
+                    fileDeferred.complete(null)
+                }
+                val stillActive = voiceRecordingLoopActive
+                voiceRecordingLoopActive = false
+                if (stillActive) {
+                    withContext(Dispatchers.Main.immediate) {
+                        voiceRecordTickerJob?.cancel()
+                        voiceRecordTickerJob = null
+                        streamingAsrClient?.cancel()
+                        streamingAsrClient = null
+                        mesh?.broadcastTyping(false, "voice")
+                        _uiState.update {
+                            it.copy(
+                                isRecordingVoice = false,
+                                voiceRecordDurationMs = 0L,
+                                voiceAmplitude = 0f,
+                                voiceTranscribeText = "",
+                            )
+                        }
+                        showToast("无法启动录音：${err.message ?: "麦克风被占用"}")
+                    }
+                }
+                runCatching { outFile?.delete() }
+            } finally {
+                if (!fileDeferred.isCompleted) {
+                    fileDeferred.complete(outFile)
+                }
+                runCatching { fos?.flush() }
+                runCatching { fos?.close() }
+                outFile?.let { f -> runCatching { writeWavHeader(f, voicePcmDataBytes) } }
+                // 仅在采集循环彻底退出后由同一 IO 线程安全释放原生 AudioRecord，防止跨线程 release 并发崩溃
+                runCatching { recorder?.stop() }
+                runCatching { recorder?.release() }
+                synchronized(pcmLock) {
+                    if (voicePcmHistoryStream === pcmStream) {
+                        pcmStream.reset()
+                        voicePcmHistoryStream = null
+                    }
+                }
+                if (recorder != null && audioRecord === recorder) {
+                    audioRecord = null
+                }
+                if (outFile != null && voiceOutputFile === outFile) {
+                    voiceOutputFile = null
+                }
+                abandonRecordAudioFocus()
+            }
+        }
+        return true
     }
 
     private fun startVoiceTickerLoop() {
@@ -4418,7 +4458,8 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
 
         val elapsedMs = (System.currentTimeMillis() - voiceRecordStartAt).coerceAtLeast(0L)
         val liveDraft = _uiState.value.voiceTranscribeText.trim()
-        val file = voiceOutputFile
+        val fallbackFile = voiceOutputFile
+        val fileDeferred = voiceFileDeferred
         val rec = audioRecord
         val captureJob = voiceCaptureJob
         val activeAsr = streamingAsrClient
@@ -4426,21 +4467,21 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         audioRecord = null
         voiceCaptureJob = null
         voiceOutputFile = null
+        voiceFileDeferred = null
 
         voiceRecordingLoopActive = false
         _uiState.update { it.copy(voiceAmplitude = 0f) }
 
-        if (file == null || elapsedMs < MIN_VOICE_DURATION_MS) {
+        if (elapsedMs < MIN_VOICE_DURATION_MS) {
             _uiState.update { it.copy(isRecordingVoice = false, voiceRecordDurationMs = 0L, voiceAmplitude = 0f, voiceTranscribeText = "") }
             activeAsr?.cancel()
             viewModelScope.launch(Dispatchers.IO) {
                 runCatching { rec?.stop() }
                 runCatching { captureJob?.join() }
-                runCatching { file?.delete() }
+                val actualFile = runCatching { fileDeferred?.await() }.getOrNull() ?: fallbackFile
+                runCatching { actualFile?.delete() }
             }
-            if (elapsedMs < MIN_VOICE_DURATION_MS) {
-                showToast("说话时间太短")
-            }
+            showToast("说话时间太短")
             return
         }
 
@@ -4456,17 +4497,18 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                 )
             }
             viewModelScope.launch {
-                withContext(Dispatchers.IO) {
+                val actualFile = withContext(Dispatchers.IO) {
                     runCatching { rec?.stop() }
                     runCatching { captureJob?.join() }
+                    runCatching { fileDeferred?.await() }.getOrNull() ?: fallbackFile
                 }
                 var finalText = activeAsr?.finishAndAwaitFinal(timeoutMs = 1_800L)?.trim().orEmpty()
-                if (finalText.isBlank() && file.exists() && file.length() > 44L) {
-                    finalText = runCatching { api.transcribeAudio(file) }.getOrDefault("").trim()
+                if (finalText.isBlank() && actualFile != null && actualFile.exists() && actualFile.length() > 44L) {
+                    finalText = runCatching { api.transcribeAudio(actualFile) }.getOrDefault("").trim()
                 }
                 val merged = finalText.ifBlank { liveDraft }.trim()
                 withContext(Dispatchers.IO) {
-                    runCatching { file.delete() }
+                    runCatching { actualFile?.delete() }
                 }
                 _uiState.update { it.copy(isTranscribingDraft = false, voiceTranscribeText = "") }
                 if (merged.isNotBlank()) {
@@ -4484,7 +4526,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                 isRecordingVoice = false,
                 voiceRecordDurationMs = 0L,
                 voiceAmplitude = 0f,
-                voiceDraftAudioPath = file.absolutePath,
+                voiceDraftAudioPath = fallbackFile?.absolutePath,
                 voiceDraftDurationMs = durationSec * 1000L,
                 isTranscribingDraft = true,
                 showVoiceTranscribePanel = true,
@@ -4492,16 +4534,25 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         }
 
         viewModelScope.launch {
-            withContext(Dispatchers.IO) {
+            val actualFile = withContext(Dispatchers.IO) {
                 // 先于后台唤醒 HAL 中的 recorder.read()，等待写入与 native release 安全落定后再终稿识别
                 runCatching { rec?.stop() }
                 runCatching { captureJob?.join() }
+                runCatching { fileDeferred?.await() }.getOrNull() ?: fallbackFile
+            }
+            if (actualFile == null) {
+                _uiState.update { it.copy(isTranscribingDraft = false) }
+                showToast("录音初始化未完成，请重试")
+                return@launch
+            }
+            if (_uiState.value.voiceDraftAudioPath.isNullOrBlank()) {
+                _uiState.update { it.copy(voiceDraftAudioPath = actualFile.absolutePath) }
             }
             var finalText = activeAsr?.finishAndAwaitFinal(timeoutMs = 1_800L)?.trim().orEmpty()
-            if (finalText.isBlank() && file.exists() && file.length() > 44L) {
-                finalText = runCatching { api.transcribeAudio(file) }.getOrDefault("").trim()
+            if (finalText.isBlank() && actualFile.exists() && actualFile.length() > 44L) {
+                finalText = runCatching { api.transcribeAudio(actualFile) }.getOrDefault("").trim()
             }
-            if (_uiState.value.voiceDraftAudioPath == file.absolutePath) {
+            if (_uiState.value.voiceDraftAudioPath == actualFile.absolutePath) {
                 _uiState.update { st ->
                     val merged = finalText.ifBlank { st.voiceTranscribeText }
                     st.copy(
@@ -4705,7 +4756,8 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         mesh?.broadcastTyping(false, "voice")
 
         val elapsedMs = (System.currentTimeMillis() - voiceRecordStartAt).coerceAtLeast(0L)
-        val file = voiceOutputFile
+        val fallbackFile = voiceOutputFile
+        val fileDeferred = voiceFileDeferred
         val rec = audioRecord
         val captureJob = voiceCaptureJob
         val activeAsr = streamingAsrClient
@@ -4713,6 +4765,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         audioRecord = null
         voiceCaptureJob = null
         voiceOutputFile = null
+        voiceFileDeferred = null
 
         voiceRecordingLoopActive = false
         _uiState.update {
@@ -4726,9 +4779,10 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         activeAsr?.cancel()
 
         viewModelScope.launch {
-            withContext(Dispatchers.IO) {
+            val file = withContext(Dispatchers.IO) {
                 runCatching { rec?.stop() }
                 runCatching { captureJob?.join() }
+                runCatching { fileDeferred?.await() }.getOrNull() ?: fallbackFile
             }
             if (!send || file == null || !file.exists() || file.length() <= 44L || elapsedMs < MIN_VOICE_DURATION_MS) {
                 withContext(Dispatchers.IO) { runCatching { file?.delete() } }
