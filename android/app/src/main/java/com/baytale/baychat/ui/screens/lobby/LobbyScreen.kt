@@ -284,19 +284,6 @@ fun LobbyScreen(
             onDismiss = { vm.dismissSwitchRoom() },
         )
     }
-
-    // B12/B23：进程冷启动 10 分钟内恢复上次活跃房间确认弹窗
-    val recoverable = state.lastRecoverableRoom
-    if (recoverable != null && state.activeRoom == null && state.privacyAccepted) {
-        BayDialog(
-            title = "恢复上次会话 #${recoverable.code}？",
-            message = "检测到你不久前退出了房间 #${recoverable.code}，是否立即重新加入？",
-            confirmText = "重新加入",
-            onConfirm = { vm.recoverLastRoom() },
-            dismissText = "暂不恢复",
-            onDismiss = { vm.dismissRecoverRoom() },
-        )
-    }
 }
 
 @Composable

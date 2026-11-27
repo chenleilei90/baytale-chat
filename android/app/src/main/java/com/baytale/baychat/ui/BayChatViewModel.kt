@@ -464,7 +464,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    // 只要用户未主动退房，冷启动或系统强杀重建后自动无感回到原房间
+    // 只要用户未主动退房，冷启动或系统强杀重建后自动无感回到原房间（全程静默，不弹窗、不播放提示音、不弹过期 Toast）
     private fun autoReenterLastRoomIfNeeded() {
         if (autoReenterAttempted) return
         autoReenterAttempted = true
@@ -475,6 +475,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
             val snap = _uiState.value
             if (snap.activeRoom != null) return@launch
             if (snap.pendingShare.hasContent || snap.pendingJoinCode != null || snap.pendingAppAction != null) {
+                _uiState.update { it.copy(lastRecoverableRoom = null) }
                 return@launch
             }
             val target = snap.lastRecoverableRoom ?: return@launch
@@ -482,14 +483,16 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                 .onSuccess { info ->
                     if (_uiState.value.activeRoom != null) return@onSuccess
                     if (info.hasPassword) {
-                        if (target.password.isBlank()) return@onSuccess
+                        if (target.password.isBlank()) {
+                            _uiState.update { it.copy(lastRecoverableRoom = null) }
+                            return@onSuccess
+                        }
                         runCatching { api.verifyRoomPassword(info.code, target.password) }
                             .onFailure { err ->
                                 if (err is ApiException && err.errorCode == "WRONG_PASSWORD") {
                                     store.clearLastActiveRoom()
-                                    _uiState.update { it.copy(lastRecoverableRoom = null) }
-                                    showToast("上次房间 #${target.code} 密码已变更，请重新输入进入")
                                 }
+                                _uiState.update { it.copy(lastRecoverableRoom = null) }
                                 return@onSuccess
                             }
                     }
@@ -499,14 +502,14 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                         password = target.password,
                         initialInfo = info,
                         ownerToken = target.ownerToken,
+                        playJoinSound = false,
                     )
                 }
                 .onFailure { err ->
                     if (err is ApiException && (err.errorCode == "ROOM_NOT_FOUND" || err.errorCode == "ROOM_EXPIRED")) {
                         store.clearLastActiveRoom()
-                        _uiState.update { it.copy(lastRecoverableRoom = null) }
-                        showToast("上次房间 #${target.code} 已结束")
                     }
+                    _uiState.update { it.copy(lastRecoverableRoom = null) }
                 }
         }
     }
@@ -2379,6 +2382,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
         password: String,
         initialInfo: RoomSummary?,
         ownerToken: String = initialInfo?.ownerToken.orEmpty(),
+        playJoinSound: Boolean = true,
     ) {
         tearDownSession(stopService = false)
         awaitingInitialHistorySync = true
@@ -2925,7 +2929,7 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
                     val wasReconnected = hasJoinedRoomOnce && hadRoomWsDisconnect
                     hasJoinedRoomOnce = true
                     hadRoomWsDisconnect = false
-                    if (joinSoundPlayed.compareAndSet(false, true)) {
+                    if (playJoinSound && joinSoundPlayed.compareAndSet(false, true)) {
                         playSoundIfEnabled { playRoomJoin() }
                     }
                     val peerMap = env.peers.orEmpty()
@@ -6366,9 +6370,10 @@ class BayChatViewModel(application: Application) : AndroidViewModel(application)
             restoreRoom()
             return
         }
-        val last = _uiState.value.lastRecoverableRoom
+        val last = _uiState.value.lastRecoverableRoom ?: loadValidRecoverableRoom()
         if (last != null && (roomCode.isBlank() || last.code.equals(roomCode, ignoreCase = true))) {
-            recoverLastRoom()
+            _uiState.update { it.copy(lastRecoverableRoom = null) }
+            joinRoomInternal(last.code, last.password, overrideOwnerToken = last.ownerToken)
             return
         }
         if (roomCode.isNotBlank()) {
